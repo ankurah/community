@@ -96,7 +96,7 @@ jobs:
             --min-instances 0
             --max-instances 1
             --timeout 900
-            --allow-unauthenticated
+            --no-invoker-iam-check
             --set-secrets "DATABASE_URL=${DATABASE_URL_SECRET}:latest"
             --quiet
           )
