@@ -1,0 +1,113 @@
+name: Deploy
+
+# Builds one container (durable node + SPA) and deploys it to Cloud Run.
+# Runs after CI succeeds on main, or on manual dispatch. Authenticates to GCP
+# via Workload Identity Federation — no long-lived service-account keys.
+#
+# Required repo variables (Settings → Actions → Variables) — see docs/deploy.md:
+#   GCP_PROJECT_ID, GCP_REGION, GCP_WORKLOAD_IDENTITY_PROVIDER,
+#   GCP_DEPLOY_SERVICE_ACCOUNT, ARTIFACT_REGISTRY_REPOSITORY, CLOUD_RUN_SERVICE,
+#   CLOUD_RUN_SERVICE_ACCOUNT, CLOUD_SQL_INSTANCE_CONNECTION_NAME,
+#   DATABASE_URL_SECRET, SMOKE_BASE_URL
+
+on:
+  workflow_dispatch:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+  actions: read
+  id-token: write
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+env:
+  DEPLOY_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+  GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+  GCP_REGION: ${{ vars.GCP_REGION || 'us-central1' }}
+  ARTIFACT_REGISTRY_REPOSITORY: ${{ vars.ARTIFACT_REGISTRY_REPOSITORY || 'community' }}
+  CLOUD_RUN_SERVICE: ${{ vars.CLOUD_RUN_SERVICE || 'community' }}
+  CLOUD_RUN_SERVICE_ACCOUNT: ${{ vars.CLOUD_RUN_SERVICE_ACCOUNT || '' }}
+  DATABASE_URL_SECRET: ${{ vars.DATABASE_URL_SECRET || 'community-database-url' }}
+  CLOUD_SQL_INSTANCE_CONNECTION_NAME: ${{ vars.CLOUD_SQL_INSTANCE_CONNECTION_NAME || '' }}
+  SMOKE_BASE_URL: ${{ vars.SMOKE_BASE_URL || '' }}
+
+jobs:
+  deploy:
+    name: Build and Deploy
+    runs-on: ubuntu-latest
+    if: ${{ (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success') && vars.GCP_WORKLOAD_IDENTITY_PROVIDER != '' && vars.GCP_DEPLOY_SERVICE_ACCOUNT != '' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.DEPLOY_SHA }}
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Configure Docker auth
+        run: gcloud auth configure-docker "${GCP_REGION}-docker.pkg.dev" --quiet
+
+      - name: Generate image tag
+        id: image
+        run: |
+          image="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${ARTIFACT_REGISTRY_REPOSITORY}/community-server:${DEPLOY_SHA}"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.image.outputs.image }}
+          cache-from: type=gha,scope=community-server
+          cache-to: type=gha,mode=max,scope=community-server
+
+      - name: Deploy to Cloud Run
+        run: |
+          # Durable node: a single instance keeps in-memory state coherent
+          # (--max-instances 1); it still scales to zero when idle.
+          args=(
+            run deploy "${CLOUD_RUN_SERVICE}"
+            --project "${GCP_PROJECT_ID}"
+            --region "${GCP_REGION}"
+            --platform managed
+            --image "${{ steps.image.outputs.image }}"
+            --port 8080
+            --cpu 1
+            --memory 512Mi
+            --concurrency 40
+            --min-instances 0
+            --max-instances 1
+            --timeout 900
+            --allow-unauthenticated
+            --set-secrets "DATABASE_URL=${DATABASE_URL_SECRET}:latest"
+            --quiet
+          )
+          if [ -n "${CLOUD_SQL_INSTANCE_CONNECTION_NAME}" ]; then
+            args+=(--add-cloudsql-instances "${CLOUD_SQL_INSTANCE_CONNECTION_NAME}")
+          fi
+          if [ -n "${CLOUD_RUN_SERVICE_ACCOUNT}" ]; then
+            args+=(--service-account "${CLOUD_RUN_SERVICE_ACCOUNT}")
+          fi
+          gcloud "${args[@]}"
+
+      - name: Smoke health check
+        if: ${{ env.SMOKE_BASE_URL != '' }}
+        run: curl --fail --show-error --silent "${SMOKE_BASE_URL}/health"

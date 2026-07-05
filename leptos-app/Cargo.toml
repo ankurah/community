@@ -1,0 +1,35 @@
+[package]
+name = "leptos-app"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+leptos = { version = "0.8.12", features = ["csr"] }
+console_error_panic_hook = "0.1"
+ankurah = { version = "=0.9.0", features = ["derive", "wasm"] }
+community-model = { path = "../model", features = ["wasm"] }
+ankurah-storage-indexeddb-wasm = "=0.9.0"
+ankurah-signals = { version = "=0.9.0", features = ["reactive-graph"] }
+wasm-bindgen-futures = "=0.4.55"
+ankurah-websocket-client-wasm = "=0.9.0"
+ankurah-virtual-scroll = "0.9.0"
+web-sys = { version = "=0.3.82", features = [
+    "Window", "Location", "UrlSearchParams", "Url", "History", "Element", "DomRect", "Node", "NodeList", "EventTarget", "HtmlElement", "Storage",
+    "AudioContext", "AudioBuffer", "AudioBufferSourceNode", "GainNode", "AudioParam", "AudioNode",
+    "AudioDestinationNode", "AudioContextState", "Response", "Document"
+] }
+js-sys = "=0.3.82"
+tracing-wasm = "0.2.1"
+tracing = "0.1.41"
+lazy_static = "1.5.0"
+send_wrapper = "0.6.0"
+# Pin the wasm-bindgen family to a set compatible with ankurah-signals 0.9.0
+# (newer wasm-bindgen breaks its build); Cargo.lock is gitignored so generated
+# projects resolve fresh and would otherwise pick an incompatible version.
+wasm-bindgen = "=0.2.105"
+qrcode = "0.14.1"
+
+##### wasm: force the "js" RNG backend for getrandom 0.2 (pulled transitively via
+##### ankurah's rand 0.8). getrandom 0.3+ is handled by .cargo/config.toml rustflags.
+getrandom = { version = "0.2", features = ["js"] }
+#####

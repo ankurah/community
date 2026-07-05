@@ -1,0 +1,12 @@
+# Trunk build/serve config for the Leptos frontend.
+#
+# The serve port and the `/ws` proxy to the backend are supplied at runtime by
+# dev.sh (and the e2e harness) via CLI flags, using randomized ports:
+#
+#   trunk serve --address 0.0.0.0 --port $WEB_PORT \
+#       --proxy-backend ws://127.0.0.1:$SERVER_PORT/ws --proxy-ws
+#
+# so the app talks to a single same-origin URL and the backend port is never
+# hard-coded. Use ./dev.sh for the fully wired-up stack.
+[build]
+target = "index.html"

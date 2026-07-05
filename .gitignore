@@ -1,0 +1,40 @@
+# Rust
+/target/
+**/*.rs.bk
+# NOTE: Cargo.lock IS committed — this is a deployed app (not a template), so
+# builds are reproducible and the Docker image builds with `--locked`.
+
+# Trunk / WASM build output
+leptos-app/dist/
+*.wasm
+
+# Local config: ignore only the akdev-managed root patch. Nested .cargo dirs
+# (e.g. leptos-app/.cargo/config.toml, which carries wasm build flags) are kept.
+/.cargo/
+
+# e2e (Playwright)
+e2e/node_modules/
+e2e/test-results/
+e2e/package-lock.json
+
+# Dev runner (local, per-checkout state)
+.dev-ports
+.dev-pid
+.dev-log
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*

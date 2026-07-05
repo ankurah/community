@@ -1,0 +1,25 @@
+[package]
+name = "community-model"
+version = "0.6.0"
+edition = "2021"
+publish = false
+
+[features]
+default = []
+# Leptos uses ankurah-signals' reactive-graph integration, NOT the React JS
+# bindings — so forward only ankurah/wasm here (ankurah/react would pull in
+# ankurah-signals' `#[wasm_bindgen(module = "react")]` glue and break the app).
+wasm = ["dep:wasm-bindgen", "ankurah/wasm"]
+
+[dependencies]
+ankurah = { version = "=0.9.0", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+wasm-bindgen = { version = "0.2", optional = true }
+
+##### patch - something is wrong with the uuid crate for wasm
+getrandom = { version = "0.3", features = ["wasm_js"] }
+chrono = { version = "0.4", default-features = false, features = ["serde"] }
+###### 
+
+tracing = { version = "0.1" }

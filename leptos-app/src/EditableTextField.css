@@ -1,0 +1,28 @@
+.editableText {
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 4px;
+  transition: background-color 0.2s;
+  line-height: 20px;
+  display: inline-block;
+}
+
+.editableText:hover {
+  background-color: rgba(255, 255, 255, 0.1);
+}
+
+.editableInput {
+  padding: 4px 8px;
+  border: 1px solid #4299e1;
+  border-radius: 4px;
+  background-color: white;
+  color: #2d3748;
+  font-size: 14px;
+  font-family: inherit;
+  outline: none;
+  min-width: 120px;
+  line-height: 20px;
+  height: 28px;
+  box-sizing: border-box;
+}
+

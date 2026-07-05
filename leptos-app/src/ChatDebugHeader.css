@@ -1,0 +1,87 @@
+.debugHeader {
+  flex-shrink: 0;
+  padding: 8px 16px;
+  background-color: #1a202c;
+  border-bottom: 1px solid #2d3748;
+  font-size: 11px;
+  font-family: monospace;
+  color: #a0aec0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.debugRow {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+
+.debugLabel {
+  color: #718096;
+  font-weight: 600;
+}
+
+.debugValue {
+  color: #e2e8f0;
+}
+
+.debugValue.trigger-active {
+  color: #fc8181;
+  font-weight: bold;
+}
+
+.debugValue.boundary-hit {
+  color: #48bb78;
+  font-weight: bold;
+}
+
+.debugStatus {
+  font-size: 14px;
+  margin-left: 4px;
+}
+
+.queryText {
+  color: #63b3ed;
+}
+
+.mode-live {
+  color: #48bb78;
+  font-weight: bold;
+}
+
+.mode-backward {
+  color: #f6ad55;
+  font-weight: bold;
+}
+
+.mode-forward {
+  color: #fc8181;
+  font-weight: bold;
+}
+
+.debugButton {
+  padding: 4px 12px;
+  margin-left: 8px;
+  background-color: #4a5568;
+  color: white;
+  border: 1px solid #718096;
+  border-radius: 4px;
+  font-size: 11px;
+  font-family: monospace;
+  cursor: pointer;
+  transition: background-color 0.2s;
+}
+
+.debugButton:hover {
+  background-color: #2d3748;
+}
+
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}

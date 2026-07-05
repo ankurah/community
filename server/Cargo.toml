@@ -1,0 +1,28 @@
+[package]
+name = "community-server"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+ankurah = { version = "=0.9.0" }
+ankurah-websocket-server = { version = "=0.9.0" }
+ankurah-storage-sled = { version = "=0.9.0", optional = true }
+ankurah-storage-postgres = { version = "=0.9.0", optional = true }
+community-model = { path = "../model" }
+
+anyhow = "1.0"
+axum = { version = "0.8", features = ["ws"] }
+tokio = { version = "1.38", features = ["macros", "net", "rt-multi-thread"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["fs", "trace"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+[features]
+# Storage engine for the durable (server) node. `cargo generate` sets `default`
+# to your choice (Sled or Postgres); dev.sh reads it back to decide whether to
+# bring up a Postgres container. Change the default here to switch engines.
+default = ["postgres"]
+sled = ["dep:ankurah-storage-sled"]
+postgres = ["dep:ankurah-storage-postgres"]

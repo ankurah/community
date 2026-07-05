@@ -1,0 +1,5 @@
+# wasm RNG backend for getrandom 0.3+ (used transitively via ankurah on
+# wasm32-unknown-unknown). The getrandom 0.2 line in Cargo.toml handles the
+# older 0.2 backend via its "js" feature.
+[build]
+rustflags = ["--cfg", "getrandom_backend=\"wasm_js\""]

@@ -1,0 +1,30 @@
+# Keep the build context small and cache-stable. The image builds the server
+# and the SPA from source (Cargo.toml/lock + model/ + server/ + leptos-app/).
+.git/
+target/
+**/target/
+leptos-app/dist/
+**/dist/
+*.wasm
+
+# Node / e2e
+e2e/node_modules/
+e2e/test-results/
+e2e/package-lock.json
+
+# Dev runner + local state
+.dev-log
+.dev-ports
+.dev-pid
+.dev-vite.log
+*.log
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Dev-only ankurah patch tooling (not present in a fresh generate, but guard it)
+akdev
+/.cargo/

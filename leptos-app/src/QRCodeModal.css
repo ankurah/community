@@ -1,0 +1,100 @@
+.qrModalOverlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-color: rgba(0, 0, 0, 0.7);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 20px;
+}
+
+.qrModalContent {
+  background: white;
+  border-radius: 12px;
+  padding: 30px;
+  max-width: 400px;
+  width: 100%;
+  box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
+}
+
+.qrModalHeader {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 20px;
+}
+
+.qrModalHeader h2 {
+  margin: 0;
+  font-size: 24px;
+  color: #2d3748;
+}
+
+.qrCloseButton {
+  background: none;
+  border: none;
+  font-size: 32px;
+  color: #718096;
+  cursor: pointer;
+  padding: 0;
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+}
+
+.qrCloseButton:hover {
+  color: #2d3748;
+}
+
+.qrCodeContainer {
+  display: flex;
+  justify-content: center;
+  background: white;
+  padding: 20px;
+  border-radius: 8px;
+  margin-bottom: 20px;
+}
+
+.qrUrlDisplay {
+  background: #f7fafc;
+  padding: 12px;
+  border-radius: 6px;
+  margin-bottom: 16px;
+  word-break: break-all;
+}
+
+.qrUrlDisplay code {
+  font-family: 'Courier New', monospace;
+  font-size: 13px;
+  color: #4a5568;
+}
+
+.qrInstructions {
+  text-align: center;
+  color: #718096;
+  font-size: 14px;
+  margin: 0;
+}
+
+@media (max-width: 480px) {
+  .qrModalContent {
+    padding: 20px;
+  }
+
+  .qrCodeContainer svg {
+    width: 200px !important;
+    height: 200px !important;
+  }
+
+  .qrModalHeader h2 {
+    font-size: 20px;
+  }
+}
+
