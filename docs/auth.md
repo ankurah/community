@@ -40,7 +40,7 @@ Claims: `sub` (stable — key `User` records on it), `email`, `name`. Resolve th
 endpoint URLs at runtime from discovery; re-fetch JWKS on an unknown `kid`.
 Libraries: `oidc-client-ts` (JS) or the `openidconnect` crate (Rust/wasm).
 
-## The ankurah bridge (still to design)
+## The ankurah bridge — chosen: federate-and-remint
 
 Getting the idp.to ID token is client-side; making ankurah **trust** it is the
 open question. `ankurah-jwt-auth`'s `JwtAgent` verifies a single RS256 PEM key —
@@ -74,22 +74,23 @@ Decide when wiring. Either way, a verified identity → `JwtContext::from_claims
 }
 ```
 
-## Status / blockers
+## Status — implemented (2026-07-06)
 
-- Discovery + JWKS + our registration: **live now** on `id.idp.to`.
-- `/oidc/authorize` + `/oidc/token`: **activating shortly** (idp.to #19/#20) —
-  we'll get an "it's live" ping. Safe to implement the flow now; it lights up
-  with no change on our side.
-- **Dev redirect mismatch:** the registered dev URI is
-  `http://localhost:5173/auth/callback`, but our trunk dev server uses a
-  randomized port. When wiring OIDC, pin a dev port (or have Daniel re-register
-  the real one — a 30-second change on the idp.to side).
+Federate-and-remint is wired and deployed:
 
-## When wiring it, touch only
+- **Server** (`server/src/main.rs`, `server/src/oidc.rs`) — `JwtAgent::new_durable`
+  (+`watcher`) loading `policy.json`; `POST /auth/session` validates the idp.to ID
+  token (JWKS/RS256/`iss`/`aud`/`exp`/`nonce`), upserts a `User` keyed on `oidc_sub`,
+  and mints an ankurah session token. Signing key from `ANKURAH_JWT_SIGNING_KEY`
+  (Secret Manager `community-jwt-signing-key` in prod; ephemeral dev key otherwise).
+  `CorsLayer::permissive()` for cross-origin (RN) callers.
+- **Client** (`leptos-app/src/main.rs`, `leptos-app/src/auth.rs`) — PKCE (S256)
+  sign-in, `/auth/callback` code exchange, then federation to `/auth/session`; the
+  chat UI is gated behind sign-in; the ephemeral `JwtAgent` syncs policy from the
+  durable node (`jwtpolicy` collection) before reads/writes are allowed.
+- **idp.to**: discovery, JWKS, `/oidc/authorize`, and `/oidc/token` are all live,
+  and the token endpoint sends permissive CORS, so the in-browser exchange works.
 
-- `leptos-app/src/main.rs` — replace `ensure_user()` with the PKCE sign-in +
-  callback handling; map `sub` → ankurah `User` (create-on-first-login).
-- `server/src/main.rs` — swap `PermissiveAgent` → `JwtAgent::new_durable`; add
-  the mint route if going federate-and-remint; add `policy.json` + the ankurah
-  signing key (from Secret Manager in prod). Add `CorsLayer` if any client is
-  cross-origin.
+Follow-ups: dev redirect-URI mismatch (issue #4 — the trunk dev server's randomized
+port vs the registered `localhost:5173`); OIDC-aware e2e (the anonymous specs are
+skipped for now); policy hardening (issue #3 — e.g. scope `user` writes to self).

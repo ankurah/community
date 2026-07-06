@@ -1,4 +1,5 @@
-use ankurah::{policy::DEFAULT_CONTEXT as c, Node, PermissiveAgent};
+use ankurah::{Context, Node};
+use ankurah_jwt_auth::{Duration, JwtAgent, JwtClaims, JwtContext, SigningKeys};
 use ankurah_websocket_server::WebsocketServer;
 use anyhow::{Context as _, Result};
 use axum::{
@@ -6,19 +7,24 @@ use axum::{
     extract::State,
     http::{Request, StatusCode},
     response::{IntoResponse, Response},
-    routing::get,
-    Router,
+    routing::{get, post},
+    Json, Router,
 };
-use community_model::{Room, RoomView};
+use community_model::{Room, RoomView, User, UserView};
+use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tower::ServiceExt as _;
 use tower_http::{
+    cors::CorsLayer,
     services::{ServeDir, ServeFile},
     trace::TraceLayer,
 };
-use tracing::{info, Level};
+use tracing::{info, warn, Level};
+
+mod oidc;
+use oidc::{OidcVerifier, VerifiedIdentity};
 
 #[cfg(all(feature = "sled", not(feature = "postgres")))]
 use ankurah_storage_sled::SledStorageEngine;
@@ -46,10 +52,22 @@ async fn make_storage() -> Result<Storage> {
     Ok(Postgres::open(&uri).await?)
 }
 
-/// Shared HTTP state: where the built SPA (`trunk build`) lives on disk.
+/// Ankurah access-token lifetime. Long-ish because there is no refresh flow yet:
+/// when it expires the client re-runs the OIDC dance (usually click-free while
+/// the idp.to session is still valid).
+const TOKEN_TTL_HOURS: u64 = 12;
+
+/// Shared HTTP state.
 #[derive(Clone)]
 struct AppState {
+    /// Where the built SPA (`trunk build`) lives on disk.
     static_dir: PathBuf,
+    /// Privileged (Root) context, for room seeding and `User` upserts.
+    system_ctx: Context,
+    /// Our RS256 keypair — mints ankurah session tokens after federation.
+    signing_keys: SigningKeys,
+    /// Validates incoming idp.to ID tokens against their JWKS.
+    oidc: Arc<OidcVerifier>,
 }
 
 #[tokio::main]
@@ -58,31 +76,57 @@ async fn main() -> Result<()> {
 
     // Initialize storage engine (Sled or Postgres — see this crate's features).
     let storage = make_storage().await?;
-    let node = Node::new_durable(Arc::new(storage), PermissiveAgent::new());
+
+    // RS256 signing key: env PEM in prod (Secret Manager), generated dev key otherwise.
+    let signing_keys = load_signing_keys()?;
+
+    // Policy file: `/app/policy.json` in the image (POLICY_PATH), repo-root
+    // `policy.json` in dev (server runs with cwd = repo root). `new_durable`
+    // reads it now; the `watcher` feature publishes it to the `jwtpolicy`
+    // collection so ephemeral clients can sync roles + verifying key.
+    let policy_path = std::env::var("POLICY_PATH").unwrap_or_else(|_| "policy.json".to_string());
+    let agent = JwtAgent::new_durable(signing_keys.clone(), &policy_path)
+        .with_context(|| format!("failed to load policy from {policy_path}"))?;
+
+    let node = Node::new_durable(Arc::new(storage), agent);
 
     node.system.wait_loaded().await;
     if node.system.root().is_none() {
         node.system.create().await?;
     }
+    node.system.wait_system_ready().await;
+
+    // Privileged context that bypasses RBAC — used for seeding + upserts.
+    let system_ctx = node.context_async(JwtContext::system()).await;
 
     // Seed the default community rooms (idempotent).
-    ensure_default_rooms(&node).await?;
+    ensure_default_rooms(&system_ctx).await?;
 
     // Where the built SPA lives. In prod the container copies `trunk build`
     // output here; in dev the dir is absent and trunk serves the SPA itself
     // (only /ws is proxied to this server), so the SPA fallback simply 404s.
     let static_dir = std::env::var("STATIC_DIR").unwrap_or_else(|_| "static".to_string());
-    let state = AppState { static_dir: PathBuf::from(static_dir) };
+    let state = AppState {
+        static_dir: PathBuf::from(static_dir),
+        system_ctx,
+        signing_keys,
+        oidc: Arc::new(OidcVerifier::from_env()),
+    };
 
-    // One axum app serves the Ankurah /ws endpoint AND the static SPA on a
-    // single port, so the browser client is same-origin (mirrors idp.to). The
-    // ws upgrade handler comes straight from ankurah-websocket-server.
+    // One axum app serves the Ankurah /ws endpoint, the OIDC mint endpoint, AND
+    // the static SPA on a single port, so the browser client is same-origin
+    // (mirrors idp.to). The ws upgrade handler comes straight from
+    // ankurah-websocket-server.
     let ws_server = WebsocketServer::new(node);
     let app = Router::new()
         .route("/ws", get(ws_server.route_handler()))
         .route("/health", get(health))
+        .route("/auth/session", post(auth_session))
         .fallback(spa_fallback)
         .with_state(state)
+        // Permissive CORS so cross-origin callers (e.g. a native/RN client on a
+        // different origin) can POST /auth/session. Same-origin web is unaffected.
+        .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http());
 
     // Cloud Run injects PORT; dev.sh sets SERVER_PORT; default 8080.
@@ -101,12 +145,107 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+/// Load the RS256 signing key. In prod `ANKURAH_JWT_SIGNING_KEY` holds the PEM
+/// (from Secret Manager); in dev we generate an ephemeral key and warn. We
+/// deliberately do NOT persist a generated key to disk, to keep private keys out
+/// of the working tree — the tradeoff is that dev sessions reset on restart.
+fn load_signing_keys() -> Result<SigningKeys> {
+    match std::env::var("ANKURAH_JWT_SIGNING_KEY") {
+        Ok(pem) if !pem.trim().is_empty() => {
+            info!("loading JWT signing key from ANKURAH_JWT_SIGNING_KEY");
+            SigningKeys::from_pem(&pem).context("parse ANKURAH_JWT_SIGNING_KEY as PEM")
+        }
+        _ => {
+            warn!("ANKURAH_JWT_SIGNING_KEY unset — generating an ephemeral dev signing key (sessions reset on restart)");
+            SigningKeys::generate().context("generate dev signing key")
+        }
+    }
+}
+
 async fn health() -> &'static str {
     "ok"
 }
 
+#[derive(Deserialize)]
+struct SessionRequest {
+    /// The idp.to ID token obtained by the client's PKCE code exchange.
+    id_token: String,
+    /// The nonce the client stashed before redirecting (checked against the
+    /// token's `nonce` claim, when present).
+    #[serde(default)]
+    nonce: Option<String>,
+}
+
+#[derive(Serialize)]
+struct SessionResponse {
+    /// A freshly minted ankurah session token (RS256, signed by us).
+    token: String,
+}
+
+/// Federate-and-remint: validate an idp.to ID token, upsert the `User` keyed on
+/// its `sub`, and return an ankurah session token the client attaches to its
+/// node context. This is the only trust boundary — everything downstream is
+/// enforced by `JwtAgent` against `policy.json`.
+async fn auth_session(
+    State(state): State<AppState>,
+    Json(req): Json<SessionRequest>,
+) -> Result<Json<SessionResponse>, (StatusCode, String)> {
+    let identity = state
+        .oidc
+        .verify(&req.id_token, req.nonce.as_deref())
+        .await
+        .map_err(|e| (StatusCode::UNAUTHORIZED, format!("invalid ID token: {e}")))?;
+
+    let user_id = upsert_user(&state.system_ctx, &identity)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("user upsert failed: {e}")))?;
+
+    let claims = JwtClaims {
+        sub: user_id,
+        roles: vec!["Member".to_string()],
+        email: identity.email.unwrap_or_default(),
+        name: identity.name,
+        custom: serde_json::Map::new(),
+    };
+
+    let token = state
+        .signing_keys
+        .sign(&claims, Duration::from_hours(TOKEN_TTL_HOURS))
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("failed to mint session token: {e}")))?;
+
+    Ok(Json(SessionResponse { token }))
+}
+
+/// Find the `User` for this idp.to subject, or create one. Returns the User
+/// entity id (base64) — this becomes the ankurah token `sub`, which the message
+/// write-scope (`user = $jwt.sub`) matches against `Message.user`.
+///
+/// We scan-and-filter rather than query by predicate: AnkQL has no string-escape
+/// syntax and this sidesteps Option-field indexing edge cases. Sign-in is not a
+/// hot path and the community user set is small.
+async fn upsert_user(ctx: &Context, identity: &VerifiedIdentity) -> Result<String> {
+    for user in ctx.fetch::<UserView>("true").await? {
+        if user.oidc_sub()?.as_deref() == Some(identity.sub.as_str()) {
+            return Ok(user.id().to_base64());
+        }
+    }
+
+    let display_name = identity
+        .name
+        .clone()
+        .or_else(|| identity.email.clone())
+        .unwrap_or_else(|| "Member".to_string());
+
+    let trx = ctx.begin();
+    let created = trx.create(&User { display_name, oidc_sub: Some(identity.sub.clone()) }).await?;
+    let user_id = created.id().to_base64();
+    trx.commit().await?;
+    Ok(user_id)
+}
+
 /// Serve the SPA: real files from `static_dir`, with `index.html` as the
-/// client-side-routing fallback. Backend paths never fall through to the SPA.
+/// client-side-routing fallback (this is what serves `/auth/callback`). Backend
+/// paths never fall through to the SPA.
 async fn spa_fallback(State(state): State<AppState>, request: Request<Body>) -> Response {
     let path = request.uri().path();
     if is_backend_path(path) {
@@ -122,22 +261,20 @@ async fn spa_fallback(State(state): State<AppState>, request: Request<Body>) -> 
 }
 
 fn is_backend_path(path: &str) -> bool {
-    path == "/ws" || path.starts_with("/ws/") || path == "/health"
+    path == "/ws" || path.starts_with("/ws/") || path == "/health" || path == "/auth/session"
 }
 
 /// Seed the default rooms for the community. Idempotent — only creates rooms
-/// that don't already exist, so it's safe to run on every boot.
-async fn ensure_default_rooms(node: &Node<Storage, PermissiveAgent>) -> Result<()> {
+/// that don't already exist, so it's safe to run on every boot. Runs under the
+/// privileged system context (bypasses RBAC).
+async fn ensure_default_rooms(ctx: &Context) -> Result<()> {
     const DEFAULT_ROOMS: &[&str] = &["general", "support", "announcements", "introductions"];
 
-    let context = node.context_async(c).await;
-
     for name in DEFAULT_ROOMS {
-        let query = format!("name = '{name}'");
-        let existing = context.fetch::<RoomView>(query.as_str()).await?;
+        let existing = ctx.fetch::<RoomView>(format!("name = '{name}'").as_str()).await?;
         if existing.is_empty() {
             info!("Creating '{name}' room");
-            let trx = context.begin();
+            let trx = ctx.begin();
             trx.create(&Room { name: name.to_string() }).await?;
             trx.commit().await?;
         }

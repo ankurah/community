@@ -1,0 +1,22 @@
+{
+  "roles": {
+    "Member": ["view", "post"]
+  },
+  "collections": {
+    "user": {
+      "read": "view",
+      "write": "post"
+    },
+    "room": {
+      "read": "view",
+      "write": "post"
+    },
+    "message": {
+      "read": "view",
+      "write": "post",
+      "scope": [
+        { "filter": "user = $jwt.sub", "applies_to": "write" }
+      ]
+    }
+  }
+}

@@ -77,6 +77,13 @@ pub fn Header(current_user: RwSignal<Option<UserView>>) -> impl IntoView {
                             if status.is_empty() { "Disconnected".to_string() } else { status }
                         }}
                     </div>
+                    <button
+                        class="signOutButton"
+                        on:click=move |_| crate::auth::sign_out()
+                        title="Sign out"
+                    >
+                        "Sign out"
+                    </button>
                 </div>
             </div>
             <Show when=move || show_qr_code.get()>

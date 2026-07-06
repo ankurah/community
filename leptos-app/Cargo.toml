@@ -10,13 +10,17 @@ ankurah = { version = "=0.9.0", features = ["derive", "wasm"] }
 community-model = { path = "../model", features = ["wasm"] }
 ankurah-storage-indexeddb-wasm = "=0.9.0"
 ankurah-signals = { version = "=0.9.0", features = ["reactive-graph"] }
+# JWT auth on wasm: client only calls parse_claims_unverified + JwtContext::from_claims
+# (pure-rust crypto; never generates/signs). No features needed on wasm.
+ankurah-jwt-auth = "=0.9.0"
 wasm-bindgen-futures = "=0.4.55"
 ankurah-websocket-client-wasm = "=0.9.0"
 ankurah-virtual-scroll = "0.9.0"
 web-sys = { version = "=0.3.82", features = [
     "Window", "Location", "UrlSearchParams", "Url", "History", "Element", "DomRect", "Node", "NodeList", "EventTarget", "HtmlElement", "Storage",
     "AudioContext", "AudioBuffer", "AudioBufferSourceNode", "GainNode", "AudioParam", "AudioNode",
-    "AudioDestinationNode", "AudioContextState", "Response", "Document"
+    "AudioDestinationNode", "AudioContextState", "Response", "Document",
+    "Request", "RequestInit", "Headers", "RequestMode"
 ] }
 js-sys = "=0.3.82"
 tracing-wasm = "0.2.1"
@@ -28,6 +32,12 @@ send_wrapper = "0.6.0"
 # projects resolve fresh and would otherwise pick an incompatible version.
 wasm-bindgen = "=0.2.105"
 qrcode = "0.14.1"
+
+# PKCE (S256) + parsing small OIDC/session JSON responses on the client.
+sha2 = "0.10"
+base64 = "0.22"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 
 ##### wasm: force the "js" RNG backend for getrandom 0.2 (pulled transitively via
 ##### ankurah's rand 0.8). getrandom 0.3+ is handled by .cargo/config.toml rustflags.

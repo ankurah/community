@@ -1,16 +1,19 @@
 use leptos::prelude::*;
 
-use ankurah::{Context, EntityId, Node, model::Mutable, policy::DEFAULT_CONTEXT as C, policy::PermissiveAgent};
+use ankurah::{Context, EntityId, Node};
+use ankurah_jwt_auth::{parse_claims_unverified, JwtAgent, JwtContext};
 use ankurah_signals::{CurrentObserver, ReactiveGraphObserver};
 use ankurah_storage_indexeddb_wasm::IndexedDBStorageEngine;
-use community_model::{RoomView, User, UserView};
 use ankurah_websocket_client_wasm::WebsocketClient;
+use community_model::{RoomView, UserView};
 use lazy_static::lazy_static;
 use send_wrapper::SendWrapper;
-use std::sync::{Arc, OnceLock};
-use wasm_bindgen_futures::spawn_local;
+use std::sync::{Arc, OnceLock, RwLock};
+use wasm_bindgen::JsValue;
+use wasm_bindgen_futures::{spawn_local, JsFuture};
 use web_sys::window;
 
+mod auth;
 mod chat;
 mod chat_debug_header;
 mod debug_overlay;
@@ -31,13 +34,23 @@ use notification_manager::NotificationManager;
 use room_list::RoomList;
 
 lazy_static! {
-    static ref NODE: OnceLock<Node<IndexedDBStorageEngine, PermissiveAgent>> = OnceLock::new();
+    static ref NODE: OnceLock<Node<IndexedDBStorageEngine, JwtAgent>> = OnceLock::new();
     static ref CLIENT: OnceLock<SendWrapper<WebsocketClient>> = OnceLock::new();
+    /// The ephemeral policy agent — used to poll `policy_ready()` after connect.
+    static ref AGENT: OnceLock<JwtAgent> = OnceLock::new();
+    /// The minted ankurah session token (present once signed in).
+    static ref AUTH_TOKEN: RwLock<Option<String>> = RwLock::new(None);
 }
 
-/// Get the global Ankurah context.
+/// Get the global authenticated Ankurah context. Only called from within the
+/// signed-in UI subtree (`ChatApp`), so the token/node are guaranteed present.
 pub fn ctx() -> Context {
-    NODE.get().expect("Node not initialized").context(C).expect("failed to create context")
+    let token = AUTH_TOKEN.read().expect("auth token lock poisoned").clone().expect("not authenticated");
+    let claims = parse_claims_unverified(&token).expect("stored token is a valid JWT");
+    NODE.get()
+        .expect("Node not initialized")
+        .context(JwtContext::from_claims(claims, token))
+        .expect("failed to create authenticated context")
 }
 
 /// Get the global WebSocket client.
@@ -53,21 +66,66 @@ fn main() {
             .build(),
     );
 
-    // Initialize the Ankurah node and LiveQuery asynchronously, then mount Leptos.
+    // Resolve auth, connect (if signed in), then mount Leptos.
     spawn_local(initialize());
 }
 
 async fn initialize() {
-    // Open IndexedDB-backed storage and create a Node.
-    let storage = IndexedDBStorageEngine::open("community_app").await.expect("failed to open IndexedDB storage");
-    let node = Node::new(Arc::new(storage), PermissiveAgent::new());
+    // Resolve the session token: either finish an OIDC callback, or restore one.
+    if auth::is_callback() {
+        match auth::handle_callback().await {
+            Ok(token) => {
+                auth::store_token(&token);
+                *AUTH_TOKEN.write().unwrap() = Some(token);
+            }
+            Err(e) => tracing::error!("OIDC sign-in failed: {}", e),
+        }
+        // Drop the `?code&state` from the URL and land on `/`, success or not.
+        if let Some(history) = window().and_then(|w| w.history().ok()) {
+            let _ = history.replace_state_with_url(&JsValue::NULL, "", Some("/"));
+        }
+    } else if let Some(token) = auth::stored_token() {
+        *AUTH_TOKEN.write().unwrap() = Some(token);
+    }
 
-    // Same-origin by default: connect to the host the app was served from (in
-    // dev, trunk proxies /ws to the backend, so the randomized server port is
-    // never hard-coded here; the ankurah WebsocketClient appends the /ws path).
-    // A cross-origin build (SPA on a CDN, backend on Cloud Run) can override the
-    // endpoint at build time with BACKEND_WS_URL, e.g. wss://community-api.ankurah.org.
-    let ws_url = match option_env!("BACKEND_WS_URL") {
+    // Only build/connect the node when signed in. Sign-in is a full-page
+    // redirect, so an anonymous connection would just be discarded on click.
+    if AUTH_TOKEN.read().unwrap().is_some() {
+        connect_node().await;
+    }
+
+    // Install the ReactiveGraphObserver at the base of the Ankurah observer stack
+    // so that Leptos components can observe Ankurah signals via reactive_graph.
+    CurrentObserver::set(ReactiveGraphObserver::new());
+
+    leptos::mount::mount_to_body(App);
+}
+
+/// Build the ephemeral node, connect to `/ws`, and wait until the server's
+/// policy (roles + verifying key) has synced into the local agent.
+async fn connect_node() {
+    let storage = IndexedDBStorageEngine::open("community_app").await.expect("failed to open IndexedDB storage");
+    let agent = JwtAgent::new_ephemeral();
+    let node = Node::new(Arc::new(storage), agent.clone());
+
+    let client = WebsocketClient::new(node.clone(), &ws_url()).expect("failed to create WebsocketClient");
+
+    // Wait for the client to join the remote system (metadata, collections, etc.).
+    node.system.wait_system_ready().await;
+
+    NODE.set(node).ok().expect("NODE already initialized");
+    CLIENT.set(SendWrapper::new(client)).ok().expect("CLIENT already initialized");
+    AGENT.set(agent).ok().expect("AGENT already initialized");
+
+    // Until the ephemeral agent has synced the durable node's `jwtpolicy` entity,
+    // its local policy is deny-all — so reads and writes would be rejected.
+    wait_policy_ready().await;
+}
+
+/// Same-origin `ws(s)://{host}` by default (trunk proxies `/ws` in dev). A
+/// cross-origin build can override the endpoint at build time with BACKEND_WS_URL.
+fn ws_url() -> String {
+    match option_env!("BACKEND_WS_URL") {
         Some(url) if !url.is_empty() => url.to_string(),
         _ => {
             let window = window().expect("no window available");
@@ -77,27 +135,67 @@ async fn initialize() {
             let ws_scheme = if protocol == "https:" { "wss" } else { "ws" };
             format!("{}://{}", ws_scheme, host)
         }
-    };
-
-    let client = WebsocketClient::new(node.clone(), &ws_url).expect("failed to create WebsocketClient");
-
-    // Wait for the client to join the remote system (metadata, collections, etc.).
-    node.system.wait_system_ready().await;
-
-    // Store node and client in global statics.
-    NODE.set(node).ok().expect("NODE already initialized");
-    CLIENT.set(SendWrapper::new(client)).ok().expect("CLIENT already initialized");
-
-    // Install the ReactiveGraphObserver at the base of the Ankurah observer stack
-    // so that Leptos components can observe Ankurah signals via reactive_graph.
-    CurrentObserver::set(ReactiveGraphObserver::new());
-
-    leptos::mount::mount_to_body(App);
+    }
 }
 
+/// Poll the ephemeral agent until it has synced policy + verifying key (or time
+/// out after ~5s and proceed — the UI degrades to "no rooms" rather than hanging).
+async fn wait_policy_ready() {
+    for _ in 0..100 {
+        if AGENT.get().map(JwtAgent::policy_ready).unwrap_or(false) {
+            return;
+        }
+        sleep_ms(50).await;
+    }
+    tracing::warn!("policy not ready after ~5s; proceeding (reads/writes may fail until it syncs)");
+}
+
+/// Await a browser `setTimeout`, so `wait_policy_ready` can yield without busy-looping.
+async fn sleep_ms(ms: i32) {
+    let promise = js_sys::Promise::new(&mut |resolve, _reject| {
+        if let Some(w) = window() {
+            let _ = w.set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, ms);
+        }
+    });
+    let _ = JsFuture::from(promise).await;
+}
+
+/// Top-level gate: the chat UI requires a signed-in session. Both sign-in and
+/// sign-out are full-page transitions, so this is resolved once at mount.
 #[component]
 pub fn App() -> impl IntoView {
-    // Build the rooms LiveQuery from the global context.
+    let signed_in = AUTH_TOKEN.read().map(|t| t.is_some()).unwrap_or(false);
+    if signed_in {
+        view! { <ChatApp /> }.into_any()
+    } else {
+        view! { <SignIn /> }.into_any()
+    }
+}
+
+/// The signed-out landing view.
+#[component]
+pub fn SignIn() -> impl IntoView {
+    let start = move |_| {
+        if let Err(e) = auth::start_sign_in() {
+            tracing::error!("failed to start sign-in: {:?}", e);
+        }
+    };
+    view! {
+        <div class="signIn">
+            <div class="signInCard">
+                <h1 class="signInTitle">"Ankurah Community"</h1>
+                <p class="signInSubtitle">"Chat, ask questions, and share with the community."</p>
+                <button class="signInButton" on:click=start>"Sign in with idp.to"</button>
+            </div>
+        </div>
+    }
+}
+
+/// The authenticated chat application (was `App`). Only mounted when signed in,
+/// so `ctx()` is always valid here.
+#[component]
+pub fn ChatApp() -> impl IntoView {
+    // Build the rooms LiveQuery from the global authenticated context.
     let rooms = ctx().query::<RoomView>("true ORDER BY name ASC").expect("failed to create RoomView LiveQuery");
 
     // UI-local state for selected room (Leptos signal, not Ankurah).
@@ -106,14 +204,15 @@ pub fn App() -> impl IntoView {
     // UI-local state for current user (Leptos signal).
     let current_user = RwSignal::new(None::<UserView>);
 
-    // Initialize user asynchronously
+    // Load the signed-in user (the server upserted it before minting our token;
+    // the JWT `sub` is that User entity's id).
     Effect::new({
         let current_user = current_user.clone();
         move |_| {
             spawn_local(async move {
-                match ensure_user().await {
+                match load_current_user().await {
                     Ok(user) => current_user.set(Some(user)),
-                    Err(e) => tracing::error!("Failed to initialize user: {}", e),
+                    Err(e) => tracing::error!("Failed to load current user: {}", e),
                 }
             });
         }
@@ -122,9 +221,9 @@ pub fn App() -> impl IntoView {
     // Create notification manager with rooms query and current user ID
     let notification_manager = NotificationManager::new(rooms.clone(), current_user.get_untracked().map(|u| u.id().to_base64()));
 
-    // `current_user` is resolved asynchronously by `ensure_user`, so push the id
-    // into the NotificationManager once it's available (otherwise it stays None
-    // and treats your own messages as coming from others → chimes on send).
+    // `current_user` is resolved asynchronously, so push the id into the
+    // NotificationManager once it's available (otherwise it stays None and
+    // treats your own messages as coming from others → chimes on send).
     Effect::new({
         let notification_manager = notification_manager.clone();
         move |_| notification_manager.set_current_user_id(current_user.get().map(|u| u.id().to_base64()))
@@ -144,35 +243,11 @@ pub fn App() -> impl IntoView {
     }
 }
 
-const STORAGE_KEY_USER_ID: &str = "community_user_id";
-
-/// Ensures a user exists, creating one if necessary.
-/// Stores the user ID in localStorage for persistence across sessions.
-async fn ensure_user() -> Result<UserView, Box<dyn std::error::Error>> {
-    let context = ctx();
-
-    // Check localStorage for existing user
-    if let Some(storage) = window().and_then(|w| w.local_storage().ok().flatten()) {
-        if let Ok(Some(stored_id)) = storage.get_item(STORAGE_KEY_USER_ID) {
-            if let Ok(entity_id) = EntityId::from_base64(&stored_id) {
-                if let Ok(user) = context.get::<UserView>(entity_id).await {
-                    return Ok(user);
-                }
-            }
-        }
-    }
-
-    // Create new user
-    let transaction = context.begin();
-    let random_suffix = (js_sys::Math::random() * 10000.0).floor() as u32;
-    let mutable = transaction.create(&User { display_name: format!("User-{}", random_suffix) }).await?;
-    let user = mutable.read();
-    transaction.commit().await?;
-
-    // Store user ID in localStorage
-    if let Some(storage) = window().and_then(|w| w.local_storage().ok().flatten()) {
-        let _ = storage.set_item(STORAGE_KEY_USER_ID, &user.id().to_base64());
-    }
-
+/// Resolve the signed-in `User` from the session token's `sub` (its entity id).
+async fn load_current_user() -> Result<UserView, Box<dyn std::error::Error>> {
+    let token = AUTH_TOKEN.read().unwrap().clone().ok_or("not authenticated")?;
+    let claims = parse_claims_unverified(&token)?;
+    let user_id = EntityId::from_base64(&claims.sub)?;
+    let user = ctx().get::<UserView>(user_id).await?;
     Ok(user)
 }

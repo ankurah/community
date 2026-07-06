@@ -1,6 +1,9 @@
 import { test, expect } from '@playwright/test';
 
-test.describe('Chat Application', () => {
+// SKIPPED (OIDC, issue #1): the app now requires idp.to sign-in, which Playwright
+// can't drive headlessly (idp.to is passkey-first). These anonymous-flow specs are
+// pending a rewrite against OIDC (dev-mint endpoint or a WebAuthn virtual authenticator).
+test.describe.skip('Chat Application', () => {
   test.beforeEach(async ({ page }) => {
     // Clear localStorage to get a fresh user each test
     await page.goto('/');

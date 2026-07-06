@@ -9,15 +9,25 @@ ankurah = { version = "=0.9.0" }
 ankurah-websocket-server = { version = "=0.9.0" }
 ankurah-storage-sled = { version = "=0.9.0", optional = true }
 ankurah-storage-postgres = { version = "=0.9.0", optional = true }
+# JWT policy agent. `watcher` is required (not just for hot-reload): it publishes
+# the policy + verifying public key into the `jwtpolicy` collection so ephemeral
+# clients can sync it — without it the client's local policy is deny-all.
+ankurah-jwt-auth = { version = "=0.9.0", features = ["watcher"] }
 community-model = { path = "../model" }
 
 anyhow = "1.0"
 axum = { version = "0.8", features = ["ws"] }
 tokio = { version = "1.38", features = ["macros", "net", "rt-multi-thread"] }
 tower = "0.5"
-tower-http = { version = "0.6", features = ["fs", "trace"] }
+tower-http = { version = "0.6", features = ["fs", "trace", "cors"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"
+
+# OIDC: validate idp.to ID tokens (RS256 via JWKS) and fetch the JWKS.
+jsonwebtoken = "9"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 
 [features]
 # Storage engine for the durable (server) node. `cargo generate` sets `default`

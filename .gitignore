@@ -38,3 +38,9 @@ Thumbs.db
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+
+# Secrets — never commit private keys. The dev JWT signing key is in-memory
+# only (prod uses ANKURAH_JWT_SIGNING_KEY from Secret Manager), but guard against
+# any local key material regardless.
+*.pem
+signing-key*

@@ -7,7 +7,9 @@ import { test, expect } from '@playwright/test';
 // This exercises real-time sync through the server both directions, and a
 // concurrent-send case that specifically stresses PR #201 (concurrent updates /
 // causal comparison in the event DAG).
-test('multi-user: rooms and messages sync between two users', async ({ browser }) => {
+// SKIPPED (OIDC, issue #1): requires idp.to sign-in — see chat.spec.ts. Pending an
+// OIDC-aware e2e rewrite.
+test.skip('multi-user: rooms and messages sync between two users', async ({ browser }) => {
   test.setTimeout(90_000);
 
   const ctxA = await browser.newContext();

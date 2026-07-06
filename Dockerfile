@@ -68,7 +68,11 @@ RUN apt-get update \
 WORKDIR /app
 COPY --from=server-builder /workspace/target/release/community-server /app/community-server
 COPY --from=spa-builder /workspace/leptos-app/dist /app/static
+# The JWT policy is baked into the image; the server loads it at POLICY_PATH and
+# the `watcher` publishes it into the `jwtpolicy` collection for clients to sync.
+COPY policy.json /app/policy.json
 ENV STATIC_DIR=/app/static
+ENV POLICY_PATH=/app/policy.json
 # Cloud Run overrides PORT at runtime; 8080 is the default for local runs.
 ENV PORT=8080
 EXPOSE 8080
