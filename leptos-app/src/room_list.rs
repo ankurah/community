@@ -159,7 +159,12 @@ fn NewRoomInput(selected_room: RwSignal<Option<RoomView>>, on_cancel: impl Fn() 
                     wasm_bindgen_futures::spawn_local(async move {
                         match (|| async {
                             let transaction = ctx().begin();
-                            let room = transaction.create(&Room { name }).await?.read();
+                            // `created_by` must be the caller (the room write
+                            // scope in policy.json rejects anything else).
+                            let room = transaction
+                                .create(&Room { name, created_by: Some(crate::current_user_id().into()) })
+                                .await?
+                                .read();
                             transaction.commit().await?;
                             Ok::<_, Box<dyn std::error::Error>>(room)
                         })()

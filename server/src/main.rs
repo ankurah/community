@@ -1,4 +1,4 @@
-use ankurah::{Context, Node};
+use ankurah::{Context, EntityId, Node};
 use ankurah_jwt_auth::{Duration, JwtAgent, JwtClaims, JwtContext, SigningKeys};
 use ankurah_websocket_server::WebsocketServer;
 use anyhow::{Context as _, Result};
@@ -10,7 +10,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use community_model::{Room, RoomView, User, UserView};
+use community_model::{BanView, RoleGrant, RoleGrantView, Room, RoomView, User, UserView};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -200,12 +200,31 @@ async fn auth_session(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("user upsert failed: {e}")))?;
 
+    // Ban gate: an actively banned user cannot mint a new session. (Live
+    // enforcement on existing connections is the guarded-agent follow-up.)
+    if let Some(reason) = active_ban_reason(&state.system_ctx, &user_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("ban check failed: {e}")))?
+    {
+        return Err((StatusCode::FORBIDDEN, format!("This account is banned: {reason}")));
+    }
+
+    let roles = resolve_roles(&state.system_ctx, &user_id, identity.email.as_deref())
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("role resolution failed: {e}")))?;
+
+    // `oidc_sub` rides along as a custom claim so the policy's user-collection
+    // write scope (`oidc_sub = $jwt.custom.oidc_sub`) pins profile edits to the
+    // caller's own row.
+    let mut custom = serde_json::Map::new();
+    custom.insert("oidc_sub".to_string(), serde_json::Value::String(identity.sub.clone()));
+
     let claims = JwtClaims {
-        sub: user_id,
-        roles: vec!["Member".to_string()],
+        sub: user_id.clone(),
+        roles: roles.clone(),
         email: identity.email.unwrap_or_default(),
         name: identity.name,
-        custom: serde_json::Map::new(),
+        custom,
     };
 
     let token = state
@@ -213,7 +232,70 @@ async fn auth_session(
         .sign(&claims, Duration::from_hours(TOKEN_TTL_HOURS))
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("failed to mint session token: {e}")))?;
 
+    // Ops trail: every mint is visible (who, which entity, which roles) so an
+    // unexpected role grant would show up here. Never log the token itself.
+    info!(user = %user_id, email = %claims.email, roles = ?roles, "minted session token");
+
     Ok(Json(SessionResponse { token }))
+}
+
+/// Roles for a user: implicit `Member` plus any persisted `RoleGrant`s.
+///
+/// Bootstrap: if the idp.to-authenticated email is listed in `ADMIN_EMAILS`
+/// (comma-separated env) and the user has no Admin grant yet, one is created —
+/// entity-bound from then on. Combined with the per-mint log line above, any
+/// unexpected grant is visible in the ops trail.
+async fn resolve_roles(ctx: &Context, user_id: &str, email: Option<&str>) -> Result<Vec<String>> {
+    let mut roles = vec!["Member".to_string()];
+
+    // Scan-and-filter for the same reason as `upsert_user` (see its doc).
+    for grant in ctx.fetch::<RoleGrantView>("true").await? {
+        if grant.user()?.id().to_base64() == user_id {
+            let role = grant.role()?;
+            if !roles.contains(&role) {
+                roles.push(role);
+            }
+        }
+    }
+
+    if !roles.iter().any(|r| r == "Admin") {
+        if let Some(email) = email {
+            let is_bootstrap_admin =
+                admin_emails().iter().any(|admin| admin.eq_ignore_ascii_case(email));
+            if is_bootstrap_admin {
+                let trx = ctx.begin();
+                trx.create(&RoleGrant {
+                    user: EntityId::from_base64(user_id)?.into(),
+                    role: "Admin".to_string(),
+                })
+                .await?;
+                trx.commit().await?;
+                info!(user = %user_id, %email, "bootstrapped Admin role from ADMIN_EMAILS");
+                roles.push("Admin".to_string());
+            }
+        }
+    }
+
+    Ok(roles)
+}
+
+fn admin_emails() -> Vec<String> {
+    std::env::var("ADMIN_EMAILS")
+        .unwrap_or_default()
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// The reason of an active ban for this user, if any.
+async fn active_ban_reason(ctx: &Context, user_id: &str) -> Result<Option<String>> {
+    for ban in ctx.fetch::<BanView>("true").await? {
+        if ban.active()? && ban.user()?.id().to_base64() == user_id {
+            return Ok(Some(ban.reason()?));
+        }
+    }
+    Ok(None)
 }
 
 /// Find the `User` for this idp.to subject, or create one. Returns the User
@@ -275,7 +357,7 @@ async fn ensure_default_rooms(ctx: &Context) -> Result<()> {
         if existing.is_empty() {
             info!("Creating '{name}' room");
             let trx = ctx.begin();
-            trx.create(&Room { name: name.to_string() }).await?;
+            trx.create(&Room { name: name.to_string(), created_by: None }).await?;
             trx.commit().await?;
         }
     }

@@ -1,22 +1,38 @@
 {
   "roles": {
-    "Member": ["view", "post"]
+    "Member": ["view", "post"],
+    "Moderator": ["view", "post", "moderate"],
+    "Admin": ["view", "post", "moderate", "manage_roles"]
   },
   "collections": {
     "user": {
       "read": "view",
-      "write": "post"
+      "write": "post",
+      "scope": [
+        { "filter": "oidc_sub = $jwt.custom.oidc_sub", "applies_to": "write", "unless_privilege": "moderate" }
+      ]
     },
     "room": {
       "read": "view",
-      "write": "post"
+      "write": "post",
+      "scope": [
+        { "filter": "created_by = $jwt.sub", "applies_to": "write", "unless_privilege": "moderate" }
+      ]
     },
     "message": {
       "read": "view",
       "write": "post",
       "scope": [
-        { "filter": "user = $jwt.sub", "applies_to": "write" }
+        { "filter": "user = $jwt.sub", "applies_to": "write", "unless_privilege": "moderate" }
       ]
+    },
+    "rolegrant": {
+      "read": "view",
+      "write": "manage_roles"
+    },
+    "ban": {
+      "read": "moderate",
+      "write": "moderate"
     }
   }
 }

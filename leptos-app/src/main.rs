@@ -58,6 +58,14 @@ pub fn ws_client() -> WebsocketClient {
     (**CLIENT.get().expect("Client not initialized")).clone()
 }
 
+/// The signed-in user's entity id (the JWT `sub`). Only call from within the
+/// signed-in UI subtree (`ChatApp`), where the token is guaranteed present.
+pub fn current_user_id() -> EntityId {
+    let token = AUTH_TOKEN.read().expect("auth token lock poisoned").clone().expect("not authenticated");
+    let claims = parse_claims_unverified(&token).expect("stored token is a valid JWT");
+    EntityId::from_base64(&claims.sub).expect("JWT sub is a valid entity id")
+}
+
 fn main() {
     console_error_panic_hook::set_once();
     tracing_wasm::set_as_global_default_with_config(
