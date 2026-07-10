@@ -26,11 +26,12 @@ pub struct VerifiedIdentity {
     pub sub: String,
     pub email: Option<String>,
     pub name: Option<String>,
-    /// Role keys carried by the token's optional `roles` claim (empty when the
-    /// claim is absent or malformed). idp.to owns user↔role management; these
-    /// keys are resolved into the minted session token's roles (see
-    /// `resolve_roles` in `main.rs`, which normalizes and applies the `member`
-    /// floor).
+    /// Role keys asserted by the token's REQUIRED `roles` claim — verification
+    /// fails outright when the claim is absent or malformed, so this is always
+    /// the IdP's explicit assertion (possibly empty). idp.to owns user↔role
+    /// management; these keys are resolved into the minted session token's
+    /// roles (see `resolve_roles` in `main.rs`, which normalizes and applies
+    /// the `member` floor).
     pub roles: Vec<String>,
 }
 
@@ -45,11 +46,12 @@ struct IdTokenClaims {
     name: Option<String>,
     #[serde(default)]
     nonce: Option<String>,
-    /// Optional per-Application `roles` claim: a JSON array of stable lowercase
-    /// role keys (e.g. `["member","moderator"]`), gated by the idp.to `roles`
-    /// scope. Captured as a raw `Value` — not `Vec<String>` — so a malformed
-    /// claim degrades to "no roles" instead of failing an otherwise-valid token.
-    /// Absent until idp.to ships the scope; today's prod tokens carry no roles.
+    /// Per-Application `roles` claim: a JSON array of stable lowercase role
+    /// keys (e.g. `["member","moderator"]`), gated by the idp.to `roles`
+    /// scope. Captured as a raw `Value` — not `Vec<String>` — so token PARSING
+    /// tolerates any shape; `extract_roles` then strictly validates it and
+    /// rejects the sign-in with a purposeful error (a well-formed roles array
+    /// is REQUIRED — absent/malformed fails verification).
     #[serde(default)]
     roles: Option<serde_json::Value>,
 }
