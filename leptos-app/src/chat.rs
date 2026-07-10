@@ -127,7 +127,20 @@ pub fn Chat(
             fallback=|| {
                 view! {
                     <div class="chatContainer">
-                        <div class="emptyState">"Select a room to start chatting"</div>
+                        <div class="emptyState">
+                            <div class="emptyStateArt" aria-hidden="true">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+                                    stroke-linecap="round" stroke-linejoin="round">
+                                    <path d="M21 11.5a8.4 8.4 0 0 1-9 8.4 8.9 8.9 0 0 1-3.9-.9L3 20l1-4.9a8.3 8.3 0 0 1-1-4A8.4 8.4 0 0 1 12 3a8.4 8.4 0 0 1 9 8.5z" />
+                                    <path d="M8 10.5h8" />
+                                    <path d="M8 14h5" />
+                                </svg>
+                            </div>
+                            <div class="emptyStateTitle">"Select a room to start chatting"</div>
+                            <div class="emptyStateHint">
+                                "Pick a room from the sidebar — every message syncs live."
+                            </div>
+                        </div>
                     </div>
                 }
             }
@@ -192,7 +205,6 @@ pub fn Chat(
                                 class="debugToggle"
                                 on:click=move |_| show_debug.update(|v| *v = !*v)
                                 title=move || if show_debug.get() { "Hide debug info" } else { "Show debug info" }
-                                style="opacity: 0.35;"
                             >
                                 {move || if show_debug.get() { "▼" } else { "▲" }}
                             </button>
@@ -208,7 +220,12 @@ pub fn Chat(
 
                             <Show when=move || show_jump_to_current.get()>
                                 <button class="jumpToCurrent" on:click=handle_jump.clone()>
-                                    "Jump to Current ↓"
+                                    "Jump to latest"
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"
+                                        stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                        <path d="M12 5v14" />
+                                        <path d="m6 13 6 6 6-6" />
+                                    </svg>
                                 </button>
                             </Show>
 

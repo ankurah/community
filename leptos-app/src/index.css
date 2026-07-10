@@ -1,11 +1,184 @@
+/* ============================================================================
+   Ankurah Community — design system
+   Evergreen & mint, kin to the idp.to admin UI. All component styles consume
+   the custom properties defined here; raw hex values below this file should
+   be rare and deliberate.
+   ========================================================================= */
+
 :root {
-  font-family: Inter, system-ui, Avenir, Helvetica, Arial, sans-serif;
+  /* ---- Type ---- */
+  --font-sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+    "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+
+  --fs-xs: 11.5px;
+  --fs-sm: 12.5px;
+  --fs-md: 13.5px;
+  --fs-base: 15px;
+  --fs-lg: 17px;
+  --fs-xl: 20px;
+
+  /* ---- Space / radius / motion ---- */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 20px;
+  --sp-6: 24px;
+  --sp-7: 32px;
+  --sp-8: 40px;
+
+  --r-sm: 6px;
+  --r-md: 10px;
+  --r-lg: 14px;
+  --r-xl: 20px;
+  --r-full: 999px;
+
+  --ease: cubic-bezier(0.2, 0.8, 0.4, 1);
+  --t-fast: 120ms;
+  --t-med: 200ms;
+
+  /* ---- Brand constants (identical in both themes) ---- */
+  --accent: #d2f5c8;        /* mint */
+  --accent-hover: #e0f9d8;
+  --on-accent: #163f3d;
+  --evergreen: #163f3d;
+  --evergreen-deep: #10302d;
+
+  /* Avatar hues — deterministic per user */
+  --hue-0: #2a6f68;
+  --hue-1: #4f7d3a;
+  --hue-2: #b06529;
+  --hue-3: #a8514b;
+  --hue-4: #7b5fa0;
+  --hue-5: #44718e;
+  --hue-6: #2e7d4f;
+  --hue-7: #8a6d3b;
+
+  /* ---- Semantic tokens: light ---- */
+  color-scheme: light dark;
+
+  --bg: #f4f7f3;            /* app canvas (sage) */
+  --surface: #ffffff;       /* cards, composer, menus */
+  --surface-2: #f7fbf8;     /* hover wash */
+  --surface-3: #edf3ee;     /* wells, chips */
+
+  --border: #dbe5df;
+  --border-strong: #bfd6ce;
+
+  --text: #18211f;
+  --text-2: #50635d;
+  --text-3: #60706b;
+  --text-faint: #93a49e;
+
+  --primary: #163f3d;
+  --primary-hover: #1d514d;
+  --primary-active: #0f2b29;
+  --on-primary: #f6fbf8;
+
+  --link: #2a6f68;
+  --focus: #2a6f68;
+
+  --ok: #2e7d4f;
+  --ok-dot: #7ee2a8;
+  --danger: #a43e3e;
+  --danger-bg: #ffe8e6;
+  --danger-border: #f0b9b6;
+  --danger-dot: #ff9d8a;
+
+  --unread-bg: #f0b357;
+  --unread-text: #3a2a0c;
+
+  /* Chrome = header + sidebar (evergreen in both themes) */
+  --chrome-bg: #163f3d;
+  --chrome-bg-deep: #10302d;
+  --chrome-text: #f6fbf8;
+  --chrome-text-dim: #c2d6cf;
+  --chrome-border: rgb(255 255 255 / 12%);
+  --chrome-hover: rgb(255 255 255 / 8%);
+  --chrome-active: rgb(255 255 255 / 14%);
+
+  /* Message bubbles */
+  --bubble-other-bg: #ffffff;
+  --bubble-other-border: #dce6e0;
+  --bubble-own-bg: #163f3d;
+  --bubble-own-text: #f2faf6;
+  --edit-ring: #47b189;
+  --edit-glow: rgb(71 177 137 / 30%);
+
+  --scrollbar: rgb(22 63 61 / 25%);
+  --chrome-scrollbar: rgb(255 255 255 / 22%);
+
+  --shadow-1: 0 1px 2px rgb(16 40 36 / 6%);
+  --shadow-2: 0 2px 10px rgb(16 40 36 / 12%);
+  --shadow-3: 0 16px 40px rgb(16 40 36 / 20%);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0c1513;
+    --surface: #131e1b;
+    --surface-2: #182521;
+    --surface-3: #1e2d28;
+
+    --border: #26362f;
+    --border-strong: #3a4f45;
+
+    --text: #e6efe9;
+    --text-2: #b3c4bc;
+    --text-3: #8da29a;
+    --text-faint: #6c7f78;
+
+    --primary: #2f7d75;
+    --primary-hover: #38928a;
+    --primary-active: #276b64;
+    --on-primary: #f2faf6;
+
+    --link: #7cc7ba;
+    --focus: #7cc7ba;
+
+    --danger-bg: #3a2220;
+    --danger-border: #6b3f3b;
+    --danger: #e79a94;
+
+    --chrome-bg: #0f1d1a;
+    --chrome-bg-deep: #0a1512;
+    --chrome-text: #e9f4ee;
+    --chrome-text-dim: #9db4ab;
+    --chrome-border: rgb(255 255 255 / 8%);
+    --chrome-hover: rgb(255 255 255 / 6%);
+    --chrome-active: rgb(255 255 255 / 10%);
+
+    --bubble-other-bg: #182722;
+    --bubble-other-border: #2a3b34;
+    --bubble-own-bg: #2a6f68;
+    --bubble-own-text: #f2faf6;
+
+    --scrollbar: rgb(255 255 255 / 18%);
+
+    --shadow-1: 0 1px 2px rgb(0 0 0 / 30%);
+    --shadow-2: 0 2px 10px rgb(0 0 0 / 40%);
+    --shadow-3: 0 16px 40px rgb(0 0 0 / 55%);
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   Base
+   ------------------------------------------------------------------------ */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+:root {
+  font-family: var(--font-sans);
+  font-size: 16px;
   line-height: 1.5;
   font-weight: 400;
-
-  color-scheme: light dark;
-  color: rgba(255, 255, 255, 0.87);
-  background-color: #242424;
+  color: var(--text);
+  background-color: var(--bg);
 
   font-synthesis: none;
   text-rendering: optimizeLegibility;
@@ -13,26 +186,8 @@
   -moz-osx-font-smoothing: grayscale;
 }
 
-a {
-  font-weight: 500;
-  color: #646cff;
-  text-decoration: inherit;
-}
-a:hover {
-  color: #535bf2;
-}
-
-*, *::before, *::after {
-  box-sizing: border-box;
-}
-
-input, textarea {
-  -webkit-user-select: text;
-  user-select: text;
-  touch-action: manipulation;
-}
-
-html, body {
+html,
+body {
   margin: 0;
   padding: 0;
   position: fixed;
@@ -42,46 +197,74 @@ html, body {
   overscroll-behavior: none;
 }
 
-#root {
-  width: 100%;
-  height: 100%;
-  overflow: hidden;
-  position: relative;
+input,
+textarea {
+  -webkit-user-select: text;
+  user-select: text;
+  touch-action: manipulation;
 }
 
-h1 {
-  font-size: 3.2em;
-  line-height: 1.1;
-}
-
-button {
-  border-radius: 8px;
-  border: 1px solid transparent;
-  padding: 0.6em 1.2em;
-  font-size: 1em;
+a {
+  color: var(--link);
   font-weight: 500;
-  font-family: inherit;
-  background-color: #1a1a1a;
-  cursor: pointer;
-  transition: border-color 0.25s;
-}
-button:hover {
-  border-color: #646cff;
-}
-button:focus,
-button:focus-visible {
-  outline: 4px auto -webkit-focus-ring-color;
+  text-decoration: none;
 }
 
-@media (prefers-color-scheme: light) {
-  :root {
-    color: #213547;
-    background-color: #ffffff;
-  }
-  a:hover {
-    color: #747bff;
-  }
-  button {
-    background-color: #f9f9f9;
+a:hover {
+  text-decoration: underline;
+}
+
+/* Neutral button reset — every button in the app is styled by its component. */
+button {
+  font: inherit;
+  color: inherit;
+  border: none;
+  background: none;
+  padding: 0;
+  cursor: pointer;
+}
+
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+:focus:not(:focus-visible) {
+  outline: none;
+}
+
+::selection {
+  background: rgb(42 111 104 / 25%);
+}
+
+/* Thin, theme-aware scrollbars */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar) transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: var(--scrollbar);
+  border-radius: var(--r-full);
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
   }
 }

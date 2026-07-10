@@ -1,86 +1,91 @@
+/* Scroll-manager debug strip (developer affordance; intentionally low-key). */
+
 .debugHeader {
   flex-shrink: 0;
-  padding: 8px 16px;
-  background-color: #1a202c;
-  border-bottom: 1px solid #2d3748;
+  padding: var(--sp-2) var(--sp-4);
+  background-color: var(--evergreen-deep);
+  border-bottom: 1px solid var(--chrome-border);
   font-size: 11px;
-  font-family: monospace;
-  color: #a0aec0;
+  font-family: var(--font-mono);
+  color: var(--chrome-text-dim);
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--sp-1);
 }
 
 .debugRow {
   display: flex;
-  gap: 12px;
+  gap: var(--sp-3);
   align-items: center;
+  flex-wrap: wrap;
 }
 
 .debugLabel {
-  color: #718096;
+  color: var(--chrome-text-dim);
+  opacity: 0.75;
   font-weight: 600;
 }
 
 .debugValue {
-  color: #e2e8f0;
+  color: var(--chrome-text);
 }
 
 .debugValue.trigger-active {
-  color: #fc8181;
+  color: var(--danger-dot);
   font-weight: bold;
 }
 
 .debugValue.boundary-hit {
-  color: #48bb78;
+  color: var(--ok-dot);
   font-weight: bold;
 }
 
 .debugStatus {
   font-size: 14px;
-  margin-left: 4px;
+  margin-left: var(--sp-1);
 }
 
 .queryText {
-  color: #63b3ed;
+  color: var(--accent);
 }
 
 .mode-live {
-  color: #48bb78;
+  color: var(--ok-dot);
   font-weight: bold;
 }
 
 .mode-backward {
-  color: #f6ad55;
+  color: var(--unread-bg);
   font-weight: bold;
 }
 
 .mode-forward {
-  color: #fc8181;
+  color: var(--danger-dot);
   font-weight: bold;
 }
 
 .debugButton {
-  padding: 4px 12px;
-  margin-left: 8px;
-  background-color: #4a5568;
-  color: white;
-  border: 1px solid #718096;
-  border-radius: 4px;
+  padding: 4px var(--sp-3);
+  margin-left: var(--sp-2);
+  background-color: var(--chrome-hover);
+  color: var(--chrome-text);
+  border: 1px solid var(--chrome-border);
+  border-radius: var(--r-sm);
   font-size: 11px;
-  font-family: monospace;
+  font-family: var(--font-mono);
   cursor: pointer;
-  transition: background-color 0.2s;
+  transition: background-color var(--t-fast) var(--ease);
 }
 
 .debugButton:hover {
-  background-color: #2d3748;
+  background-color: var(--chrome-active);
 }
 
 @keyframes spin {
   from {
     transform: rotate(0deg);
   }
+
   to {
     transform: rotate(360deg);
   }

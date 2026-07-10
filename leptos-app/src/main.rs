@@ -18,6 +18,7 @@ mod chat;
 mod chat_debug_header;
 mod debug_overlay;
 mod editable_text_field;
+mod fmt;
 mod header;
 mod message_context_menu;
 mod message_input;
@@ -182,10 +183,57 @@ pub fn SignIn() -> impl IntoView {
     };
     view! {
         <div class="signIn">
+            <div class="signInGlow signInGlowA" aria-hidden="true"></div>
+            <div class="signInGlow signInGlowB" aria-hidden="true"></div>
             <div class="signInCard">
+                // Sprout mark — "ankura" is Sanskrit for sprout.
+                <div class="signInMark" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                        stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M7 20h10" />
+                        <path d="M10 20c5.5-2.5.8-6.4 3-10" />
+                        <path d="M9.5 9.4c1.1.8 1.8 2.2 2.3 3.7-2 .4-3.5.4-4.8-.3-1.2-.6-2.3-1.9-3-4.2 2.8-.5 4.4 0 5.5.8z" />
+                        <path d="M14.1 6a7 7 0 0 0-1.1 4c1.9-.1 3.3-.6 4.3-1.4 1-1 1.6-2.3 1.7-4.6-2.7.1-4 1-4.9 2z" />
+                    </svg>
+                </div>
                 <h1 class="signInTitle">"Ankurah Community"</h1>
-                <p class="signInSubtitle">"Chat, ask questions, and share with the community."</p>
-                <button class="signInButton" on:click=start>"Sign in with idp.to"</button>
+                <p class="signInSubtitle">
+                    "Chat, ask questions, and share with the community — synced live, everywhere."
+                </p>
+                <div class="signInFeatures">
+                    <span class="signInFeature">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"
+                            stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                            <path d="M13 2 3 14h7l-1 8 11-13h-7l1-7z" />
+                        </svg>
+                        "Real-time sync"
+                    </span>
+                    <span class="signInFeature">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"
+                            stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                            <path d="M12 22v-9" />
+                            <path d="M9.5 9.4c1.1.8 1.8 2.2 2.3 3.7-2 .4-3.5.4-4.8-.3-1.2-.6-2.3-1.9-3-4.2 2.8-.5 4.4 0 5.5.8z" />
+                            <path d="M14.1 6a7 7 0 0 0-1.1 4c1.9-.1 3.3-.6 4.3-1.4 1-1 1.6-2.3 1.7-4.6-2.7.1-4 1-4.9 2z" />
+                        </svg>
+                        "Built on Ankurah"
+                    </span>
+                    <span class="signInFeature">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"
+                            stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                            <path d="M20 13c0 5-3.5 7.5-7.7 9a.6.6 0 0 1-.6 0C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.2-2.7a1.2 1.2 0 0 1 1.6 0C14.5 3.8 17 5 19 5a1 1 0 0 1 1 1z" />
+                        </svg>
+                        "Open community"
+                    </span>
+                </div>
+                <button class="signInButton" on:click=start>
+                    "Sign in with idp.to"
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"
+                        stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <path d="M5 12h14" />
+                        <path d="m13 6 6 6-6 6" />
+                    </svg>
+                </button>
+                <p class="signInFootnote">"Authentication by idp.to — local-first chat, built in Rust + wasm."</p>
             </div>
         </div>
     }

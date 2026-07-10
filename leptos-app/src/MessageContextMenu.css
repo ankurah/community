@@ -1,34 +1,64 @@
+/* Right-click menu on own messages. */
+
 .contextMenu {
-  background: white;
-  border: 1px solid #e2e8f0;
-  border-radius: 6px;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
-  padding: 4px 0;
-  min-width: 120px;
+  min-width: 168px;
+  padding: 5px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: var(--shadow-3);
   z-index: 1000;
+  animation: contextMenuIn 120ms var(--ease) both;
+}
+
+@keyframes contextMenuIn {
+  from {
+    opacity: 0;
+    transform: translateY(-3px) scale(0.98);
+  }
+
+  to {
+    opacity: 1;
+    transform: none;
+  }
 }
 
 .contextMenuItem {
+  display: flex;
+  align-items: center;
+  gap: 9px;
   width: 100%;
-  padding: 8px 16px;
+  padding: 8px 10px;
   background: none;
   border: none;
+  border-radius: 8px;
   text-align: left;
   cursor: pointer;
-  font-size: 14px;
-  color: #2d3748;
-  transition: background-color 0.15s ease;
+  font-size: var(--fs-md);
+  font-weight: 550;
+  color: var(--text);
+  transition: background-color var(--t-fast) var(--ease);
+}
+
+.contextMenuItem svg {
+  width: 15px;
+  height: 15px;
+  flex-shrink: 0;
+  color: var(--text-3);
 }
 
 .contextMenuItem:hover {
-  background-color: #f7fafc;
+  background-color: var(--surface-3);
 }
 
 .contextMenuItemDanger {
-  color: #e53e3e;
+  color: var(--danger);
+}
+
+.contextMenuItemDanger svg {
+  color: var(--danger);
 }
 
 .contextMenuItemDanger:hover {
-  background-color: #fff5f5;
+  background-color: var(--danger-bg);
 }
-

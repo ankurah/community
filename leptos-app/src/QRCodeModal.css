@@ -1,44 +1,81 @@
+/* QR connect modal. */
+
 .qrModalOverlay {
   position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  background-color: rgba(0, 0, 0, 0.7);
+  inset: 0;
+  background-color: rgb(10 20 17 / 55%);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
   display: flex;
   align-items: center;
   justify-content: center;
   z-index: 1000;
-  padding: 20px;
+  padding: var(--sp-5);
+  animation: qrOverlayIn 150ms var(--ease) both;
+}
+
+@keyframes qrOverlayIn {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
 }
 
 .qrModalContent {
-  background: white;
-  border-radius: 12px;
-  padding: 30px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-xl);
+  padding: var(--sp-6);
   max-width: 400px;
   width: 100%;
-  box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
+  box-shadow: var(--shadow-3);
+  animation: qrModalIn 180ms var(--ease) both;
+}
+
+@keyframes qrModalIn {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.97);
+  }
+
+  to {
+    opacity: 1;
+    transform: none;
+  }
 }
 
 .qrModalHeader {
   display: flex;
   justify-content: space-between;
-  align-items: center;
-  margin-bottom: 20px;
+  align-items: flex-start;
+  gap: var(--sp-3);
+  margin-bottom: var(--sp-5);
 }
 
 .qrModalHeader h2 {
   margin: 0;
-  font-size: 24px;
-  color: #2d3748;
+  font-size: 18px;
+  font-weight: 750;
+  letter-spacing: -0.01em;
+  color: var(--text);
+}
+
+.qrModalSubtitle {
+  margin: 3px 0 0;
+  font-size: var(--fs-md);
+  color: var(--text-3);
 }
 
 .qrCloseButton {
+  flex-shrink: 0;
   background: none;
   border: none;
-  font-size: 32px;
-  color: #718096;
+  font-size: 26px;
+  line-height: 1;
+  color: var(--text-3);
   cursor: pointer;
   padding: 0;
   width: 32px;
@@ -46,46 +83,54 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  line-height: 1;
+  border-radius: var(--r-sm);
+  transition:
+    color var(--t-fast) var(--ease),
+    background-color var(--t-fast) var(--ease);
 }
 
 .qrCloseButton:hover {
-  color: #2d3748;
+  color: var(--text);
+  background-color: var(--surface-3);
 }
 
+/* Always white so the code stays scannable in dark mode. */
 .qrCodeContainer {
   display: flex;
   justify-content: center;
-  background: white;
-  padding: 20px;
-  border-radius: 8px;
-  margin-bottom: 20px;
+  background: #ffffff;
+  padding: var(--sp-4);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  margin-bottom: var(--sp-4);
 }
 
 .qrUrlDisplay {
-  background: #f7fafc;
-  padding: 12px;
-  border-radius: 6px;
-  margin-bottom: 16px;
+  background: var(--surface-3);
+  padding: 10px var(--sp-3);
+  border-radius: var(--r-md);
+  margin-bottom: var(--sp-3);
   word-break: break-all;
+  text-align: center;
 }
 
 .qrUrlDisplay code {
-  font-family: 'Courier New', monospace;
-  font-size: 13px;
-  color: #4a5568;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-2);
 }
 
 .qrInstructions {
   text-align: center;
-  color: #718096;
-  font-size: 14px;
+  color: var(--text-3);
+  font-size: var(--fs-md);
+  line-height: 1.5;
   margin: 0;
 }
 
 @media (max-width: 480px) {
   .qrModalContent {
-    padding: 20px;
+    padding: var(--sp-5);
   }
 
   .qrCodeContainer svg {
@@ -94,7 +139,6 @@
   }
 
   .qrModalHeader h2 {
-    font-size: 20px;
+    font-size: var(--fs-lg);
   }
 }
-

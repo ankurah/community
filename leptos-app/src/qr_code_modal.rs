@@ -21,8 +21,11 @@ pub fn QRCodeModal(url: String, on_close: impl Fn() + Clone + 'static) -> impl I
         <div class="qrModalOverlay" on:click=move |_| on_close_overlay()>
             <div class="qrModalContent" on:click=|e| e.stop_propagation()>
                 <div class="qrModalHeader">
-                    <h2>"Scan to Connect to Ankurah Community"</h2>
-                    <button class="qrCloseButton" on:click=move |_| on_close_button()>
+                    <div class="qrModalTitles">
+                        <h2>"Scan to connect"</h2>
+                        <p class="qrModalSubtitle">"Open Ankurah Community on your phone"</p>
+                    </div>
+                    <button class="qrCloseButton" aria-label="Close" on:click=move |_| on_close_button()>
                         "×"
                     </button>
                 </div>
@@ -31,7 +34,7 @@ pub fn QRCodeModal(url: String, on_close: impl Fn() + Clone + 'static) -> impl I
                     <code>{url.clone()}</code>
                 </div>
                 <p class="qrInstructions">
-                    "Scan this QR code with your mobile device to open the app"
+                    "Point your camera at the code — it opens this exact page."
                 </p>
             </div>
         </div>
