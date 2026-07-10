@@ -1,4 +1,4 @@
-use ankurah::{Context, EntityId, Node};
+use ankurah::{property::Json, Context, EntityId, Node};
 use ankurah_jwt_auth::{Duration, JwtAgent, JwtClaims, JwtContext, SigningKeys};
 use ankurah_websocket_server::WebsocketServer;
 use anyhow::{Context as _, Result};
@@ -8,9 +8,9 @@ use axum::{
     http::{Request, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
-    Json, Router,
+    Json as AxumJson, Router,
 };
-use community_model::{BanView, RoleGrant, RoleGrantView, Room, RoomView, User, UserView};
+use community_model::{BanView, Room, RoomView, User, UserRoles, UserRolesView, UserView};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -188,8 +188,8 @@ struct SessionResponse {
 /// enforced by `JwtAgent` against `policy.json`.
 async fn auth_session(
     State(state): State<AppState>,
-    Json(req): Json<SessionRequest>,
-) -> Result<Json<SessionResponse>, (StatusCode, String)> {
+    AxumJson(req): AxumJson<SessionRequest>,
+) -> Result<AxumJson<SessionResponse>, (StatusCode, String)> {
     let identity = state
         .oidc
         .verify(&req.id_token, req.nonce.as_deref())
@@ -209,9 +209,17 @@ async fn auth_session(
         return Err((StatusCode::FORBIDDEN, format!("This account is banned: {reason}")));
     }
 
-    let roles = resolve_roles(&state.system_ctx, &user_id, identity.email.as_deref())
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("role resolution failed: {e}")))?;
+    // Roles come straight from the verified id_token (idp.to owns them); this
+    // just normalizes and applies the `member` floor. No storage read.
+    let roles = resolve_roles(&identity.roles);
+
+    // Mirror the resolved roles into the server-maintained `UserRoles` cache so
+    // the UI can render badges without decoding the caller's JWT. Best-effort:
+    // the roles baked into the token below are the source of truth, so a cache
+    // write failure must not fail an otherwise-valid sign-in (badges may lag).
+    if let Err(e) = upsert_user_roles(&state.system_ctx, &user_id, &roles).await {
+        warn!(user = %user_id, "failed to update UserRoles cache (badges may be stale): {e}");
+    }
 
     // `oidc_sub` rides along as a custom claim so the policy's user-collection
     // write scope (`oidc_sub = $jwt.custom.oidc_sub`) pins profile edits to the
@@ -233,59 +241,34 @@ async fn auth_session(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("failed to mint session token: {e}")))?;
 
     // Ops trail: every mint is visible (who, which entity, which roles) so an
-    // unexpected role grant would show up here. Never log the token itself.
+    // unexpected role would show up here. Never log the token itself.
     info!(user = %user_id, email = %claims.email, roles = ?roles, "minted session token");
 
-    Ok(Json(SessionResponse { token }))
+    Ok(AxumJson(SessionResponse { token }))
 }
 
-/// Roles for a user: implicit `Member` plus any persisted `RoleGrant`s.
+/// Resolve the roles to mint into a user's session token.
 ///
-/// Bootstrap: if the idp.to-authenticated email is listed in `ADMIN_EMAILS`
-/// (comma-separated env) and the user has no Admin grant yet, one is created —
-/// entity-bound from then on. Combined with the per-mint log line above, any
-/// unexpected grant is visible in the ops trail.
-async fn resolve_roles(ctx: &Context, user_id: &str, email: Option<&str>) -> Result<Vec<String>> {
-    let mut roles = vec!["Member".to_string()];
-
-    // Scan-and-filter for the same reason as `upsert_user` (see its doc).
-    for grant in ctx.fetch::<RoleGrantView>("true").await? {
-        if grant.user()?.id().to_base64() == user_id {
-            let role = grant.role()?;
-            if !roles.contains(&role) {
-                roles.push(role);
-            }
+/// Source of truth: the idp.to `roles` claim on the verified id_token (passed
+/// through as `identity.roles`). user↔role management is 100% idp.to's
+/// responsibility — the claim carries stable lowercase role keys (e.g.
+/// `["member","moderator"]`), aud-scoped to our Application and gated by the
+/// `roles` scope. We take those keys verbatim, only normalizing defensively
+/// (trim, lowercase, dedup) and always ensuring `member` as the floor so every
+/// authenticated user can view/post.
+///
+/// An absent/empty claim → `["member"]` only. This is the pre-rollout default
+/// (prod ships before idp.to emits the claim; today no one has roles) and stays
+/// the steady-state behavior for ordinary members.
+fn resolve_roles(identity_roles: &[String]) -> Vec<String> {
+    let mut roles = vec!["member".to_string()];
+    for raw in identity_roles {
+        let key = raw.trim().to_ascii_lowercase();
+        if !key.is_empty() && !roles.contains(&key) {
+            roles.push(key);
         }
     }
-
-    if !roles.iter().any(|r| r == "Admin") {
-        if let Some(email) = email {
-            let is_bootstrap_admin =
-                admin_emails().iter().any(|admin| admin.eq_ignore_ascii_case(email));
-            if is_bootstrap_admin {
-                let trx = ctx.begin();
-                trx.create(&RoleGrant {
-                    user: EntityId::from_base64(user_id)?.into(),
-                    role: "Admin".to_string(),
-                })
-                .await?;
-                trx.commit().await?;
-                info!(user = %user_id, %email, "bootstrapped Admin role from ADMIN_EMAILS");
-                roles.push("Admin".to_string());
-            }
-        }
-    }
-
-    Ok(roles)
-}
-
-fn admin_emails() -> Vec<String> {
-    std::env::var("ADMIN_EMAILS")
-        .unwrap_or_default()
-        .split(',')
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect()
+    roles
 }
 
 /// The reason of an active ban for this user, if any.
@@ -323,6 +306,42 @@ async fn upsert_user(ctx: &Context, identity: &VerifiedIdentity) -> Result<Strin
     let user_id = created.id().to_base64();
     trx.commit().await?;
     Ok(user_id)
+}
+
+/// Upsert the server-maintained `UserRoles` display cache for this user.
+///
+/// Scan-and-filter by the user ref (same rationale as `upsert_user`: sign-in is
+/// cold, the community user set is small, and this sidesteps AnkQL Ref-predicate
+/// edge cases). Creates the row when absent; otherwise edits it only when the
+/// role set changed, to avoid pointless writes/syncs.
+///
+/// Runs under the privileged Root context (`system_ctx`), which bypasses policy.
+/// That is the whole point of the `userroles` write privilege being `system` (a
+/// privilege no role holds): only this local server path may write the cache,
+/// so remote clients can never spoof their own role badges.
+async fn upsert_user_roles(ctx: &Context, user_id: &str, roles: &[String]) -> Result<()> {
+    let roles_value =
+        serde_json::Value::Array(roles.iter().map(|r| serde_json::Value::String(r.clone())).collect());
+
+    for existing in ctx.fetch::<UserRolesView>("true").await? {
+        if existing.user()?.id().to_base64() == user_id {
+            // Already current — skip the write to avoid churn.
+            if existing.roles()?.into_inner() == roles_value {
+                return Ok(());
+            }
+            let trx = ctx.begin();
+            let mutable = existing.edit(&trx)?;
+            mutable.roles().set(&Json::new(roles_value.clone()))?;
+            trx.commit().await?;
+            return Ok(());
+        }
+    }
+
+    let trx = ctx.begin();
+    trx.create(&UserRoles { user: EntityId::from_base64(user_id)?.into(), roles: Json::new(roles_value) })
+        .await?;
+    trx.commit().await?;
+    Ok(())
 }
 
 /// Serve the SPA: real files from `static_dir`, with `index.html` as the
@@ -363,4 +382,42 @@ async fn ensure_default_rooms(ctx: &Context) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_roles;
+
+    #[test]
+    fn absent_claim_is_member_only() {
+        // Today's prod reality: no roles claim → member floor only.
+        assert_eq!(resolve_roles(&[]), vec!["member".to_string()]);
+    }
+
+    #[test]
+    fn member_is_always_the_floor() {
+        // A claim that omits member still yields member (plus the granted role).
+        assert_eq!(resolve_roles(&["moderator".to_string()]), vec!["member".to_string(), "moderator".to_string()]);
+    }
+
+    #[test]
+    fn roles_are_normalized_trim_and_lowercase() {
+        let input = vec!["  Moderator ".to_string(), "ADMIN".to_string()];
+        assert_eq!(
+            resolve_roles(&input),
+            vec!["member".to_string(), "moderator".to_string(), "admin".to_string()]
+        );
+    }
+
+    #[test]
+    fn duplicates_are_deduped_including_the_member_floor() {
+        let input = vec!["member".to_string(), "Member".to_string(), "moderator".to_string(), "moderator".to_string()];
+        assert_eq!(resolve_roles(&input), vec!["member".to_string(), "moderator".to_string()]);
+    }
+
+    #[test]
+    fn empty_and_whitespace_only_entries_are_dropped() {
+        let input = vec!["".to_string(), "   ".to_string(), "moderator".to_string()];
+        assert_eq!(resolve_roles(&input), vec!["member".to_string(), "moderator".to_string()]);
+    }
 }
