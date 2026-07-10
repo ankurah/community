@@ -1,7 +1,8 @@
 use leptos::prelude::*;
 
+use ankurah::LiveQuery;
 use ankurah_signals::Get as AnkurahGet;
-use community_model::UserView;
+use community_model::{UserRolesView, UserView};
 
 use crate::{ctx, fmt};
 
@@ -13,6 +14,10 @@ use crate::{ctx, fmt};
 pub fn MembersPanel(on_close: impl Fn() + Clone + 'static) -> impl IntoView {
     // All users, live — new sign-ins appear while the panel is open.
     let users = ctx().query::<UserView>("true").expect("failed to create UserView LiveQuery");
+
+    // Server-maintained role cache (read-only for clients): one row per user
+    // holding the lowercase role keys minted into their latest session token.
+    let user_roles = ctx().query::<UserRolesView>("true").expect("failed to create UserRolesView LiveQuery");
 
     let users_for_count = users.clone();
     let users_for_loading = users.clone();
@@ -70,7 +75,13 @@ pub fn MembersPanel(on_close: impl Fn() + Clone + 'static) -> impl IntoView {
                             }
                         }
                         key=|user: &UserView| user.id()
-                        children=move |user: UserView| view! { <MemberRow user /> }
+                        children={
+                            let user_roles = user_roles.clone();
+                            move |user: UserView| {
+                                let user_roles = user_roles.clone();
+                                view! { <MemberRow user user_roles /> }
+                            }
+                        }
                     />
                 </div>
 
@@ -82,10 +93,14 @@ pub fn MembersPanel(on_close: impl Fn() + Clone + 'static) -> impl IntoView {
     }
 }
 
-/// One directory row: initials avatar (deterministic hue), display name.
+/// One directory row: initials avatar (deterministic hue), display name, and
+/// role badges from the `userroles` cache. Plain members carry no badge, and
+/// neither does a user with no `userroles` row yet (they have never signed in
+/// since the cache was introduced).
 #[component]
-fn MemberRow(user: UserView) -> impl IntoView {
-    let hue = fmt::hue_class(&user.id().to_base64());
+fn MemberRow(user: UserView, user_roles: LiveQuery<UserRolesView>) -> impl IntoView {
+    let user_id = user.id().to_base64();
+    let hue = fmt::hue_class(&user_id);
 
     // Reactive: display names are editable and update live.
     let user_for_name = user.clone();
@@ -95,12 +110,61 @@ fn MemberRow(user: UserView) -> impl IntoView {
     };
     let name_for_initials = name.clone();
 
+    // Badge-worthy roles for this user (reactive: rows appear/change as the
+    // server refreshes the cache on sign-in). "member" is the baseline and
+    // gets no badge; anything else renders capitalized.
+    let badge_roles = move || {
+        user_roles
+            .get()
+            .iter()
+            .find(|row| row.user().ok().map(|r| r.id().to_base64()).as_deref() == Some(user_id.as_str()))
+            .and_then(|row| row.roles().ok())
+            .and_then(|json| {
+                json.as_array()
+                    .map(|arr| arr.iter().filter_map(|v| v.as_str()).map(|s| s.to_string()).collect::<Vec<String>>())
+            })
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|role| role != "member")
+            .collect::<Vec<String>>()
+    };
+
     view! {
         <div class="memberRow">
             <div class=format!("memberAvatar {}", hue) aria-hidden="true">
                 {move || fmt::initials(&name_for_initials())}
             </div>
             <span class="memberName">{name}</span>
+            {move || {
+                let roles = badge_roles();
+                (!roles.is_empty())
+                    .then(|| {
+                        view! {
+                            <span class="memberBadges">
+                                {roles
+                                    .into_iter()
+                                    .map(|role| {
+                                        view! {
+                                            <span class=format!(
+                                                "roleBadge role-{}",
+                                                role,
+                                            )>{capitalize(&role)}</span>
+                                        }
+                                    })
+                                    .collect_view()}
+                            </span>
+                        }
+                    })
+            }}
         </div>
+    }
+}
+
+/// "moderator" → "Moderator" for badge labels (role keys are lowercase ASCII).
+fn capitalize(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
     }
 }
