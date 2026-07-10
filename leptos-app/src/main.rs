@@ -67,11 +67,13 @@ pub fn current_user_id() -> EntityId {
     EntityId::from_base64(&claims.sub).expect("JWT sub is a valid entity id")
 }
 
-/// The signed-in user's roles, as carried by the stored session token. UI
-/// gating only — the server enforces the real policy at token mint and on
-/// every read/write. Unlike `current_user_id`, this must never panic: it is
-/// called from rendering paths where a missing or unreadable token should
-/// simply mean "no privileges", so any failure yields an empty Vec.
+/// The signed-in user's roles, as carried by the stored session token. Roles
+/// are managed by the IdP and arrive as lowercase stable keys ("member",
+/// "moderator", "admin"). UI gating only — the server enforces the real
+/// policy at token mint and on every read/write. Unlike `current_user_id`,
+/// this must never panic: it is called from rendering paths where a missing
+/// or unreadable token should simply mean "no privileges", so any failure
+/// yields an empty Vec.
 pub fn current_user_roles() -> Vec<String> {
     let Ok(guard) = AUTH_TOKEN.read() else { return Vec::new() };
     let Some(token) = guard.as_deref() else { return Vec::new() };
@@ -79,10 +81,7 @@ pub fn current_user_roles() -> Vec<String> {
 }
 
 /// Whether the signed-in user holds a moderation-capable role (UI gating only).
-pub fn can_moderate() -> bool { current_user_roles().iter().any(|r| r == "Moderator" || r == "Admin") }
-
-/// Whether the signed-in user may manage role grants (UI gating only).
-pub fn can_manage_roles() -> bool { current_user_roles().iter().any(|r| r == "Admin") }
+pub fn can_moderate() -> bool { current_user_roles().iter().any(|r| r == "moderator" || r == "admin") }
 
 fn main() {
     console_error_panic_hook::set_once();
