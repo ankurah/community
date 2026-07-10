@@ -26,6 +26,12 @@ pub struct VerifiedIdentity {
     pub sub: String,
     pub email: Option<String>,
     pub name: Option<String>,
+    /// Role keys carried by the token's optional `roles` claim (empty when the
+    /// claim is absent or malformed). idp.to owns user↔role management; these
+    /// keys are resolved into the minted session token's roles (see
+    /// `resolve_roles` in `main.rs`, which normalizes and applies the `member`
+    /// floor).
+    pub roles: Vec<String>,
 }
 
 /// Only the claims we read. `jsonwebtoken` validates `iss`/`aud`/`exp`
@@ -39,6 +45,34 @@ struct IdTokenClaims {
     name: Option<String>,
     #[serde(default)]
     nonce: Option<String>,
+    /// Optional per-Application `roles` claim: a JSON array of stable lowercase
+    /// role keys (e.g. `["member","moderator"]`), gated by the idp.to `roles`
+    /// scope. Captured as a raw `Value` — not `Vec<String>` — so a malformed
+    /// claim degrades to "no roles" instead of failing an otherwise-valid token.
+    /// Absent until idp.to ships the scope; today's prod tokens carry no roles.
+    #[serde(default)]
+    roles: Option<serde_json::Value>,
+}
+
+/// Pull the optional `roles` claim into a `Vec<String>`. Tolerant by design
+/// (mirrors `ankurah_jwt_auth::parse_claims_unverified`): a non-array claim, or
+/// array entries that are not strings, are ignored rather than erroring — a
+/// malformed `roles` claim must never break sign-in, only fail closed to
+/// member. A malformed-but-present claim is a broken IdP contract though, so
+/// it warns rather than vanishing into the member floor. Normalization (trim,
+/// lowercase, dedup) and the `member` floor happen later, at mint.
+fn extract_roles(claim: Option<&serde_json::Value>) -> Vec<String> {
+    let Some(value) = claim else { return Vec::new() };
+    let Some(arr) = value.as_array() else {
+        tracing::warn!(claim = %value, "id_token `roles` claim is not an array; ignoring it");
+        return Vec::new();
+    };
+    let roles: Vec<String> =
+        arr.iter().filter_map(|v| v.as_str().map(str::to_string)).collect();
+    if roles.is_empty() && !arr.is_empty() {
+        tracing::warn!(claim = %value, "id_token `roles` claim has no string entries; ignoring it");
+    }
+    roles
 }
 
 #[derive(Debug, Deserialize)]
@@ -100,7 +134,8 @@ impl OidcVerifier {
             }
         }
 
-        Ok(VerifiedIdentity { sub: claims.sub, email: claims.email, name: claims.name })
+        let roles = extract_roles(claims.roles.as_ref());
+        Ok(VerifiedIdentity { sub: claims.sub, email: claims.email, name: claims.name, roles })
     }
 
     /// Get a decoding key by `kid`, refetching the JWKS once if we don't have it
@@ -151,4 +186,75 @@ impl OidcVerifier {
 
 fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn extract_roles_present() {
+        let value = json!(["member", "moderator"]);
+        assert_eq!(extract_roles(Some(&value)), vec!["member".to_string(), "moderator".to_string()]);
+    }
+
+    #[test]
+    fn extract_roles_absent() {
+        assert!(extract_roles(None).is_empty());
+        // An explicit JSON null is also treated as "no roles".
+        assert!(extract_roles(Some(&serde_json::Value::Null)).is_empty());
+    }
+
+    #[test]
+    fn extract_roles_wrong_type_is_empty_not_error() {
+        // A string, object, number, or bool where an array was expected must
+        // degrade to no roles — never break sign-in.
+        assert!(extract_roles(Some(&json!("moderator"))).is_empty());
+        assert!(extract_roles(Some(&json!({ "member": true }))).is_empty());
+        assert!(extract_roles(Some(&json!(42))).is_empty());
+    }
+
+    #[test]
+    fn extract_roles_ignores_non_string_array_entries() {
+        // Mixed array: keep the strings, drop the rest.
+        let value = json!(["member", 7, null, "moderator", { "x": 1 }]);
+        assert_eq!(extract_roles(Some(&value)), vec!["member".to_string(), "moderator".to_string()]);
+    }
+
+    #[test]
+    fn id_token_claims_deserialize_without_roles() {
+        // A token with no `roles` claim (today's prod reality) parses fine and
+        // yields no roles.
+        let claims: IdTokenClaims = serde_json::from_value(json!({
+            "sub": "idp-sub-123",
+            "email": "a@example.com",
+            "name": "A"
+        }))
+        .expect("token without roles must still parse");
+        assert_eq!(claims.sub, "idp-sub-123");
+        assert!(extract_roles(claims.roles.as_ref()).is_empty());
+    }
+
+    #[test]
+    fn id_token_claims_deserialize_with_malformed_roles() {
+        // A present-but-malformed `roles` claim must not fail token
+        // deserialization (roles is captured as a raw Value).
+        let claims: IdTokenClaims = serde_json::from_value(json!({
+            "sub": "idp-sub-123",
+            "roles": "moderator"
+        }))
+        .expect("malformed roles claim must not fail token parsing");
+        assert!(extract_roles(claims.roles.as_ref()).is_empty());
+    }
+
+    #[test]
+    fn id_token_claims_deserialize_with_roles_array() {
+        let claims: IdTokenClaims = serde_json::from_value(json!({
+            "sub": "idp-sub-123",
+            "roles": ["member", "moderator"]
+        }))
+        .expect("well-formed roles claim parses");
+        assert_eq!(extract_roles(claims.roles.as_ref()), vec!["member".to_string(), "moderator".to_string()]);
+    }
 }

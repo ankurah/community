@@ -8,13 +8,16 @@ use community_model::MessageView;
 use crate::ctx;
 
 /// Context menu for message actions (edit, delete).
-/// Appears on right-click of own messages.
+/// Appears on right-click of own messages, and — for moderators — anyone's.
 #[component]
 pub fn MessageContextMenu(
     x: i32,
     y: i32,
     message: MessageView,
     editing_message: RwSignal<Option<MessageView>>,
+    /// Whether the message belongs to the viewer. Own messages offer Edit +
+    /// Delete; someone else's (the moderator case) offers delete only.
+    is_own: bool,
     on_close: impl Fn() + Clone + 'static,
 ) -> impl IntoView {
     let menu_ref = NodeRef::<leptos::html::Div>::new();
@@ -132,13 +135,18 @@ pub fn MessageContextMenu(
             style:left=move || format!("{}px", position.get().0)
             style:top=move || format!("{}px", position.get().1)
         >
-            <button class="contextMenuItem" on:click=handle_edit>
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-                    stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                    <path d="M17 3a2.8 2.8 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5z" />
-                </svg>
-                "Edit message"
-            </button>
+            {is_own
+                .then(|| {
+                    view! {
+                        <button class="contextMenuItem" on:click=handle_edit>
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                                stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                <path d="M17 3a2.8 2.8 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5z" />
+                            </svg>
+                            "Edit message"
+                        </button>
+                    }
+                })}
             <button class="contextMenuItem contextMenuItemDanger" on:click=handle_delete>
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
                     stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -146,7 +154,7 @@ pub fn MessageContextMenu(
                     <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
                     <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
                 </svg>
-                "Delete"
+                {if is_own { "Delete" } else { "Delete (moderator)" }}
             </button>
         </div>
     }

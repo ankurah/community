@@ -1,4 +1,4 @@
-/* Right-click menu on own messages. */
+/* Right-click menu on own messages (and, for moderators, anyone's). */
 
 .contextMenu {
   min-width: 168px;

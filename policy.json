@@ -1,8 +1,11 @@
 {
   "roles": {
+    "member": ["view", "post"],
+    "moderator": ["view", "post", "moderate"],
+    "admin": ["view", "post", "moderate"],
     "Member": ["view", "post"],
     "Moderator": ["view", "post", "moderate"],
-    "Admin": ["view", "post", "moderate", "manage_roles"]
+    "Admin": ["view", "post", "moderate"]
   },
   "collections": {
     "user": {
@@ -26,9 +29,9 @@
         { "filter": "user = $jwt.sub", "applies_to": "write", "unless_privilege": "moderate" }
       ]
     },
-    "rolegrant": {
+    "userroles": {
       "read": "view",
-      "write": "manage_roles"
+      "write": "system"
     },
     "ban": {
       "read": "moderate",

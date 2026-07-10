@@ -1,0 +1,216 @@
+/* Members directory modal — a read-only roster, no controls. */
+
+.membersOverlay {
+  position: fixed;
+  inset: 0;
+  background-color: rgb(10 20 17 / 55%);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: var(--sp-5);
+  animation: membersOverlayIn 150ms var(--ease) both;
+}
+
+@keyframes membersOverlayIn {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
+.membersContent {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-xl);
+  padding: var(--sp-6);
+  max-width: 420px;
+  width: 100%;
+  max-height: min(560px, calc(100dvh - var(--sp-8)));
+  display: flex;
+  flex-direction: column;
+  box-shadow: var(--shadow-3);
+  animation: membersModalIn 180ms var(--ease) both;
+}
+
+@keyframes membersModalIn {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.97);
+  }
+
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.membersHeader {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: var(--sp-3);
+  margin-bottom: var(--sp-4);
+}
+
+.membersHeader h2 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 750;
+  letter-spacing: -0.01em;
+  color: var(--text);
+}
+
+.membersSubtitle {
+  margin: 3px 0 0;
+  font-size: var(--fs-md);
+  color: var(--text-3);
+}
+
+.membersCloseButton {
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  font-size: 26px;
+  line-height: 1;
+  color: var(--text-3);
+  cursor: pointer;
+  padding: 0;
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--r-sm);
+  transition:
+    color var(--t-fast) var(--ease),
+    background-color var(--t-fast) var(--ease);
+}
+
+.membersCloseButton:hover {
+  color: var(--text);
+  background-color: var(--surface-3);
+}
+
+/* Scrollable roster; hover wash bleeds into the negative margin. */
+.membersList {
+  flex: 1;
+  min-height: 80px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0 calc(var(--sp-2) * -1);
+  padding: 0 var(--sp-2);
+}
+
+.membersState {
+  padding: var(--sp-5) 0;
+  text-align: center;
+  color: var(--text-3);
+  font-size: var(--fs-md);
+}
+
+.memberRow {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: 7px var(--sp-2);
+  border-radius: var(--r-md);
+}
+
+.memberRow:hover {
+  background: var(--surface-2);
+}
+
+.memberAvatar {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  font-size: 12px;
+  font-weight: 750;
+  letter-spacing: 0.02em;
+  color: #ffffff;
+  border-radius: 9px;
+  user-select: none;
+}
+
+.memberAvatar.hue-0 { background: var(--hue-0); }
+.memberAvatar.hue-1 { background: var(--hue-1); }
+.memberAvatar.hue-2 { background: var(--hue-2); }
+.memberAvatar.hue-3 { background: var(--hue-3); }
+.memberAvatar.hue-4 { background: var(--hue-4); }
+.memberAvatar.hue-5 { background: var(--hue-5); }
+.memberAvatar.hue-6 { background: var(--hue-6); }
+.memberAvatar.hue-7 { background: var(--hue-7); }
+
+.memberName {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--fs-base);
+  font-weight: 550;
+  color: var(--text);
+}
+
+/* Role badges — IdP-assigned, display only. Plain members carry none. */
+.memberBadges {
+  display: flex;
+  gap: var(--sp-1);
+  flex-shrink: 0;
+}
+
+.roleBadge {
+  padding: 2px 8px;
+  font-size: var(--fs-xs);
+  font-weight: 650;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  border-radius: var(--r-full);
+  border: 1px solid var(--border-strong);
+  background: var(--surface-3);
+  color: var(--text-2);
+}
+
+/* Accent mint is a brand constant, so this reads in both themes. */
+.roleBadge.role-admin {
+  background: var(--accent);
+  border-color: transparent;
+  color: var(--on-accent);
+}
+
+.roleBadge.role-moderator {
+  background: var(--surface-2);
+  border-color: var(--border-strong);
+  color: var(--link);
+}
+
+.membersNote {
+  margin: var(--sp-4) 0 0;
+  padding-top: var(--sp-4);
+  border-top: 1px solid var(--border);
+  text-align: center;
+  color: var(--text-3);
+  font-size: var(--fs-sm);
+  line-height: 1.5;
+}
+
+@media (max-width: 480px) {
+  .membersContent {
+    padding: var(--sp-5);
+    max-height: calc(100dvh - var(--sp-6));
+  }
+
+  .membersHeader h2 {
+    font-size: var(--fs-lg);
+  }
+}

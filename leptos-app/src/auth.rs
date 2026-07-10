@@ -16,21 +16,34 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use wasm_bindgen::{JsCast, JsValue};
-use wasm_bindgen_futures::JsFuture;
+use wasm_bindgen_futures::{spawn_local, JsFuture};
 use web_sys::{window, Headers, Request, RequestInit, Response, Storage, UrlSearchParams};
 
 // --- idp.to public-client config (verified against their live discovery doc) ---
 const CLIENT_ID: &str = "app_HsW5XyYWbr0KQrHZb5iejw";
 const AUTHORIZE_ENDPOINT: &str = "https://id.idp.to/oidc/authorize";
 const TOKEN_ENDPOINT: &str = "https://id.idp.to/oidc/token";
-const SCOPE: &str = "openid profile email";
+const DISCOVERY_ENDPOINT: &str = "https://id.idp.to/.well-known/openid-configuration";
+/// Always-requested base scopes.
+const BASE_SCOPE: &str = "openid profile email";
+/// Opt-in scope that makes idp.to include the `roles` claim in the id_token.
+/// Only requested when the discovery doc advertises it (see `start_sign_in`).
+const ROLES_SCOPE: &str = "roles";
 
 // sessionStorage keys for one-time PKCE material (survives the redirect, not the tab).
 const SS_VERIFIER: &str = "pkce_verifier";
 const SS_STATE: &str = "oauth_state";
 const SS_NONCE: &str = "oidc_nonce";
+/// sessionStorage flag recording that the current authorize request asked for
+/// the `roles` scope — read by the callback to self-heal an `invalid_scope`
+/// bounce.
+const SS_ROLES_REQUESTED: &str = "oidc_roles_requested";
 // localStorage key for the minted ankurah session token (survives reloads).
 const LS_TOKEN: &str = "community_session_token";
+/// localStorage flag: once idp.to has rejected the `roles` scope for our
+/// Application (their per-Application allowed_scopes lagging their global
+/// discovery doc), stop requesting it. Persists across sessions until cleared.
+const LS_SUPPRESS_ROLES: &str = "oidc_suppress_roles_scope";
 
 /// The callback path our SPA fallback serves (also a registered redirect_uri).
 const CALLBACK_PATH: &str = "/auth/callback";
@@ -55,6 +68,12 @@ pub fn is_callback() -> bool {
 
 /// Begin sign-in: generate PKCE + state + nonce, stash them, and redirect to
 /// idp.to. This navigates away, so it does not return on success.
+///
+/// The `roles` scope is requested conditionally (see [`redirect_to_authorize`]
+/// and [`discovery_supports_roles`]). Because that decision may require a
+/// discovery fetch, the redirect can happen asynchronously — the synchronous
+/// setup still validates up front, but a returned `Ok(())` means "sign-in
+/// initiated", not "already navigated".
 pub fn start_sign_in() -> Result<(), JsValue> {
     let window = window().ok_or_else(|| JsValue::from_str("no window"))?;
     let origin = window.location().origin().map_err(|_| JsValue::from_str("no origin"))?;
@@ -70,15 +89,60 @@ pub fn start_sign_in() -> Result<(), JsValue> {
     ss.set_item(SS_STATE, &state)?;
     ss.set_item(SS_NONCE, &nonce)?;
 
+    // The `roles` scope is opt-in: request it only when idp.to's discovery doc
+    // advertises it, and never once idp.to has bounced us with `invalid_scope`
+    // (their per-Application allowed_scopes can lag their discovery doc). When
+    // suppressed we skip the discovery fetch entirely and redirect immediately.
+    if roles_suppressed() {
+        return redirect_to_authorize(&window, &redirect_uri, BASE_SCOPE, &state, &nonce, &challenge, false);
+    }
+
+    // Otherwise consult discovery off the critical path: a slow, failed, or
+    // unparseable fetch must never block or break sign-in — it simply means no
+    // roles scope. This spawns and returns; the redirect fires once the fetch
+    // settles.
+    spawn_local(async move {
+        let include_roles = discovery_supports_roles().await;
+        let scope =
+            if include_roles { format!("{BASE_SCOPE} {ROLES_SCOPE}") } else { BASE_SCOPE.to_string() };
+        // `web_sys::window()` (not the shadowed local `window` binding above).
+        if let Some(w) = web_sys::window() {
+            let _ = redirect_to_authorize(&w, &redirect_uri, &scope, &state, &nonce, &challenge, include_roles);
+        }
+    });
+
+    Ok(())
+}
+
+/// Build the authorize URL and navigate to it. Records whether the `roles` scope
+/// was requested (in sessionStorage) so the callback can self-heal an
+/// `invalid_scope` bounce. Navigates away on success.
+fn redirect_to_authorize(
+    window: &web_sys::Window,
+    redirect_uri: &str,
+    scope: &str,
+    state: &str,
+    nonce: &str,
+    challenge: &str,
+    roles_requested: bool,
+) -> Result<(), JsValue> {
+    if let Some(ss) = session_storage() {
+        if roles_requested {
+            let _ = ss.set_item(SS_ROLES_REQUESTED, "1");
+        } else {
+            let _ = ss.remove_item(SS_ROLES_REQUESTED);
+        }
+    }
+
     let auth_url = format!(
         "{AUTHORIZE_ENDPOINT}?response_type=code&client_id={client}&redirect_uri={redirect}\
          &scope={scope}&state={state}&nonce={nonce}&code_challenge={challenge}&code_challenge_method=S256",
         client = enc(CLIENT_ID),
-        redirect = enc(&redirect_uri),
-        scope = enc(SCOPE),
-        state = enc(&state),
-        nonce = enc(&nonce),
-        challenge = enc(&challenge),
+        redirect = enc(redirect_uri),
+        scope = enc(scope),
+        state = enc(state),
+        nonce = enc(nonce),
+        challenge = enc(challenge),
     );
 
     window.location().assign(&auth_url)
@@ -95,6 +159,15 @@ pub async fn handle_callback() -> Result<String, String> {
     let params = UrlSearchParams::new_with_str(&search).map_err(|_| "malformed query string")?;
 
     if let Some(error) = params.get("error") {
+        // Self-heal: idp.to's per-Application allowed_scopes can lag its global
+        // discovery doc, so requesting `roles` may bounce with `invalid_scope`
+        // even though discovery advertised it. If we asked for `roles`, remember
+        // to stop (persisted flag) and restart sign-in once without the scope.
+        if error == "invalid_scope" && roles_were_requested() {
+            suppress_roles();
+            let _ = start_sign_in(); // now suppressed → redirects without `roles`
+            return Err("idp.to rejected the `roles` scope; retrying sign-in without it".into());
+        }
         let desc = params.get("error_description").unwrap_or_default();
         return Err(format!("idp.to returned an error: {error} {desc}"));
     }
@@ -135,6 +208,7 @@ pub async fn handle_callback() -> Result<String, String> {
     let _ = ss.remove_item(SS_VERIFIER);
     let _ = ss.remove_item(SS_STATE);
     let _ = ss.remove_item(SS_NONCE);
+    let _ = ss.remove_item(SS_ROLES_REQUESTED);
 
     Ok(session.token)
 }
@@ -234,4 +308,74 @@ fn session_storage() -> Option<Storage> {
 
 fn local_storage() -> Option<Storage> {
     window()?.local_storage().ok().flatten()
+}
+
+/// Best-effort probe of idp.to's discovery doc for the `roles` scope. ANY
+/// failure — no window, network error, non-200, unparseable body, or a missing
+/// `scopes_supported` — returns `false`, so sign-in proceeds without the scope.
+/// This fetch must never break sign-in.
+async fn discovery_supports_roles() -> bool {
+    async fn probe() -> Result<bool, String> {
+        let window = window().ok_or("no window")?;
+
+        let opts = RequestInit::new();
+        opts.set_method("GET");
+        let request = Request::new_with_str_and_init(DISCOVERY_ENDPOINT, &opts).map_err(js_err)?;
+
+        let response_value = JsFuture::from(window.fetch_with_request(&request)).await.map_err(js_err)?;
+        let response: Response =
+            response_value.dyn_into().map_err(|_| "fetch did not return a Response".to_string())?;
+        if !response.ok() {
+            return Err(format!("discovery HTTP {}", response.status()));
+        }
+
+        let text_js = JsFuture::from(response.text().map_err(js_err)?).await.map_err(js_err)?;
+        let text = text_js.as_string().unwrap_or_default();
+        let doc: DiscoveryDoc = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+        Ok(doc.scopes_supported.iter().any(|s| s == ROLES_SCOPE))
+    }
+
+    probe().await.unwrap_or(false)
+}
+
+/// Just the one field we need from the OIDC discovery document.
+#[derive(Deserialize)]
+struct DiscoveryDoc {
+    #[serde(default)]
+    scopes_supported: Vec<String>,
+}
+
+/// How long an `invalid_scope` bounce suppresses the `roles` scope. The idp
+/// can advertise `roles` in discovery before our Application's allowed_scopes
+/// includes it; suppression bridges that lag without permanently pinning this
+/// browser to role-less sign-ins — after the TTL we probe again.
+const SUPPRESS_ROLES_TTL_MS: f64 = 24.0 * 60.0 * 60.0 * 1000.0;
+
+/// Whether we've been told to stop requesting the `roles` scope for this
+/// Application (set after an `invalid_scope` bounce; expires after
+/// [`SUPPRESS_ROLES_TTL_MS`]). A stale or unparseable flag is cleared.
+fn roles_suppressed() -> bool {
+    let Some(ls) = local_storage() else { return false };
+    let Some(raw) = ls.get_item(LS_SUPPRESS_ROLES).ok().flatten() else { return false };
+    let fresh = raw
+        .parse::<f64>()
+        .map(|t| js_sys::Date::now() - t < SUPPRESS_ROLES_TTL_MS)
+        .unwrap_or(false);
+    if !fresh {
+        let _ = ls.remove_item(LS_SUPPRESS_ROLES);
+    }
+    fresh
+}
+
+/// Stop requesting the `roles` scope until the TTL lapses (see
+/// [`roles_suppressed`]).
+fn suppress_roles() {
+    if let Some(ls) = local_storage() {
+        let _ = ls.set_item(LS_SUPPRESS_ROLES, &js_sys::Date::now().to_string());
+    }
+}
+
+/// Whether the in-flight authorize request asked for the `roles` scope.
+fn roles_were_requested() -> bool {
+    session_storage().and_then(|ss| ss.get_item(SS_ROLES_REQUESTED).ok().flatten()).is_some()
 }

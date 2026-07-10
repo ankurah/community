@@ -160,8 +160,9 @@
   border-color: var(--accent);
 }
 
-/* Icon button (QR code) */
-.qrButton {
+/* Icon buttons (members, QR code) */
+.qrButton,
+.membersButton {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -178,17 +179,20 @@
     color var(--t-fast) var(--ease);
 }
 
-.qrButton svg {
+.qrButton svg,
+.membersButton svg {
   width: 18px;
   height: 18px;
 }
 
-.qrButton:hover {
+.qrButton:hover,
+.membersButton:hover {
   background: var(--chrome-hover);
   color: var(--chrome-text);
 }
 
-.qrButton:active {
+.qrButton:active,
+.membersButton:active {
   background: var(--chrome-active);
 }
 

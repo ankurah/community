@@ -62,7 +62,7 @@ Decide when wiring. Either way, a verified identity → `JwtContext::from_claims
 
 ```json
 {
-  "roles": { "Member": ["view", "post"] },
+  "roles": { "member": ["view", "post"] },
   "collections": {
     "message": {
       "read": "view", "write": "post",

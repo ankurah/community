@@ -20,6 +20,7 @@ mod debug_overlay;
 mod editable_text_field;
 mod fmt;
 mod header;
+mod members_panel;
 mod message_context_menu;
 mod message_input;
 mod message_list;
@@ -66,6 +67,22 @@ pub fn current_user_id() -> EntityId {
     let claims = parse_claims_unverified(&token).expect("stored token is a valid JWT");
     EntityId::from_base64(&claims.sub).expect("JWT sub is a valid entity id")
 }
+
+/// The signed-in user's roles, as carried by the stored session token. Roles
+/// are managed by the IdP and arrive as lowercase stable keys ("member",
+/// "moderator", "admin"). UI gating only — the server enforces the real
+/// policy at token mint and on every read/write. Unlike `current_user_id`,
+/// this must never panic: it is called from rendering paths where a missing
+/// or unreadable token should simply mean "no privileges", so any failure
+/// yields an empty Vec.
+pub fn current_user_roles() -> Vec<String> {
+    let Ok(guard) = AUTH_TOKEN.read() else { return Vec::new() };
+    let Some(token) = guard.as_deref() else { return Vec::new() };
+    parse_claims_unverified(token).map(|claims| claims.roles).unwrap_or_default()
+}
+
+/// Whether the signed-in user holds a moderation-capable role (UI gating only).
+pub fn can_moderate() -> bool { current_user_roles().iter().any(|r| r == "moderator" || r == "admin") }
 
 fn main() {
     console_error_panic_hook::set_once();

@@ -4,12 +4,16 @@ use web_sys::window;
 use ankurah_signals::Get as AnkurahGet;
 use community_model::UserView;
 
-use crate::{ctx, editable_text_field::EditableTextField, fmt, qr_code_modal::QRCodeModal, ws_client};
+use crate::{
+    ctx, editable_text_field::EditableTextField, fmt, members_panel::MembersPanel, qr_code_modal::QRCodeModal, ws_client,
+};
 
-/// Header component displaying app title, user info, connection status, and QR code button.
+/// Header component displaying app title, user info, connection status, and
+/// the members / QR code / sign-out buttons.
 #[component]
 pub fn Header(current_user: RwSignal<Option<UserView>>) -> impl IntoView {
     let show_qr_code = RwSignal::new(false);
+    let show_members = RwSignal::new(false);
 
     // Live connection state from the WebSocket client. Reading the reactive
     // `Read<ConnectionState>` under the ReactiveGraphObserver re-renders on change.
@@ -90,6 +94,19 @@ pub fn Header(current_user: RwSignal<Option<UserView>>) -> impl IntoView {
                         </Show>
                     </div>
                     <button
+                        class="membersButton"
+                        on:click=move |_| show_members.set(true)
+                        title="Members"
+                    >
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                            stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                            <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
+                            <circle cx="9" cy="7" r="4" />
+                            <path d="M23 21v-2a4 4 0 0 0-3-3.87" />
+                            <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+                        </svg>
+                    </button>
+                    <button
                         class="qrButton"
                         on:click=move |_| show_qr_code.set(true)
                         title="Show QR Code"
@@ -117,6 +134,9 @@ pub fn Header(current_user: RwSignal<Option<UserView>>) -> impl IntoView {
             </div>
             <Show when=move || show_qr_code.get()>
                 <QRCodeModal url=current_url.clone() on_close=move || show_qr_code.set(false) />
+            </Show>
+            <Show when=move || show_members.get()>
+                <MembersPanel on_close=move || show_members.set(false) />
             </Show>
         </>
     }

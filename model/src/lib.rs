@@ -1,4 +1,4 @@
-use ankurah::{Model, Ref};
+use ankurah::{property::Json, Model, Ref};
 use serde::{Deserialize, Serialize};
 
 #[derive(Model, Debug, Serialize, Deserialize)]
@@ -20,16 +20,24 @@ pub struct Room {
     pub created_by: Option<Ref<User>>,
 }
 
-/// A role granted to a user (e.g. "Moderator", "Admin"). Kept separate from
-/// `User` because ankurah policy rules are collection-level: profile fields
-/// stay self-editable while grants require the `manage_roles` privilege.
-/// Roles are read at token mint time (server) — changing a grant takes effect
-/// on the user's next session.
+/// Server-maintained display cache of a user's roles — one row per user.
+///
+/// Roles are NOT managed here. The source of truth is the idp.to `roles` claim
+/// carried in the verified id_token and baked into the ankurah session token at
+/// mint time (see `server::resolve_roles`); this row only mirrors that result so
+/// the UI can render role badges without decoding the caller's JWT.
+///
+/// It is written exclusively by the server's privileged (Root) context. The
+/// `userroles` policy entry requires a `system` write privilege that no role
+/// holds, so remote JWT-bearing clients can never write it — otherwise a client
+/// could spoof its own role badges.
 #[derive(Model, Debug, Serialize, Deserialize)]
-pub struct RoleGrant {
+pub struct UserRoles {
     #[active_type(LWW)]
     pub user: Ref<User>,
-    pub role: String,
+    /// JSON array of stable lowercase role keys (e.g. `["member","moderator"]`),
+    /// mirroring the roles minted into the user's most recent session token.
+    pub roles: Json,
 }
 
 /// A moderation ban. Enforced at token mint (banned users are refused a new
