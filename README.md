@@ -58,13 +58,19 @@ configurable URL for native clients).
 - `timestamp: i64` (LWW) — Unix milliseconds
 - `deleted: bool` (LWW) — soft-delete flag
 
-## Authentication
+## Authentication & authorization
 
-The app currently uses **anonymous auth** as a placeholder: a random `User`
-persisted in `localStorage`, with `PermissiveAgent` on the server. Real sign-in
-via [idp.to](https://idp.to) OIDC — verifying the ID token and re-minting an
-Ankurah `JwtAgent` session (federate-and-remint) — drops in at the `ensure_user()`
-seam in `leptos-app/src/main.rs`. See [`docs/auth.md`](docs/auth.md).
+Sign-in is [idp.to](https://idp.to) OIDC (PKCE, passkeys). The client posts the
+verified ID token to `POST /auth/session`; the server validates it against the
+idp.to JWKS and re-mints an Ankurah `JwtAgent` session token
+(federate-and-remint), enforced end-to-end by the policy in `policy.json`.
+
+Roles (`member` / `moderator` / `admin`) are **owned by the IdP**: they arrive
+as a required `roles` claim in the ID token (an ID token without a well-formed
+roles array fails sign-in), are administered in the idp.to console, and are
+minted verbatim into the session token with a `member` floor. The server keeps
+a read-only `userroles` cache per user so the Members panel can show badges.
+See [`docs/auth.md`](docs/auth.md).
 
 ## End-to-end tests
 
