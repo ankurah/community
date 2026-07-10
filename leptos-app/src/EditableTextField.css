@@ -1,28 +1,44 @@
+/* Click-to-edit text field (used for the display name in the header). */
+
 .editableText {
   cursor: pointer;
-  padding: 4px 8px;
-  border-radius: 4px;
-  transition: background-color 0.2s;
+  padding: 3px 8px;
+  border-radius: var(--r-sm);
   line-height: 20px;
   display: inline-block;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: middle;
+  transition: background-color var(--t-fast) var(--ease);
 }
 
 .editableText:hover {
-  background-color: rgba(255, 255, 255, 0.1);
+  background-color: var(--surface-3);
+  text-decoration: underline dashed;
+  text-decoration-color: currentColor;
+  text-underline-offset: 3px;
+  text-decoration-thickness: 1px;
 }
 
 .editableInput {
-  padding: 4px 8px;
-  border: 1px solid #4299e1;
-  border-radius: 4px;
-  background-color: white;
-  color: #2d3748;
-  font-size: 14px;
+  padding: 3px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-sm);
+  background-color: var(--surface);
+  color: var(--text);
+  font-size: var(--fs-md);
   font-family: inherit;
   outline: none;
   min-width: 120px;
+  max-width: 180px;
   line-height: 20px;
   height: 28px;
   box-sizing: border-box;
+  transition: border-color var(--t-fast) var(--ease);
 }
 
+.editableInput:focus {
+  border-color: var(--link);
+}

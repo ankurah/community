@@ -69,18 +69,28 @@ pub fn RoomList(
     Effect::new(auto_select_room(&rooms, selected_room));
     Effect::new(sync_url_with_room(&selected_room));
 
+    let rooms_for_empty = rooms.clone();
+
     view! {
         <div class="sidebar">
             <div class="sidebarHeader">
-                <span>"Rooms"</span>
+                <span class="sidebarTitle">"Rooms"</span>
                 <button class="createRoomButton" on:click=move |_| is_creating.set(true) title="Create new room">
-                    "+"
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"
+                        stroke-linecap="round" aria-hidden="true">
+                        <path d="M12 5v14" />
+                        <path d="M5 12h14" />
+                    </svg>
                 </button>
             </div>
 
             <div class="roomList">
                 <Show when=move || is_creating.get()>
                     <NewRoomInput selected_room=selected_room on_cancel=move || is_creating.set(false) />
+                </Show>
+
+                <Show when=move || rooms_for_empty.get().is_empty()>
+                    <div class="emptyRooms">"No rooms yet — press + to plant one."</div>
                 </Show>
 
                 <RoomListUl rooms selected_room notification_manager />
@@ -131,7 +141,8 @@ fn RoomItem(room: RoomView, selected_room: RwSignal<Option<RoomView>>, notificat
             class=move || if is_selected() { "roomItem selected" } else { "roomItem" }
             on:click=move |_| selected_room.set(Some(room_for_click.clone()))
         >
-            "# " {name}
+            <span class="roomHash" aria-hidden="true">"#"</span>
+            <span class="roomLabel">{name}</span>
             {move || {
                 // Read reactively so the badge updates as messages arrive.
                 let unread_count = notification_manager.unread_count(&room_id_badge);

@@ -160,30 +160,44 @@ pub fn MessageInput(
     let send_click = send.clone();
     view! {
         <div class="inputContainer">
-            <input
-                type="text"
-                class="input"
-                placeholder="Type a message..."
-                prop:value=move || message_input.get()
-                on:input=move |ev| message_input.set(event_target_value(&ev))
-                on:keydown=handle_key_down
-                prop:disabled=move || !is_connected()
-            />
-            <button class="button" on:click=move |_| send_click() prop:disabled=move || !can_send()>
-                {move || if editing_message.get().is_some() { "Update" } else { "Send" }}
-            </button>
             <Show when=move || editing_message.get().is_some()>
-                <button
-                    class="button"
-                    on:click=move |_| {
-                        editing_message.set(None);
-                        message_input.set(String::new());
-                    }
-                    style="margin-left: 8px"
-                >
-                    "Cancel"
-                </button>
+                <div class="editingNotice">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                        stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <path d="M17 3a2.8 2.8 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5z" />
+                    </svg>
+                    <span>"Editing message"</span>
+                    <span class="editingNoticeHint">
+                        <kbd>"Esc"</kbd>
+                        " to cancel"
+                    </span>
+                </div>
             </Show>
+            <div class="inputRow">
+                <input
+                    type="text"
+                    class="input"
+                    placeholder="Type a message..."
+                    prop:value=move || message_input.get()
+                    on:input=move |ev| message_input.set(event_target_value(&ev))
+                    on:keydown=handle_key_down
+                    prop:disabled=move || !is_connected()
+                />
+                <Show when=move || editing_message.get().is_some()>
+                    <button
+                        class="button buttonGhost"
+                        on:click=move |_| {
+                            editing_message.set(None);
+                            message_input.set(String::new());
+                        }
+                    >
+                        "Cancel"
+                    </button>
+                </Show>
+                <button class="button sendButton" on:click=move |_| send_click() prop:disabled=move || !can_send()>
+                    {move || if editing_message.get().is_some() { "Update" } else { "Send" }}
+                </button>
+            </div>
         </div>
     }
 }

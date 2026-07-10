@@ -1,139 +1,247 @@
+/* Top app bar — evergreen chrome shared with the sidebar. */
+
 .header {
   flex-shrink: 0;
-  padding: 20px;
-  background-color: #4a5568;
-  color: white;
   display: flex;
-  justify-content: space-between;
   align-items: center;
-  gap: 12px;
-  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+  justify-content: space-between;
+  gap: var(--sp-4);
+  min-height: 56px;
+  padding: 0 var(--sp-4);
+  background-color: var(--chrome-bg);
+  color: var(--chrome-text);
+  border-bottom: 1px solid var(--chrome-border);
   overflow: hidden;
   min-width: 0;
   width: 100%;
 }
 
+.headerBrand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
+  min-width: 0;
+}
+
+.brandMark {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  flex-shrink: 0;
+  color: var(--evergreen);
+  background: linear-gradient(150deg, #e4fbdb, #b9edaa);
+  border-radius: 9px;
+}
+
+.brandMark svg {
+  width: 18px;
+  height: 18px;
+}
+
 .title {
   margin: 0;
-  font-size: 24px;
-  font-weight: 600;
+  font-size: 15.5px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--chrome-text);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   min-width: 0;
-  flex: 1;
 }
 
 .headerRight {
   display: flex;
-  gap: 20px;
+  gap: var(--sp-2);
   align-items: center;
   flex-shrink: 0;
-}
-
-.qrButton {
-  background: rgba(255, 255, 255, 0.2);
-  border: none;
-  border-radius: 8px;
-  padding: 8px 12px;
-  font-size: 20px;
-  cursor: pointer;
-  transition: background 0.2s;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.qrButton:hover {
-  background: rgba(255, 255, 255, 0.3);
-}
-
-.qrButton:active {
-  background: rgba(255, 255, 255, 0.4);
-}
-
-.userInfo {
-  font-size: 14px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
   min-width: 0;
-  overflow: hidden;
 }
 
+/* Connection pill — dot + label */
 .connectionStatus {
   display: flex;
   align-items: center;
-  gap: 8px;
-  font-size: 14px;
+  gap: 7px;
+  padding: 5px 11px 5px 9px;
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--chrome-text-dim);
+  background: var(--chrome-hover);
+  border-radius: var(--r-full);
+  white-space: nowrap;
 }
 
 .connectionStatus::before {
   content: "";
-  width: 10px;
-  height: 10px;
+  width: 8px;
+  height: 8px;
   border-radius: 50%;
+  flex-shrink: 0;
 }
 
 .connectionStatus.connected::before {
-  background-color: #48bb78;
+  background-color: var(--ok-dot);
+  box-shadow: 0 0 0 3px rgb(126 226 168 / 18%);
 }
 
 .connectionStatus.disconnected::before {
-  background-color: #f56565;
+  background-color: var(--danger-dot);
+  box-shadow: 0 0 0 3px rgb(255 157 138 / 18%);
+  animation: connPulse 1.4s ease-in-out infinite;
 }
 
-/* Mobile responsiveness */
-@media (max-width: 768px) {
-  .header {
-    padding: 12px 16px;
-    flex-wrap: wrap;
-    gap: 12px;
+@keyframes connPulse {
+  0%,
+  100% {
+    opacity: 1;
   }
 
-  .title {
-    font-size: 18px;
-    flex: 1 1 100%;
-    text-align: center;
+  50% {
+    opacity: 0.45;
   }
+}
 
-  .headerRight {
-    gap: 12px;
-    flex: 1;
-    justify-content: space-between;
-  }
+/* User chip: initials avatar + editable display name */
+.userInfo {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  overflow: hidden;
+  padding: 3px 4px 3px 3px;
+  border-radius: var(--r-md);
+  font-size: var(--fs-md);
+}
 
-  .userInfo {
-    font-size: 13px;
-  }
+.userAvatar {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  font-size: 11px;
+  font-weight: 750;
+  letter-spacing: 0.02em;
+  color: #ffffff;
+  background: var(--hue-0);
+  border-radius: 8px;
+  user-select: none;
+}
 
-  .connectionStatus {
-    font-size: 13px;
-  }
+.userAvatar.hue-0 { background: var(--hue-0); }
+.userAvatar.hue-1 { background: var(--hue-1); }
+.userAvatar.hue-2 { background: var(--hue-2); }
+.userAvatar.hue-3 { background: var(--hue-3); }
+.userAvatar.hue-4 { background: var(--hue-4); }
+.userAvatar.hue-5 { background: var(--hue-5); }
+.userAvatar.hue-6 { background: var(--hue-6); }
+.userAvatar.hue-7 { background: var(--hue-7); }
 
-  .qrButton {
-    padding: 6px 10px;
-    font-size: 18px;
-  }
+.header .userName {
+  color: var(--chrome-text);
+  font-weight: 600;
+}
+
+/* EditableTextField, when hosted on the dark chrome */
+.header .editableText:hover {
+  background-color: var(--chrome-hover);
+}
+
+.header .editableInput {
+  background-color: var(--chrome-active);
+  border-color: var(--chrome-border);
+  color: var(--chrome-text);
+}
+
+.header .editableInput:focus {
+  border-color: var(--accent);
+}
+
+/* Icon button (QR code) */
+.qrButton {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  color: var(--chrome-text-dim);
+  background: transparent;
+  border: none;
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  transition:
+    background var(--t-fast) var(--ease),
+    color var(--t-fast) var(--ease);
+}
+
+.qrButton svg {
+  width: 18px;
+  height: 18px;
+}
+
+.qrButton:hover {
+  background: var(--chrome-hover);
+  color: var(--chrome-text);
+}
+
+.qrButton:active {
+  background: var(--chrome-active);
 }
 
 .signOutButton {
-  background: rgba(255, 255, 255, 0.2);
-  border: none;
-  border-radius: 8px;
-  padding: 8px 12px;
-  font-size: 14px;
-  color: white;
+  padding: 6px 12px;
+  flex-shrink: 0;
+  font-size: var(--fs-sm);
+  font-weight: 650;
+  color: var(--chrome-text-dim);
+  background: transparent;
+  border: 1px solid var(--chrome-border);
+  border-radius: var(--r-sm);
   cursor: pointer;
-  transition: background 0.2s;
   white-space: nowrap;
+  transition:
+    background var(--t-fast) var(--ease),
+    color var(--t-fast) var(--ease);
 }
 
 .signOutButton:hover {
-  background: rgba(255, 255, 255, 0.3);
+  background: var(--chrome-hover);
+  color: var(--chrome-text);
 }
 
 .signOutButton:active {
-  background: rgba(255, 255, 255, 0.4);
+  background: var(--chrome-active);
 }
 
+/* Mobile */
+@media (max-width: 768px) {
+  .header {
+    min-height: 52px;
+    padding: 0 10px;
+    gap: var(--sp-2);
+  }
+
+  .title {
+    font-size: 14px;
+  }
+
+  .headerRight {
+    gap: 6px;
+  }
+
+  /* Collapse the connection pill to just its dot. */
+  .connectionStatus {
+    font-size: 0;
+    gap: 0;
+    padding: 8px;
+  }
+
+  .signOutButton {
+    padding: 6px 9px;
+    font-size: var(--fs-xs);
+  }
+}

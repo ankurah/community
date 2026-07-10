@@ -1,9 +1,11 @@
+/* App shell */
+
 .container {
   display: flex;
   flex-direction: column;
   width: 100%;
   height: 100%;
-  background-color: #f5f5f5;
+  background-color: var(--bg);
   overflow: hidden;
 }
 
@@ -16,66 +18,220 @@
   overflow: hidden;
 }
 
-/* Mobile responsiveness */
 @media (max-width: 768px) {
   .mainContent {
     flex-direction: column;
   }
 }
 
-/* Signed-out landing screen */
+/* ---------------------------------------------------------------------------
+   Signed-out landing — the hero. Deliberately dark in both themes.
+   ------------------------------------------------------------------------ */
+
 .signIn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  position: relative;
+  display: grid;
+  place-items: center;
   width: 100%;
   height: 100%;
-  background-color: #f5f5f5;
-  padding: 24px;
+  padding: var(--sp-6);
+  overflow: hidden;
+  background:
+    radial-gradient(1100px 700px at 18% -12%, rgb(42 111 104 / 55%), transparent 60%),
+    radial-gradient(900px 650px at 108% 112%, rgb(210 245 200 / 13%), transparent 55%),
+    linear-gradient(160deg, #0a1b19 0%, #10302d 55%, #163f3d 100%);
+  color: #f4fbf6;
+}
+
+/* Faint dot grid, faded toward the edges */
+.signIn::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-image: radial-gradient(rgb(255 255 255 / 7%) 1px, transparent 1px);
+  background-size: 26px 26px;
+  mask-image: radial-gradient(ellipse 75% 65% at 50% 42%, black 25%, transparent 100%);
+  -webkit-mask-image: radial-gradient(ellipse 75% 65% at 50% 42%, black 25%, transparent 100%);
+  pointer-events: none;
+}
+
+/* Slow-drifting glow accents */
+.signInGlow {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(90px);
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+.signInGlowA {
+  width: 460px;
+  height: 460px;
+  top: -140px;
+  left: -120px;
+  background: rgb(63 141 132 / 55%);
+  animation: signInDrift 14s ease-in-out infinite alternate;
+}
+
+.signInGlowB {
+  width: 380px;
+  height: 380px;
+  right: -110px;
+  bottom: -130px;
+  background: rgb(210 245 200 / 22%);
+  animation: signInDrift 18s ease-in-out infinite alternate-reverse;
+}
+
+@keyframes signInDrift {
+  from {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+
+  to {
+    transform: translate3d(46px, 30px, 0) scale(1.12);
+  }
 }
 
 .signInCard {
-  background: white;
-  border-radius: 12px;
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.08);
-  padding: 40px 32px;
-  max-width: 420px;
-  width: 100%;
+  position: relative;
+  width: min(100%, 440px);
+  padding: 44px 40px 36px;
   text-align: center;
+  background: rgb(255 255 255 / 5%);
+  border: 1px solid rgb(255 255 255 / 13%);
+  border-radius: 24px;
+  box-shadow: 0 30px 80px rgb(4 14 12 / 55%);
+  backdrop-filter: blur(22px) saturate(120%);
+  -webkit-backdrop-filter: blur(22px) saturate(120%);
+  animation: signInRise 480ms var(--ease) both;
+}
+
+@keyframes signInRise {
+  from {
+    opacity: 0;
+    transform: translateY(14px) scale(0.985);
+  }
+
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.signInMark {
+  display: grid;
+  place-items: center;
+  width: 64px;
+  height: 64px;
+  margin: 0 auto;
+  color: var(--evergreen);
+  background: linear-gradient(150deg, #e4fbdb, #b9edaa);
+  border-radius: 18px;
+  box-shadow:
+    0 10px 30px rgb(210 245 200 / 22%),
+    inset 0 -2px 0 rgb(22 63 61 / 14%);
+}
+
+.signInMark svg {
+  width: 34px;
+  height: 34px;
 }
 
 .signInTitle {
-  margin: 0 0 8px;
-  font-size: 28px;
-  font-weight: 700;
-  color: #2d3748;
+  margin: 22px 0 10px;
+  font-size: clamp(26px, 5vw, 33px);
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  line-height: 1.1;
+  color: #f4fbf6;
 }
 
 .signInSubtitle {
-  margin: 0 0 28px;
-  font-size: 15px;
-  color: #718096;
-  line-height: 1.5;
+  margin: 0 0 24px;
+  font-size: 15.5px;
+  line-height: 1.6;
+  color: rgb(230 244 236 / 72%);
+}
+
+.signInFeatures {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--sp-2);
+  margin-bottom: 28px;
+}
+
+.signInFeature {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  font-size: 12.5px;
+  font-weight: 650;
+  color: #cde9da;
+  background: rgb(255 255 255 / 7%);
+  border: 1px solid rgb(255 255 255 / 10%);
+  border-radius: var(--r-full);
+  white-space: nowrap;
+}
+
+.signInFeature svg {
+  width: 13px;
+  height: 13px;
+  color: #a9e6a0;
 }
 
 .signInButton {
-  background-color: #4a5568;
-  color: white;
-  border: none;
-  border-radius: 8px;
-  padding: 12px 24px;
-  font-size: 16px;
-  font-weight: 600;
-  cursor: pointer;
-  transition: background 0.2s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
   width: 100%;
+  min-height: 48px;
+  padding: 0 var(--sp-6);
+  font-size: 15.5px;
+  font-weight: 750;
+  color: var(--on-accent);
+  background: var(--accent);
+  border: none;
+  border-radius: 12px;
+  cursor: pointer;
+  transition:
+    background var(--t-fast) var(--ease),
+    transform var(--t-fast) var(--ease),
+    box-shadow var(--t-med) var(--ease);
+}
+
+.signInButton svg {
+  width: 16px;
+  height: 16px;
+  transition: transform var(--t-med) var(--ease);
 }
 
 .signInButton:hover {
-  background-color: #2d3748;
+  background: var(--accent-hover);
+  transform: translateY(-1px);
+  box-shadow: 0 10px 28px rgb(210 245 200 / 22%);
+}
+
+.signInButton:hover svg {
+  transform: translateX(2px);
 }
 
 .signInButton:active {
-  background-color: #1a202c;
+  transform: translateY(0);
+  box-shadow: none;
 }
 
+.signInFootnote {
+  margin: 18px 0 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: rgb(230 244 236 / 45%);
+}
+
+@media (max-width: 480px) {
+  .signInCard {
+    padding: 36px 24px 30px;
+  }
+}
