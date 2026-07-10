@@ -2,7 +2,10 @@
   "roles": {
     "member": ["view", "post"],
     "moderator": ["view", "post", "moderate"],
-    "admin": ["view", "post", "moderate"]
+    "admin": ["view", "post", "moderate"],
+    "Member": ["view", "post"],
+    "Moderator": ["view", "post", "moderate"],
+    "Admin": ["view", "post", "moderate"]
   },
   "collections": {
     "user": {

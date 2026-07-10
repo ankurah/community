@@ -57,13 +57,22 @@ struct IdTokenClaims {
 /// Pull the optional `roles` claim into a `Vec<String>`. Tolerant by design
 /// (mirrors `ankurah_jwt_auth::parse_claims_unverified`): a non-array claim, or
 /// array entries that are not strings, are ignored rather than erroring — a
-/// malformed `roles` claim must never break sign-in. Normalization (trim,
+/// malformed `roles` claim must never break sign-in, only fail closed to
+/// member. A malformed-but-present claim is a broken IdP contract though, so
+/// it warns rather than vanishing into the member floor. Normalization (trim,
 /// lowercase, dedup) and the `member` floor happen later, at mint.
 fn extract_roles(claim: Option<&serde_json::Value>) -> Vec<String> {
-    claim
-        .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
-        .unwrap_or_default()
+    let Some(value) = claim else { return Vec::new() };
+    let Some(arr) = value.as_array() else {
+        tracing::warn!(claim = %value, "id_token `roles` claim is not an array; ignoring it");
+        return Vec::new();
+    };
+    let roles: Vec<String> =
+        arr.iter().filter_map(|v| v.as_str().map(str::to_string)).collect();
+    if roles.is_empty() && !arr.is_empty() {
+        tracing::warn!(claim = %value, "id_token `roles` claim has no string entries; ignoring it");
+    }
+    roles
 }
 
 #[derive(Debug, Deserialize)]

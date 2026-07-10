@@ -345,16 +345,33 @@ struct DiscoveryDoc {
     scopes_supported: Vec<String>,
 }
 
+/// How long an `invalid_scope` bounce suppresses the `roles` scope. The idp
+/// can advertise `roles` in discovery before our Application's allowed_scopes
+/// includes it; suppression bridges that lag without permanently pinning this
+/// browser to role-less sign-ins — after the TTL we probe again.
+const SUPPRESS_ROLES_TTL_MS: f64 = 24.0 * 60.0 * 60.0 * 1000.0;
+
 /// Whether we've been told to stop requesting the `roles` scope for this
-/// Application (set after an `invalid_scope` bounce; persists across sessions).
+/// Application (set after an `invalid_scope` bounce; expires after
+/// [`SUPPRESS_ROLES_TTL_MS`]). A stale or unparseable flag is cleared.
 fn roles_suppressed() -> bool {
-    local_storage().and_then(|ls| ls.get_item(LS_SUPPRESS_ROLES).ok().flatten()).is_some()
+    let Some(ls) = local_storage() else { return false };
+    let Some(raw) = ls.get_item(LS_SUPPRESS_ROLES).ok().flatten() else { return false };
+    let fresh = raw
+        .parse::<f64>()
+        .map(|t| js_sys::Date::now() - t < SUPPRESS_ROLES_TTL_MS)
+        .unwrap_or(false);
+    if !fresh {
+        let _ = ls.remove_item(LS_SUPPRESS_ROLES);
+    }
+    fresh
 }
 
-/// Persistently stop requesting the `roles` scope (see [`roles_suppressed`]).
+/// Stop requesting the `roles` scope until the TTL lapses (see
+/// [`roles_suppressed`]).
 fn suppress_roles() {
     if let Some(ls) = local_storage() {
-        let _ = ls.set_item(LS_SUPPRESS_ROLES, "1");
+        let _ = ls.set_item(LS_SUPPRESS_ROLES, &js_sys::Date::now().to_string());
     }
 }
 
