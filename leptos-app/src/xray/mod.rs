@@ -124,10 +124,10 @@ fn persist_enabled(on: bool) {
 /// `localStorage["xray"] == "1"` or a `?xray=1` URL param (demo deep links).
 fn initially_enabled() -> bool {
     let Some(window) = web_sys::window() else { return false };
-    if let Some(storage) = window.local_storage().ok().flatten() {
-        if storage.get_item(STORAGE_KEY).ok().flatten().as_deref() == Some("1") {
-            return true;
-        }
+    if let Some(storage) = window.local_storage().ok().flatten()
+        && storage.get_item(STORAGE_KEY).ok().flatten().as_deref() == Some("1")
+    {
+        return true;
     }
     window
         .location()

@@ -168,7 +168,7 @@ impl BusHandle {
             resultset: elq.resultset(),
             error: lq.error(),
             changes_seen,
-            tap: Mutex::new(self.0.tapping.load(Ordering::Relaxed).then(|| (make_tap)())),
+            tap: Mutex::new(self.0.tapping.load(Ordering::Relaxed).then(&*make_tap)),
             make_tap,
         };
 

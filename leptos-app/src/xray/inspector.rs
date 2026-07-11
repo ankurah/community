@@ -78,16 +78,16 @@ async fn fetch_history(target: InspectTarget) -> Phase {
             }
             Err(e) => return Phase::Failed(format!("Could not load entity: {}", e)),
         }
-    } else if collection == RoomView::collection() {
-        if let Ok(room) = ctx().get::<RoomView>(entity_id).await {
-            head = Some(room.entity().head());
-            collect_lww_provenance(room.entity(), &["created_by"], &mut lww_current);
-        }
-    } else if collection == UserView::collection() {
-        if let Ok(user) = ctx().get::<UserView>(entity_id).await {
-            head = Some(user.entity().head());
-            collect_lww_provenance(user.entity(), &["oidc_sub"], &mut lww_current);
-        }
+    } else if collection == RoomView::collection()
+        && let Ok(room) = ctx().get::<RoomView>(entity_id).await
+    {
+        head = Some(room.entity().head());
+        collect_lww_provenance(room.entity(), &["created_by"], &mut lww_current);
+    } else if collection == UserView::collection()
+        && let Ok(user) = ctx().get::<UserView>(entity_id).await
+    {
+        head = Some(user.entity().head());
+        collect_lww_provenance(user.entity(), &["oidc_sub"], &mut lww_current);
     }
 
     let col = match ctx().collection(&collection).await {
@@ -175,13 +175,13 @@ async fn fetch_history(target: InspectTarget) -> Phase {
         }
         // The getter persisted fetched events locally; one batched local read
         // recovers their attestation counts.
-        if !fetched_ids.is_empty() {
-            if let Ok(attested) = col.get_events(fetched_ids).await {
-                for a in attested {
-                    let count = a.attestations.0.len();
-                    if let Some(rec) = known.get_mut(&a.payload.id()) {
-                        rec.attestations = Some(count);
-                    }
+        if !fetched_ids.is_empty()
+            && let Ok(attested) = col.get_events(fetched_ids).await
+        {
+            for a in attested {
+                let count = a.attestations.0.len();
+                if let Some(rec) = known.get_mut(&a.payload.id()) {
+                    rec.attestations = Some(count);
                 }
             }
         }
@@ -264,6 +264,7 @@ pub fn XRayInspector(target: InspectTarget) -> impl IntoView {
     let watched_id = target.entity_id;
     let last_seen = StoredValue::new(None::<u64>);
     let refetch = run_fetch.clone();
+    let retry_fetch = run_fetch.clone();
     Effect::new(move |_| {
         let newest = feed.with(|entries| {
             entries.iter().find(|e| e.entity_id == Some(watched_id)).map(|e| e.seq)
@@ -277,9 +278,18 @@ pub fn XRayInspector(target: InspectTarget) -> impl IntoView {
         }
     });
 
+    // `close` captures nothing, so it's Copy — reuse it freely.
     let close = move || state().inspect.set(None);
-    let close_scrim = close.clone();
-    let close_button = close.clone();
+    let close_scrim = close;
+    let close_button = close;
+
+    // Escape closes the drawer (scrim click and × also work).
+    let esc = window_event_listener(leptos::ev::keydown, move |ev| {
+        if ev.key() == "Escape" {
+            state().inspect.set(None);
+        }
+    });
+    on_cleanup(move || esc.remove());
 
     let collection_label = target.collection.to_string();
     let id_full = target.entity_id.to_base64();
@@ -314,9 +324,15 @@ pub fn XRayInspector(target: InspectTarget) -> impl IntoView {
                             {reason}
                         </div>
                     }.into_any(),
-                    Phase::Failed(error) => view! {
-                        <div class="xrayStateNote xrayError">{error}</div>
-                    }.into_any(),
+                    Phase::Failed(error) => {
+                        let retry = retry_fetch.clone();
+                        view! {
+                            <div class="xrayStateNote xrayError">{error}</div>
+                            <button class="xrayInspectGo" on:click=move |_| { phase.set(Phase::Loading); retry(); }>
+                                "Retry"
+                            </button>
+                        }.into_any()
+                    }
                     Phase::Ready(history) => {
                         let tips: Vec<String> = history.head.iter().map(|id| id.to_base64_short()).collect();
                         let concurrent = tips.len() > 1;

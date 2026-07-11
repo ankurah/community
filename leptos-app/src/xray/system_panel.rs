@@ -28,7 +28,7 @@ pub fn SystemPanel() -> impl IntoView {
     // while the panel is open (dropped + unregistered on close), so x-ray
     // adds zero standing query load. The integration pass registers the
     // app's real queries (rooms list, per-room messages) alongside these.
-    let queries_note = match panel_queries() {
+    let queries_note = match PanelQueries::create() {
         Ok(guards) => {
             on_cleanup(move || drop(guards));
             None
@@ -60,34 +60,36 @@ pub fn SystemPanel() -> impl IntoView {
     }
 }
 
-/// Create + register the panel's own queries; returns the things to keep
-/// alive (queries + registrations bundled in one drop guard).
-fn panel_queries() -> Result<impl Sized, String> {
-    let messages = ctx()
-        .query::<MessageView>(format!("deleted = false ORDER BY timestamp DESC LIMIT {}", PANEL_MESSAGE_LIMIT).as_str())
-        .map_err(|e| e.to_string())?;
-    let rooms = ctx().query::<RoomView>("true ORDER BY name ASC").map_err(|e| e.to_string())?;
+/// The panel's own registered queries, bundled as one drop guard: on drop it
+/// unregisters first (taps hold LiveQuery clones), then releases the queries
+/// themselves (dropping the last LiveQuery clone unsubscribes remotely).
+struct PanelQueries {
+    regs: Vec<super::bus::RegistrationId>,
+    _messages: ankurah::LiveQuery<MessageView>,
+    _rooms: ankurah::LiveQuery<RoomView>,
+}
 
-    let handle = bus();
-    let reg_messages = handle.register("x-ray · recent messages", &messages);
-    let reg_rooms = handle.register("x-ray · rooms", &rooms);
+impl PanelQueries {
+    fn create() -> Result<Self, String> {
+        let messages = ctx()
+            .query::<MessageView>(format!("deleted = false ORDER BY timestamp DESC LIMIT {}", PANEL_MESSAGE_LIMIT).as_str())
+            .map_err(|e| e.to_string())?;
+        let rooms = ctx().query::<RoomView>("true ORDER BY name ASC").map_err(|e| e.to_string())?;
 
-    // Drop order: registrations first (taps reference the queries), then the
-    // queries themselves (dropping a LiveQuery unsubscribes remotely).
-    struct Guards {
-        regs: Vec<super::bus::RegistrationId>,
-        _messages: ankurah::LiveQuery<MessageView>,
-        _rooms: ankurah::LiveQuery<RoomView>,
+        let handle = bus();
+        let reg_messages = handle.register("x-ray · recent messages", &messages);
+        let reg_rooms = handle.register("x-ray · rooms", &rooms);
+        Ok(PanelQueries { regs: vec![reg_messages, reg_rooms], _messages: messages, _rooms: rooms })
     }
-    impl Drop for Guards {
-        fn drop(&mut self) {
-            let handle = bus();
-            for reg in self.regs.drain(..) {
-                handle.unregister(reg);
-            }
+}
+
+impl Drop for PanelQueries {
+    fn drop(&mut self) {
+        let handle = bus();
+        for reg in self.regs.drain(..) {
+            handle.unregister(reg);
         }
     }
-    Ok(Guards { regs: vec![reg_messages, reg_rooms], _messages: messages, _rooms: rooms })
 }
 
 /// Entity-id input → open the L1 inspector directly (the standalone v0 path
@@ -113,7 +115,7 @@ fn InspectEntityRow() -> impl IntoView {
             Err(e) => error.set(Some(format!("not a valid entity id: {}", e))),
         }
     };
-    let submit_click = submit.clone();
+    let submit_click = submit; // Copy closure (captures only Copy signals)
 
     view! {
         <div class="xrayInspectRow">
