@@ -1,5 +1,6 @@
 use leptos::ev::MouseEvent;
 use leptos::prelude::*;
+use wasm_bindgen::JsCast;
 
 use ankurah::LiveQuery;
 use ankurah_signals::Get as AnkurahGet;
@@ -7,6 +8,7 @@ use community_model::{MessageView, UserView};
 
 use crate::fmt;
 use crate::message_context_menu::MessageContextMenu;
+use crate::profile_popover::ProfilePopover;
 
 /// Individual message row: optional day divider, avatar gutter (others only),
 /// author/time meta on the first message of a group, and the bubble itself.
@@ -82,6 +84,27 @@ pub fn MessageRow(
         }
     };
 
+    // Profile popover (#15): opened from the avatar or author-name buttons.
+    let profile = RwSignal::new(None::<(UserView, i32, i32)>);
+    let open_profile = {
+        let author = author.clone();
+        move |e: MouseEvent| {
+            e.stop_propagation();
+            let Some(user) = author() else { return };
+            let (px, py) = e
+                .current_target()
+                .and_then(|t| t.dyn_into::<web_sys::Element>().ok())
+                .map(|el| {
+                    let r = el.get_bounding_client_rect();
+                    (r.left() as i32, r.bottom() as i32 + 6)
+                })
+                .unwrap_or((e.client_x(), e.client_y()));
+            profile.set(Some((user, px, py)));
+        }
+    };
+    let open_profile_from_avatar = open_profile.clone();
+    let open_profile_from_name = open_profile;
+
     let is_editing =
         move || editing_message.get().as_ref().map(|em| em.id().to_base64() == message_for_editing.id().to_base64()).unwrap_or(false);
 
@@ -125,8 +148,22 @@ pub fn MessageRow(
                         <div class="messageGutter">
                             {first_in_group
                                 .then(|| {
+                                    let author_for_label = author_for_avatar.clone();
                                     view! {
-                                        <div class=format!("avatar {}", avatar_hue) aria-hidden="true">
+                                        <button
+                                            type="button"
+                                            class=format!("avatar {}", avatar_hue)
+                                            aria-label=move || {
+                                                format!(
+                                                    "View profile: {}",
+                                                    author_for_label()
+                                                        .map(|u| u.display_name().unwrap_or_default())
+                                                        .filter(|n| !n.is_empty())
+                                                        .unwrap_or_else(|| "Unknown".to_string()),
+                                                )
+                                            }
+                                            on:click=open_profile_from_avatar
+                                        >
                                             {move || {
                                                 fmt::initials(
                                                     &author_for_avatar()
@@ -134,7 +171,7 @@ pub fn MessageRow(
                                                         .unwrap_or_default(),
                                                 )
                                             }}
-                                        </div>
+                                        </button>
                                     }
                                 })}
                         </div>
@@ -153,14 +190,19 @@ pub fn MessageRow(
                         } else {
                             view! {
                                 <div class="messageMeta">
-                                    <span class="messageAuthor">
+                                    <button
+                                        type="button"
+                                        class="messageAuthor"
+                                        title="View profile"
+                                        on:click=open_profile_from_name.clone()
+                                    >
                                         {move || {
                                             author_for_name()
                                                 .map(|u| u.display_name().unwrap_or_default())
                                                 .filter(|n| !n.is_empty())
                                                 .unwrap_or_else(|| "Unknown".to_string())
                                         }}
-                                    </span>
+                                    </button>
                                     <span class="messageTime">{time_str.clone()}</span>
                                 </div>
                             }
@@ -215,6 +257,22 @@ pub fn MessageRow(
                             }
                         })}
                 </div>
+                <Show when=move || profile.get().is_some()>
+                    {move || {
+                        profile
+                            .get()
+                            .map(|(user, px, py)| {
+                                view! {
+                                    <ProfilePopover
+                                        user=user
+                                        x=px
+                                        y=py
+                                        on_close=move || profile.set(None)
+                                    />
+                                }
+                            })
+                    }}
+                </Show>
                 <Show when=move || context_menu.get().is_some()>
                     {
                         let message = message.clone();
