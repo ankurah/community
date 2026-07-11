@@ -377,7 +377,7 @@ async fn ensure_default_rooms(ctx: &Context) -> Result<()> {
         if existing.is_empty() {
             info!("Creating '{name}' room");
             let trx = ctx.begin();
-            trx.create(&Room { name: name.to_string(), created_by: None }).await?;
+            trx.create(&Room { name: name.to_string(), created_by: None, topic: None }).await?;
             trx.commit().await?;
         }
     }

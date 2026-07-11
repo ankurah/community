@@ -79,6 +79,8 @@ pub fn MessageInput(
                             text: input_text,
                             timestamp,
                             deleted: false,
+                            edited_at: None,
+                            collaborative: None,
                         })
                         .await?;
                         trx.commit().await?;

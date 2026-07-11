@@ -173,7 +173,7 @@ fn NewRoomInput(selected_room: RwSignal<Option<RoomView>>, on_cancel: impl Fn() 
                             // `created_by` must be the caller (the room write
                             // scope in policy.json rejects anything else).
                             let room = transaction
-                                .create(&Room { name, created_by: Some(crate::current_user_id().into()) })
+                                .create(&Room { name, created_by: Some(crate::current_user_id().into()), topic: None })
                                 .await?
                                 .read();
                             transaction.commit().await?;
