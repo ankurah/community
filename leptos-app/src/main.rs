@@ -42,6 +42,10 @@ lazy_static! {
     static ref AGENT: OnceLock<JwtAgent> = OnceLock::new();
     /// The minted ankurah session token (present once signed in).
     static ref AUTH_TOKEN: RwLock<Option<String>> = RwLock::new(None);
+    /// A sign-in failure from the OIDC callback, surfaced on the sign-in card.
+    /// Set (at most once) during `initialize`, before Leptos mounts, so plain
+    /// storage suffices — no signal needed.
+    static ref AUTH_ERROR: RwLock<Option<String>> = RwLock::new(None);
 }
 
 /// Get the global authenticated Ankurah context. Only called from within the
@@ -104,7 +108,10 @@ async fn initialize() {
                 auth::store_token(&token);
                 *AUTH_TOKEN.write().unwrap() = Some(token);
             }
-            Err(e) => tracing::error!("OIDC sign-in failed: {}", e),
+            Err(e) => {
+                tracing::error!("OIDC sign-in failed: {}", e);
+                *AUTH_ERROR.write().unwrap() = Some(e);
+            }
         }
         // Drop the `?code&state` from the URL and land on `/`, success or not.
         if let Some(history) = window().and_then(|w| w.history().ok()) {
@@ -206,6 +213,9 @@ pub fn SignIn() -> impl IntoView {
             tracing::error!("failed to start sign-in: {:?}", e);
         }
     };
+    // Sign-in failures used to reach only the console; render them where the
+    // user actually is. Read once — the value is set before mount.
+    let auth_error = AUTH_ERROR.read().ok().and_then(|guard| guard.clone());
     view! {
         <div class="signIn">
             <div class="signInGlow signInGlowA" aria-hidden="true"></div>
@@ -250,6 +260,9 @@ pub fn SignIn() -> impl IntoView {
                         "Open community"
                     </span>
                 </div>
+                {auth_error.map(|message| view! {
+                    <div class="signInError" role="alert">{message}</div>
+                })}
                 <button class="signInButton" on:click=start>
                     "Sign in with idp.to"
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"

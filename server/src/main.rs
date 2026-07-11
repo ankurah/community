@@ -170,10 +170,11 @@ async fn health() -> &'static str {
 struct SessionRequest {
     /// The idp.to ID token obtained by the client's PKCE code exchange.
     id_token: String,
-    /// The nonce the client stashed before redirecting (checked against the
-    /// token's `nonce` claim, when present).
-    #[serde(default)]
-    nonce: Option<String>,
+    /// The nonce the client stashed before redirecting — REQUIRED, and
+    /// checked against the token's `nonce` claim. This is what makes a leaked
+    /// or replayed id_token useless here: only the browser that started the
+    /// sign-in knows the nonce that the token was minted against.
+    nonce: String,
 }
 
 #[derive(Serialize)]
@@ -192,7 +193,7 @@ async fn auth_session(
 ) -> Result<AxumJson<SessionResponse>, (StatusCode, String)> {
     let identity = state
         .oidc
-        .verify(&req.id_token, req.nonce.as_deref())
+        .verify(&req.id_token, Some(req.nonce.as_str()))
         .await
         .map_err(|e| (StatusCode::UNAUTHORIZED, format!("invalid ID token: {e}")))?;
 
