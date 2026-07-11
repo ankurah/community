@@ -116,10 +116,10 @@ pub fn Chat(
         let read_state = read_state.clone();
         move |_| {
             let newest = newest_timestamp(&messages.get());
-            if let (Some(m), Some(r), Some(ts)) = (manager.get(), room.get(), newest) {
-                if m.mode() == ScrollMode::Live {
-                    read_state.mark_read(&r.id().to_base64(), ts);
-                }
+            if let (Some(m), Some(r), Some(ts)) = (manager.get(), room.get(), newest)
+                && m.mode() == ScrollMode::Live
+            {
+                read_state.mark_read(&r.id().to_base64(), ts);
             }
         }
     });
@@ -171,12 +171,11 @@ pub fn Chat(
                             }
                             // Scrolled back to the live tail → the newest message is on
                             // screen, so advance the read cursor.
-                            if m.mode() == ScrollMode::Live {
-                                if let (Some(r), Some(ts)) =
+                            if m.mode() == ScrollMode::Live
+                                && let (Some(r), Some(ts)) =
                                     (room.get_untracked(), newest_timestamp(&messages.get_untracked()))
-                                {
-                                    read_state.mark_read(&r.id().to_base64(), ts);
-                                }
+                            {
+                                read_state.mark_read(&r.id().to_base64(), ts);
                             }
                         }
                     };
