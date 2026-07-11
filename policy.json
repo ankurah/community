@@ -31,8 +31,11 @@
       "write": "system"
     },
     "ban": {
-      "read": "moderate",
-      "write": "moderate"
+      "read": "view",
+      "write": "moderate",
+      "scope": [
+        { "filter": "user = $jwt.sub", "applies_to": "read", "unless_privilege": "moderate" }
+      ]
     },
     "reaction": {
       "read": "view",
