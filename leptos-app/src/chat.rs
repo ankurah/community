@@ -56,7 +56,9 @@ pub fn Chat(
 
         match room_opt {
             Some(current_room) => {
-                let predicate = crate::queries::predicate("room = ? AND deleted = false", [(&current_room.id()).into()])
+                // Deleted messages are deliberately NOT filtered out: they render
+                // as tombstone rows (#10), so the scroll timeline keeps its shape.
+                let predicate = crate::queries::predicate("room = ?", [(&current_room.id()).into()])
                     .expect("static message predicate parses");
                 match ScrollManager::<MessageView>::new(
                     &ctx(),

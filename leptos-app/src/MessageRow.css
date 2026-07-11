@@ -199,6 +199,24 @@
   overflow-wrap: anywhere;
 }
 
+/* Tombstones (#10): deleted rows stay in the timeline, muted, content gone.
+   Applies over .ownMessage too — a removed message sheds its bubble color. */
+
+.messageBubble.tombstone,
+.messageBubble.ownMessage.tombstone {
+  background-color: var(--surface-3);
+  border: 1px dashed var(--border-strong);
+  box-shadow: none;
+  cursor: default;
+}
+
+.tombstoneNotice,
+.messageBubble.ownMessage.tombstone .tombstoneNotice {
+  font-style: italic;
+  font-size: var(--fs-md);
+  color: var(--text-3);
+}
+
 /* "(edited)" suffix (#11): inline after plain text, trailing line after
    block-level markdown content. Hover shows the edit timestamp. */
 

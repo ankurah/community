@@ -3,7 +3,7 @@ use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 use web_sys::{KeyboardEvent, MouseEvent, window};
 
-use community_model::MessageView;
+use community_model::{MessageView, ModAction};
 
 use crate::ctx;
 
@@ -174,11 +174,46 @@ pub fn MessageContextMenu(
     let handle_delete = move |_: LeptosMouseEvent| {
         let message = message.clone();
         let on_close = on_close.clone();
+
+        // Moderator deletes (non-author) may carry an optional public reason.
+        // Cancel on the prompt aborts the deletion; an empty OK proceeds
+        // without a reason. A blocked dialog (Err) never blocks moderation.
+        let reason = if is_own {
+            None
+        } else {
+            match window().map(|w| w.prompt_with_message("Reason for removal (optional):")) {
+                Some(Ok(None)) => {
+                    on_close();
+                    return; // prompt cancelled — abort the delete
+                }
+                Some(Ok(Some(text))) => {
+                    let text = text.trim().to_string();
+                    (!text.is_empty()).then_some(text)
+                }
+                _ => None,
+            }
+        };
+
         wasm_bindgen_futures::spawn_local(async move {
             match (|| async {
                 let trx = ctx().begin();
                 let mutable = message.edit(&trx)?;
-                let _ = mutable.deleted().set(&true);
+                mutable.deleted().set(&true)?;
+                // Lights-on moderation ruling (#10): deleting also clears the
+                // CRDT text — the tombstone row survives, the content does not.
+                mutable.text().replace("")?;
+                // Non-author deletes leave a public ModAction log row; its
+                // presence is what makes the tombstone read "by a moderator".
+                if !is_own {
+                    trx.create(&ModAction {
+                        actor: crate::current_user_id().into(),
+                        message: ankurah::Ref::from(&message),
+                        action: "delete".to_string(),
+                        reason,
+                        created_at: js_sys::Date::now() as i64,
+                    })
+                    .await?;
+                }
                 trx.commit().await?;
                 Ok::<_, Box<dyn std::error::Error>>(())
             })()

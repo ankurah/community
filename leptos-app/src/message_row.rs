@@ -9,6 +9,7 @@ use community_model::{MessageView, UserView};
 use crate::fmt;
 use crate::message_context_menu::MessageContextMenu;
 use crate::profile_popover::ProfilePopover;
+use community_model::ModActionView;
 
 /// Individual message row: optional day divider, avatar gutter (others only),
 /// author/time meta on the first message of a group, and the bubble itself.
@@ -52,6 +53,13 @@ pub fn MessageRow(
     // message for moderators). UI gating only — the server enforces the policy.
     let can_act = is_own_message || crate::can_moderate();
 
+    // Tombstone state (#10): deleted messages stay in the timeline as muted
+    // rows. Reactive — a remote delete flips the row live.
+    let message_for_deleted = message.clone();
+    let is_deleted = move || message_for_deleted.deleted().unwrap_or(false);
+    let is_deleted_for_menu = is_deleted.clone();
+    let is_deleted_for_class = is_deleted.clone();
+
     // The visible "⋯" affordance (#16): keyboard/hover path to the same menu.
     let trigger_ref = NodeRef::<leptos::html::Button>::new();
     // Whether the menu was opened from the trigger (vs right-click); governs
@@ -66,7 +74,8 @@ pub fn MessageRow(
     // on anyone's (UI gating only — the server enforces the write policy).
     let handle_context_menu = move |e: MouseEvent| {
         e.prevent_default();
-        if can_act {
+        // Tombstones offer no actions — for the author or for moderators.
+        if can_act && !is_deleted_for_menu() {
             opened_from_trigger.set_value(false);
             context_menu.set(Some((e.client_x(), e.client_y())));
         }
@@ -133,6 +142,7 @@ pub fn MessageRow(
     let avatar_hue = fmt::hue_class(&author_user_id);
     let author_for_avatar = author.clone();
     let author_for_name = author.clone();
+    let message_for_tomb = message.clone();
 
     view! {
         {day_label.map(|label| {
@@ -219,63 +229,89 @@ pub fn MessageRow(
                         if is_own_message {
                             classes.push("ownMessage");
                         }
+                        if is_deleted_for_class() {
+                            classes.push("tombstone");
+                        }
                         classes.join(" ")
                     }
                     data-msg-id=message_id.clone()
                     title=stamp
                     on:contextmenu=handle_context_menu
                 >
-                    // Reactive read: CRDT text edits (local or remote) re-render
-                    // the bubble; markdown parses only when the text changes.
-                    <div class="messageText">
-                        {move || crate::markdown::render_message(&message_for_text.text().unwrap_or_default())}
-                        {
+                    <Show
+                        when={
+                            let is_deleted = is_deleted.clone();
+                            move || is_deleted()
+                        }
+                        fallback={
+                            let message_for_text = message_for_text.clone();
                             let message_for_edited = message_for_edited.clone();
                             move || {
-                                message_for_edited
-                                    .edited_at()
-                                    .ok()
-                                    .flatten()
-                                    .map(|ts| {
-                                        view! {
-                                            <span
-                                                class="messageEdited"
-                                                title=format!("Edited {}", fmt::full_stamp(ts))
-                                            >
-                                                "(edited)"
-                                            </span>
-                                        }
-                                    })
+                                let message_for_text = message_for_text.clone();
+                                let message_for_edited = message_for_edited.clone();
+                                view! {
+                                    // Reactive read: CRDT text edits (local or remote)
+                                    // re-render the bubble; markdown parses only when
+                                    // the text changes.
+                                    <div class="messageText">
+                                        {move || {
+                                            crate::markdown::render_message(
+                                                &message_for_text.text().unwrap_or_default(),
+                                            )
+                                        }}
+                                        {move || {
+                                            message_for_edited
+                                                .edited_at()
+                                                .ok()
+                                                .flatten()
+                                                .map(|ts| {
+                                                    view! {
+                                                        <span
+                                                            class="messageEdited"
+                                                            title=format!("Edited {}", fmt::full_stamp(ts))
+                                                        >
+                                                            "(edited)"
+                                                        </span>
+                                                    }
+                                                })
+                                        }}
+                                    </div>
+                                    {can_act
+                                        .then(|| {
+                                            view! {
+                                                <button
+                                                    node_ref=trigger_ref
+                                                    type="button"
+                                                    class="messageActions"
+                                                    aria-haspopup="menu"
+                                                    aria-label="Message actions"
+                                                    aria-expanded=move || {
+                                                        if context_menu.get().is_some() { "true" } else { "false" }
+                                                    }
+                                                    title="Message actions"
+                                                    on:mousedown=move |_| {
+                                                        menu_was_open_at_mousedown
+                                                            .set_value(context_menu.get_untracked().is_some())
+                                                    }
+                                                    on:click=open_from_trigger
+                                                >
+                                                    <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                                                        <circle cx="5" cy="12" r="1.9" />
+                                                        <circle cx="12" cy="12" r="1.9" />
+                                                        <circle cx="19" cy="12" r="1.9" />
+                                                    </svg>
+                                                </button>
+                                            }
+                                        })}
+                                }
                             }
                         }
-                    </div>
-                    {can_act
-                        .then(|| {
-                            view! {
-                                <button
-                                    node_ref=trigger_ref
-                                    type="button"
-                                    class="messageActions"
-                                    aria-haspopup="menu"
-                                    aria-label="Message actions"
-                                    aria-expanded=move || {
-                                        if context_menu.get().is_some() { "true" } else { "false" }
-                                    }
-                                    title="Message actions"
-                                    on:mousedown=move |_| {
-                                        menu_was_open_at_mousedown
-                                            .set_value(context_menu.get_untracked().is_some())
-                                    }
-                                    on:click=open_from_trigger
-                                >
-                                    <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-                                        <circle cx="5" cy="12" r="1.9" />
-                                        <circle cx="12" cy="12" r="1.9" />
-                                        <circle cx="19" cy="12" r="1.9" />
-                                    </svg>
-                                </button>
-                            }
-                        })}
+                    >
+                        {
+                            let message_for_tomb = message_for_tomb.clone();
+                            move || view! { <TombstoneNotice message=message_for_tomb.clone() /> }
+                        }
+                    </Show>
                 </div>
                 <Show when=move || profile.get().is_some()>
                     {move || {
@@ -293,7 +329,10 @@ pub fn MessageRow(
                             })
                     }}
                 </Show>
-                <Show when=move || context_menu.get().is_some()>
+                <Show when={
+                    let is_deleted = is_deleted.clone();
+                    move || context_menu.get().is_some() && !is_deleted()
+                }>
                     {
                         let message = message.clone();
                         move || {
@@ -323,4 +362,21 @@ pub fn MessageRow(
             </div>
         </div>
     }
+}
+
+/// Tombstone body for a deleted message (#10). Attribution follows the
+/// lights-on ruling's simple heuristic: a matching public `ModAction` row
+/// means a moderator removed it; no row means the author did. The LiveQuery
+/// mounts only for tombstoned rows, so the per-row cost stays confined to
+/// the rare case.
+#[component]
+fn TombstoneNotice(message: MessageView) -> impl IntoView {
+    let mod_actions = crate::queries::selection("message = ? AND action = 'delete'", [(&message.id()).into()])
+        .ok()
+        .and_then(|sel| crate::ctx().query::<ModActionView>(sel).ok());
+    let label = move || {
+        let by_moderator = mod_actions.as_ref().map(|q| !q.get().is_empty()).unwrap_or(false);
+        if by_moderator { "Removed by a moderator" } else { "Removed by the author" }
+    };
+    view! { <div class="messageText tombstoneNotice">{label}</div> }
 }

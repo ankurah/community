@@ -113,7 +113,11 @@ pub fn MessageInput(
             if msgs.is_empty() {
                 return;
             }
-            let is_own = |m: &MessageView| m.user().ok().map(|r| r.id().to_base64()).as_deref() == Some(user_id.as_str());
+            // Tombstones are not editable — skip them while navigating (#10).
+            let is_own = |m: &MessageView| {
+                m.user().ok().map(|r| r.id().to_base64()).as_deref() == Some(user_id.as_str())
+                    && !m.deleted().unwrap_or(false)
+            };
 
             let current_idx = editing_message
                 .get()
