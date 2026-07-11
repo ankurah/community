@@ -94,3 +94,26 @@ Federate-and-remint is wired and deployed:
 Follow-ups: dev redirect-URI mismatch (issue #4 — the trunk dev server's randomized
 port vs the registered `localhost:5173`); OIDC-aware e2e (the anonymous specs are
 skipped for now); policy hardening (issue #3 — e.g. scope `user` writes to self).
+
+## Status — sign-out + robustness pass (2026-07-10, idp lane)
+
+- **Scopes**: `openid profile email roles`, unconditionally. The server requires
+  the `roles` claim (strict mode), so a role-less request is a guaranteed dead
+  end — there is no discovery probe and no degraded scope set. If idp.to's role
+  configuration ever regresses, the authorize endpoint answers `invalid_scope`,
+  which the callback surfaces as a retry-later message.
+- **Nonce is REQUIRED at `/auth/session`**: the mint refuses an id_token without
+  the browser-held nonce that it was minted against, making a leaked/replayed
+  id_token useless at this endpoint. (Our own client always sent it; this
+  tightens the contract to match.)
+- **Sign-out is RP-initiated logout**: the client retains the idp.to id_token
+  (localStorage `community_id_token`, same custody tier as the session token)
+  and, on sign-out, clears local state then navigates through idp.to's
+  `end_session_endpoint` (read from discovery at sign-out time) with
+  `id_token_hint` + `post_logout_redirect_uri`, so the IdP session actually
+  ends — previously the next "Sign in" click silently re-admitted within the
+  IdP's session window. When discovery lacks the endpoint (or no id_token is
+  held), sign-out degrades to the old local-clear + reload.
+- **Sign-in failures render on the sign-in card** (`.signInError`), not just the
+  console; one-time PKCE material is cleared when the callback consumes it,
+  success or failure.

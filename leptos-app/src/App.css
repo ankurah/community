@@ -230,6 +230,20 @@
   color: rgb(230 244 236 / 45%);
 }
 
+/* Sign-in failure banner (e.g. an OIDC callback error): reddish glass tint
+   matching the fixed dark card, legible without stealing the card's calm. */
+.signInError {
+  margin: 0 0 18px;
+  padding: 10px 14px;
+  font-size: 13.5px;
+  line-height: 1.5;
+  text-align: left;
+  color: #ffd9d3;
+  background: rgb(164 62 62 / 22%);
+  border: 1px solid rgb(231 154 148 / 35%);
+  border-radius: 12px;
+}
+
 @media (max-width: 480px) {
   .signInCard {
     padding: 36px 24px 30px;
