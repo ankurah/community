@@ -126,6 +126,21 @@ pub fn Header(current_user: RwSignal<Option<UserView>>, selected_room: RwSignal<
                         </svg>
                     </button>
                     <button
+                        class="xrayButton"
+                        on:click=move |_| crate::xray::state().toggle()
+                        title="X-ray mode"
+                        aria-pressed=move || crate::xray::state().enabled.get().to_string()
+                    >
+                        // Magnifier-plus — inspect the live machinery.
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                            stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                            <circle cx="11" cy="11" r="7" />
+                            <path d="m21 21-4.3-4.3" />
+                            <path d="M8 11h6" />
+                            <path d="M11 8v6" />
+                        </svg>
+                    </button>
+                    <button
                         class="qrButton"
                         on:click=move |_| show_qr_code.set(true)
                         title="Show QR Code"

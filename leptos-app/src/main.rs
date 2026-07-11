@@ -34,6 +34,7 @@ mod reactions;
 mod read_state;
 mod room_list;
 mod room_topic;
+mod xray;
 
 use chat::Chat;
 use header::Header;
@@ -325,7 +326,11 @@ pub fn ChatApp() -> impl IntoView {
     // Persistent per-room read cursors + unread badges (#13).
     let read_state = ReadStateManager::new(rooms.clone(), current_user_id());
 
+    // App-lifetime queries surfaced in the X-ray queries card (id discarded).
+    xray::bus::bus().register("rooms (app)", &rooms);
+
     view! {
+        <xray::XRayLauncher />
         <div class="container">
             <Header current_user selected_room />
 

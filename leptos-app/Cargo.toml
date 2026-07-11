@@ -20,7 +20,9 @@ web-sys = { version = "=0.3.82", features = [
     "Window", "Location", "UrlSearchParams", "Url", "History", "Element", "DomRect", "Node", "NodeList", "EventTarget", "HtmlElement", "Storage",
     "AudioContext", "AudioBuffer", "AudioBufferSourceNode", "GainNode", "AudioParam", "AudioNode",
     "AudioDestinationNode", "AudioContextState", "Response", "Document",
-    "Request", "RequestInit", "Headers", "RequestMode"
+    "Request", "RequestInit", "Headers", "RequestMode",
+    # X-ray node card: raw IndexedDB entity/event counts (no ankurah storage-stats API yet).
+    "Event", "IdbFactory", "IdbOpenDbRequest", "IdbRequest", "IdbDatabase", "IdbTransaction", "IdbTransactionMode", "IdbObjectStore"
 ] }
 js-sys = "=0.3.82"
 tracing-wasm = "0.2.1"
@@ -36,6 +38,11 @@ qrcode = "0.14.1"
 # view nodes (never innerHTML); default features (html renderer, getopts) are
 # deliberately off — we only use the pull parser.
 pulldown-cmark = { version = "=0.13.4", default-features = false }
+
+# X-ray inspector: decode ankurah's yrs backend diffs (encode_diff_v2) into
+# "+n/−n" summaries. Pinned to the exact version ankurah-core 0.9.0 resolves
+# to (see Cargo.lock) so the graph carries a single yrs copy — no skew.
+yrs = "=0.24.0"
 
 # PKCE (S256) + parsing small OIDC/session JSON responses on the client.
 sha2 = "0.10"

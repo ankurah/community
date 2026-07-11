@@ -125,6 +125,7 @@ pub fn MessageRow(
     let message_id = message.id().to_base64();
     let message_for_text = message.clone();
     let message_for_edited = message.clone();
+    let message_for_xray = message.clone();
     let message_for_bar = message.clone();
     // This row's reaction chips, from the shared per-message map (#14).
     let chips = Signal::derive({
@@ -257,9 +258,11 @@ pub fn MessageRow(
                         fallback={
                             let message_for_text = message_for_text.clone();
                             let message_for_edited = message_for_edited.clone();
+                            let message_for_xray = message_for_xray.clone();
                             move || {
                                 let message_for_text = message_for_text.clone();
                                 let message_for_edited = message_for_edited.clone();
+                                let message_for_xray = message_for_xray.clone();
                                 view! {
                                     // Reactive read: CRDT text edits (local or remote)
                                     // re-render the bubble; markdown parses only when
@@ -285,6 +288,41 @@ pub fn MessageRow(
                                                         </span>
                                                     }
                                                 })
+                                        }}
+                                        // L0 X-ray chip: this message's head clock;
+                                        // amber when concurrent heads exist. Renders
+                                        // only while X-ray mode is on (zero cost off).
+                                        {move || {
+                                            crate::xray::state().enabled.get().then(|| {
+                                                use ankurah::View as _;
+                                                // Register the entity broadcast with the render
+                                                // effect so head changes re-render the chip.
+                                                // Inside the .then() ⇒ tracked only while x-ray
+                                                // is on (zero cost when off).
+                                                message_for_xray.track();
+                                                let head = message_for_xray.entity().head();
+                                                let concurrent = head.len() > 1;
+                                                let short = head.to_base64_short();
+                                                let msg_id = message_for_xray.id();
+                                                view! {
+                                                    <button
+                                                        type="button"
+                                                        class=if concurrent {
+                                                            "xrayChip xrayMono xrayHeadConcurrent"
+                                                        } else {
+                                                            "xrayChip xrayMono"
+                                                        }
+                                                        title="Inspect event history (X-ray)"
+                                                        on:click=move |_| {
+                                                            use ankurah::View as _;
+                                                            crate::xray::state()
+                                                                .open_inspector(MessageView::collection(), msg_id.clone())
+                                                        }
+                                                    >
+                                                        {short}
+                                                    </button>
+                                                }
+                                            })
                                         }}
                                     </div>
                                     <button
