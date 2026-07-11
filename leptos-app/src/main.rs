@@ -28,6 +28,7 @@ mod message_row;
 mod notification_manager;
 mod qr_code_modal;
 mod room_list;
+mod xray;
 
 use chat::Chat;
 use debug_overlay::DebugOverlay;
@@ -317,6 +318,7 @@ pub fn ChatApp() -> impl IntoView {
 
     view! {
         <DebugOverlay />
+        <xray::XRayLauncher />
 
         <div class="container">
             <Header current_user />
