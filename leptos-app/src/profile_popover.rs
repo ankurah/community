@@ -110,9 +110,11 @@ pub fn ProfilePopover(
     let aria_label = format!("Profile: {}", name());
 
     // Role badges from the server-written `userroles` cache, scoped to this
-    // user. A missing row (never signed in since the cache landed) or a
-    // bare "member" role renders no badges.
-    let roles_query = ctx().query::<UserRolesView>(format!("user = '{}'", user_id).as_str()).ok();
+    // user (parameterized per the #17 idiom). A missing row (never signed in
+    // since the cache landed) or a bare "member" role renders no badges.
+    let roles_query = crate::queries::selection("user = ?", [(&user.id()).into()])
+        .ok()
+        .and_then(|sel| ctx().query::<UserRolesView>(sel).ok());
     let badge_roles = move || -> Vec<String> {
         let Some(q) = roles_query.as_ref() else { return Vec::new() };
         q.get()

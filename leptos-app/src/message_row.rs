@@ -110,6 +110,7 @@ pub fn MessageRow(
 
     let message_id = message.id().to_base64();
     let message_for_text = message.clone();
+    let message_for_edited = message.clone();
     let ts = message.timestamp().unwrap_or(0);
     let time_str = fmt::clock_time(ts);
     let stamp = fmt::full_stamp(ts);
@@ -228,6 +229,25 @@ pub fn MessageRow(
                     // the bubble; markdown parses only when the text changes.
                     <div class="messageText">
                         {move || crate::markdown::render_message(&message_for_text.text().unwrap_or_default())}
+                        {
+                            let message_for_edited = message_for_edited.clone();
+                            move || {
+                                message_for_edited
+                                    .edited_at()
+                                    .ok()
+                                    .flatten()
+                                    .map(|ts| {
+                                        view! {
+                                            <span
+                                                class="messageEdited"
+                                                title=format!("Edited {}", fmt::full_stamp(ts))
+                                            >
+                                                "(edited)"
+                                            </span>
+                                        }
+                                    })
+                            }
+                        }
                     </div>
                     {can_act
                         .then(|| {

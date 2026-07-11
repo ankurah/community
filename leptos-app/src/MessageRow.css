@@ -199,6 +199,20 @@
   overflow-wrap: anywhere;
 }
 
+/* "(edited)" suffix (#11): inline after plain text, trailing line after
+   block-level markdown content. Hover shows the edit timestamp. */
+
+.messageEdited {
+  margin-left: 6px;
+  font-size: var(--fs-xs);
+  color: var(--text-faint);
+  user-select: none;
+}
+
+.messageBubble.ownMessage .messageEdited {
+  color: rgb(242 250 246 / 60%);
+}
+
 /* States (outline, not border, so layout never shifts) ---------------------- */
 
 .messageBubble.editing,
