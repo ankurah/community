@@ -56,11 +56,11 @@ pub fn Chat(
 
         match room_opt {
             Some(current_room) => {
-                let room_id = current_room.id().to_base64();
-                let predicate = format!("room = '{}' AND deleted = false", room_id);
+                let predicate = crate::queries::predicate("room = ? AND deleted = false", [(&current_room.id()).into()])
+                    .expect("static message predicate parses");
                 match ScrollManager::<MessageView>::new(
                     &ctx(),
-                    predicate.as_str(),
+                    predicate,
                     "timestamp DESC",
                     MIN_ROW_HEIGHT,
                     BUFFER_FACTOR,
