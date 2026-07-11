@@ -28,6 +28,9 @@ jobs:
       - name: Build server (release)
         run: cargo build -p community-server --release --locked
 
+      - name: Test server & model
+        run: cargo test -p community-server -p community-model --release --locked
+
       - name: Build SPA (release)
         working-directory: leptos-app
         run: trunk build --release
