@@ -5,8 +5,8 @@ use ankurah_signals::Get as AnkurahGet;
 use community_model::{RoomView, UserView};
 
 use crate::{
-    ctx, editable_text_field::EditableTextField, fmt, members_panel::MembersPanel, qr_code_modal::QRCodeModal,
-    room_topic::RoomTopic, ws_client,
+    ctx, editable_text_field::EditableTextField, fmt, members_panel::MembersPanel, mod_log_panel::ModLogPanel,
+    qr_code_modal::QRCodeModal, room_topic::RoomTopic, ws_client,
 };
 
 /// Header component displaying app title, the current room's topic, user
@@ -16,6 +16,7 @@ use crate::{
 pub fn Header(current_user: RwSignal<Option<UserView>>, selected_room: RwSignal<Option<RoomView>>) -> impl IntoView {
     let show_qr_code = RwSignal::new(false);
     let show_members = RwSignal::new(false);
+    let show_mod_log = RwSignal::new(false);
 
     // Live connection state from the WebSocket client. Reading the reactive
     // `Read<ConnectionState>` under the ReactiveGraphObserver re-renders on change.
@@ -110,6 +111,21 @@ pub fn Header(current_user: RwSignal<Option<UserView>>, selected_room: RwSignal<
                         </svg>
                     </button>
                     <button
+                        class="modLogButton"
+                        on:click=move |_| show_mod_log.set(true)
+                        title="Moderation log"
+                    >
+                        // Gavel — the public record of moderator actions.
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                            stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                            <path d="m14 13-8.5 8.5a2.12 2.12 0 1 1-3-3L11 10" />
+                            <path d="m16 16 6-6" />
+                            <path d="m8 8 6-6" />
+                            <path d="m9 7 8 8" />
+                            <path d="m21 11-8-8" />
+                        </svg>
+                    </button>
+                    <button
                         class="qrButton"
                         on:click=move |_| show_qr_code.set(true)
                         title="Show QR Code"
@@ -140,6 +156,9 @@ pub fn Header(current_user: RwSignal<Option<UserView>>, selected_room: RwSignal<
             </Show>
             <Show when=move || show_members.get()>
                 <MembersPanel on_close=move || show_members.set(false) />
+            </Show>
+            <Show when=move || show_mod_log.get()>
+                <ModLogPanel on_close=move || show_mod_log.set(false) />
             </Show>
         </>
     }

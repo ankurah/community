@@ -22,6 +22,7 @@ mod fmt;
 mod header;
 mod members_panel;
 mod message_context_menu;
+mod mod_log_panel;
 mod message_input;
 mod message_list;
 mod message_row;
