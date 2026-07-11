@@ -24,6 +24,12 @@ const CLIENT_ID: &str = "app_HsW5XyYWbr0KQrHZb5iejw";
 const AUTHORIZE_ENDPOINT: &str = "https://id.idp.to/oidc/authorize";
 const TOKEN_ENDPOINT: &str = "https://id.idp.to/oidc/token";
 const DISCOVERY_ENDPOINT: &str = "https://id.idp.to/.well-known/openid-configuration";
+/// idp.to's account center for our directory (#36): where users manage their
+/// name, passkeys, and recovery email. `return_to` brings them back to
+/// Community — idp.to validates it against the domain's allowed return URLs, so
+/// an un-allowlisted value simply drops the back-link (never an open redirect).
+pub const ACCOUNT_CENTER_URL: &str =
+    "https://ankurah.preferences.idp.to/account?return_to=https%3A%2F%2Fcommunity.ankurah.org";
 /// The scopes we always request — `roles` included unconditionally: our server
 /// requires the roles claim (strict mode), so a role-less token is useless and
 /// degrading to one is never a fallback. If idp.to's role config ever
