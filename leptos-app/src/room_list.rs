@@ -6,7 +6,7 @@ use ankurah::{LiveQuery, model::Mutable};
 use ankurah_signals::Get as AnkurahGet;
 use community_model::{Room, RoomView};
 
-use crate::{ctx, notification_manager::NotificationManager};
+use crate::{ctx, read_state::ReadStateManager};
 
 /// Auto-select a room from the list if none is currently selected.
 /// Chooses based on URL parameter or defaults to "general".
@@ -63,7 +63,7 @@ fn sync_url_with_room(selected_room: &RwSignal<Option<RoomView>>) -> impl Fn() +
 pub fn RoomList(
     rooms: LiveQuery<RoomView>,
     selected_room: RwSignal<Option<RoomView>>,
-    notification_manager: NotificationManager,
+    read_state: ReadStateManager,
 ) -> impl IntoView {
     let is_creating = RwSignal::new(false);
     Effect::new(auto_select_room(&rooms, selected_room));
@@ -93,7 +93,7 @@ pub fn RoomList(
                     <div class="emptyRooms">"No rooms yet — press + to plant one."</div>
                 </Show>
 
-                <RoomListUl rooms selected_room notification_manager />
+                <RoomListUl rooms selected_room read_state />
             </div>
         </div>
     }
@@ -103,20 +103,20 @@ pub fn RoomList(
 fn RoomListUl(
     #[prop(into)] rooms: LiveQuery<RoomView>,
     selected_room: RwSignal<Option<RoomView>>,
-    notification_manager: NotificationManager,
+    read_state: ReadStateManager,
 ) -> impl IntoView {
     view! {
         <For
             each=move || rooms.get()
             key=|room: &RoomView| room.id()
             children={
-                let notification_manager = notification_manager.clone();
+                let read_state = read_state.clone();
                 move |room: RoomView| {
                     view! {
                         <RoomItem
                             room=room
                             selected_room=selected_room
-                            notification_manager=notification_manager.clone()
+                            read_state=read_state.clone()
                         />
                     }
                 }
@@ -126,7 +126,7 @@ fn RoomListUl(
 }
 
 #[component]
-fn RoomItem(room: RoomView, selected_room: RwSignal<Option<RoomView>>, notification_manager: NotificationManager) -> impl IntoView {
+fn RoomItem(room: RoomView, selected_room: RwSignal<Option<RoomView>>, read_state: ReadStateManager) -> impl IntoView {
     let room_id = room.id().to_base64();
     let name = room.name().unwrap_or_default();
 
@@ -144,8 +144,9 @@ fn RoomItem(room: RoomView, selected_room: RwSignal<Option<RoomView>>, notificat
             <span class="roomHash" aria-hidden="true">"#"</span>
             <span class="roomLabel">{name}</span>
             {move || {
-                // Read reactively so the badge updates as messages arrive.
-                let unread_count = notification_manager.unread_count(&room_id_badge);
+                // Reactive read: re-renders as messages arrive or the user's
+                // persistent read cursor (#13) advances on any device.
+                let unread_count = read_state.unread_count(&room_id_badge);
                 (unread_count > 0).then(|| {
                     let badge_text = if unread_count >= 10 { "10+".to_string() } else { unread_count.to_string() };
                     view! { <span class="unreadBadge">{badge_text}</span> }
@@ -173,7 +174,7 @@ fn NewRoomInput(selected_room: RwSignal<Option<RoomView>>, on_cancel: impl Fn() 
                             // `created_by` must be the caller (the room write
                             // scope in policy.json rejects anything else).
                             let room = transaction
-                                .create(&Room { name, created_by: Some(crate::current_user_id().into()) })
+                                .create(&Room { name, created_by: Some(crate::current_user_id().into()), topic: None })
                                 .await?
                                 .read();
                             transaction.commit().await?;

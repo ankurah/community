@@ -1,0 +1,56 @@
+/* Reaction chips under message bubbles (#14). */
+
+.reactionBar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+  max-width: 100%;
+}
+
+.messageRow.own .reactionBar {
+  justify-content: flex-end;
+}
+
+.reactionChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 9px;
+  background: var(--surface-3);
+  border: 1px solid var(--border);
+  border-radius: var(--r-full);
+  color: var(--text-2);
+  cursor: pointer;
+  transition:
+    background-color var(--t-fast) var(--ease),
+    border-color var(--t-fast) var(--ease),
+    color var(--t-fast) var(--ease);
+}
+
+.reactionChip:hover {
+  background: var(--surface-2);
+  border-color: var(--border-strong);
+}
+
+/* Own reaction: mint chip, readable in both themes (brand constants). */
+.reactionChip.mine {
+  background: var(--accent);
+  border-color: transparent;
+  color: var(--on-accent);
+}
+
+.reactionChip.mine:hover {
+  background: var(--accent-hover);
+}
+
+.reactionEmoji {
+  font-size: 14px;
+  line-height: 1.4;
+}
+
+.reactionCount {
+  font-size: var(--fs-xs);
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}

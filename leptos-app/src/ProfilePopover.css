@@ -1,0 +1,109 @@
+/* Profile popover (#15): avatar, display name, first-seen, role badges. */
+
+.profilePopover {
+  min-width: 224px;
+  max-width: 300px;
+  padding: var(--sp-4);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-3);
+  z-index: 1000;
+  animation: profilePopoverIn 120ms var(--ease) both;
+}
+
+@keyframes profilePopoverIn {
+  from {
+    opacity: 0;
+    transform: translateY(-3px) scale(0.98);
+  }
+
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.profileHeader {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  min-width: 0;
+}
+
+.profileAvatar {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 46px;
+  height: 46px;
+  font-size: 17px;
+  font-weight: 750;
+  letter-spacing: 0.02em;
+  color: #ffffff;
+  border-radius: 13px;
+  user-select: none;
+}
+
+.profileAvatar.hue-0 { background: var(--hue-0); }
+.profileAvatar.hue-1 { background: var(--hue-1); }
+.profileAvatar.hue-2 { background: var(--hue-2); }
+.profileAvatar.hue-3 { background: var(--hue-3); }
+.profileAvatar.hue-4 { background: var(--hue-4); }
+.profileAvatar.hue-5 { background: var(--hue-5); }
+.profileAvatar.hue-6 { background: var(--hue-6); }
+.profileAvatar.hue-7 { background: var(--hue-7); }
+
+.profileIdentity {
+  min-width: 0;
+}
+
+.profileName {
+  font-size: var(--fs-base);
+  font-weight: 700;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.profileFirstSeen {
+  margin-top: 1px;
+  font-size: var(--fs-xs);
+  color: var(--text-3);
+}
+
+/* Role badges — visual kin of the members panel's, deliberately own classes. */
+
+.profileBadges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: var(--sp-3);
+  padding-top: var(--sp-3);
+  border-top: 1px solid var(--border);
+}
+
+.profileBadge {
+  padding: 2px 8px;
+  font-size: var(--fs-xs);
+  font-weight: 650;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  border-radius: var(--r-full);
+  border: 1px solid var(--border-strong);
+  background: var(--surface-3);
+  color: var(--text-2);
+}
+
+.profileBadge.role-admin {
+  background: var(--accent);
+  border-color: transparent;
+  color: var(--on-accent);
+}
+
+.profileBadge.role-moderator {
+  background: var(--surface-2);
+  border-color: var(--border-strong);
+  color: var(--link);
+}

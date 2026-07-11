@@ -16,24 +16,30 @@ use web_sys::window;
 mod auth;
 mod chat;
 mod chat_debug_header;
-mod debug_overlay;
 mod editable_text_field;
 mod fmt;
 mod header;
+mod markdown;
 mod members_panel;
 mod message_context_menu;
 mod message_input;
 mod message_list;
 mod message_row;
+mod mod_log_panel;
 mod notification_manager;
+mod profile_popover;
 mod qr_code_modal;
+mod queries;
+mod reactions;
+mod read_state;
 mod room_list;
+mod room_topic;
 mod xray;
 
 use chat::Chat;
-use debug_overlay::DebugOverlay;
 use header::Header;
 use notification_manager::NotificationManager;
+use read_state::ReadStateManager;
 use room_list::RoomList;
 
 lazy_static! {
@@ -305,7 +311,8 @@ pub fn ChatApp() -> impl IntoView {
         }
     });
 
-    // Create notification manager with rooms query and current user ID
+    // Notification sounds (self-contained: it holds its own room/message
+    // subscriptions; the Effect below keeps it alive for ChatApp's lifetime).
     let notification_manager = NotificationManager::new(rooms.clone(), current_user.get_untracked().map(|u| u.id().to_base64()));
 
     // `current_user` is resolved asynchronously, so push the id into the
@@ -316,16 +323,20 @@ pub fn ChatApp() -> impl IntoView {
         move |_| notification_manager.set_current_user_id(current_user.get().map(|u| u.id().to_base64()))
     });
 
-    view! {
-        <DebugOverlay />
-        <xray::XRayLauncher />
+    // Persistent per-room read cursors + unread badges (#13).
+    let read_state = ReadStateManager::new(rooms.clone(), current_user_id());
 
+    // App-lifetime queries surfaced in the X-ray queries card (id discarded).
+    xray::bus::bus().register("rooms (app)", &rooms);
+
+    view! {
+        <xray::XRayLauncher />
         <div class="container">
-            <Header current_user />
+            <Header current_user selected_room />
 
             <div class="mainContent">
-                <RoomList rooms selected_room notification_manager=notification_manager.clone() />
-                <Chat room=selected_room current_user=current_user notification_manager=notification_manager />
+                <RoomList rooms selected_room read_state=read_state.clone() />
+                <Chat room=selected_room current_user=current_user read_state=read_state />
             </div>
         </div>
     }

@@ -34,6 +34,10 @@ send_wrapper = "0.6.0"
 # projects resolve fresh and would otherwise pick an incompatible version.
 wasm-bindgen = "=0.2.105"
 qrcode = "0.14.1"
+# Markdown subset for message rendering (#9). Events are mapped to typed leptos
+# view nodes (never innerHTML); default features (html renderer, getopts) are
+# deliberately off — we only use the pull parser.
+pulldown-cmark = { version = "=0.13.4", default-features = false }
 
 # X-ray inspector: decode ankurah's yrs backend diffs (encode_diff_v2) into
 # "+n/−n" summaries. Pinned to the exact version ankurah-core 0.9.0 resolves

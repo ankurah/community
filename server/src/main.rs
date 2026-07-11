@@ -373,11 +373,17 @@ async fn ensure_default_rooms(ctx: &Context) -> Result<()> {
     const DEFAULT_ROOMS: &[&str] = &["general", "support", "announcements", "introductions"];
 
     for name in DEFAULT_ROOMS {
-        let existing = ctx.fetch::<RoomView>(format!("name = '{name}'").as_str()).await?;
+        // Parameterized rather than spliced into the query text (#17) — the
+        // names are constants today, but predicates built with format! are
+        // exactly the idiom that issue bans.
+        let selection = ankurah::ankql::parser::parse_selection("name = ?")?
+            .predicate
+            .populate([ankurah::ankql::ast::Expr::from(*name)])?;
+        let existing = ctx.fetch::<RoomView>(selection).await?;
         if existing.is_empty() {
             info!("Creating '{name}' room");
             let trx = ctx.begin();
-            trx.create(&Room { name: name.to_string(), created_by: None }).await?;
+            trx.create(&Room { name: name.to_string(), created_by: None, topic: None }).await?;
             trx.commit().await?;
         }
     }

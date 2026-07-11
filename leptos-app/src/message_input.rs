@@ -50,8 +50,15 @@ pub fn MessageInput(
                 let input_text = input_text.trim().to_string();
                 wasm_bindgen_futures::spawn_local(async move {
                     let result = async {
+                        // No-op edits commit nothing (and earn no "(edited)" marker).
+                        if edit_msg.text().unwrap_or_default() == input_text {
+                            return Ok(());
+                        }
                         let trx = ctx().begin();
-                        let _ = edit_msg.edit(&trx)?.text().replace(&input_text);
+                        let mutable = edit_msg.edit(&trx)?;
+                        mutable.text().replace(&input_text)?;
+                        // Stamp the edit for the "(edited)" indicator (#11).
+                        mutable.edited_at().set(&Some(js_sys::Date::now() as i64))?;
                         trx.commit().await?;
                         Ok::<_, Box<dyn std::error::Error>>(())
                     }
@@ -79,6 +86,8 @@ pub fn MessageInput(
                             text: input_text,
                             timestamp,
                             deleted: false,
+                            edited_at: None,
+                            collaborative: None,
                         })
                         .await?;
                         trx.commit().await?;
@@ -104,7 +113,11 @@ pub fn MessageInput(
             if msgs.is_empty() {
                 return;
             }
-            let is_own = |m: &MessageView| m.user().ok().map(|r| r.id().to_base64()).as_deref() == Some(user_id.as_str());
+            // Tombstones are not editable — skip them while navigating (#10).
+            let is_own = |m: &MessageView| {
+                m.user().ok().map(|r| r.id().to_base64()).as_deref() == Some(user_id.as_str())
+                    && !m.deleted().unwrap_or(false)
+            };
 
             let current_idx = editing_message
                 .get()

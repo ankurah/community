@@ -48,6 +48,12 @@ pub fn day_label(ts_ms: i64) -> String {
     }
 }
 
+/// "Jul 2026" — profile "first seen" granularity.
+pub fn month_year(ts_ms: i64) -> String {
+    let d = date(ts_ms);
+    format!("{} {}", MONTHS[(d.get_month() as usize) % 12], d.get_full_year())
+}
+
 /// Full stamp for hover titles: "Jul 5, 2026 · 3:07 PM".
 pub fn full_stamp(ts_ms: i64) -> String {
     let d = date(ts_ms);
