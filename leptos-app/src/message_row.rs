@@ -295,6 +295,11 @@ pub fn MessageRow(
                                         {move || {
                                             crate::xray::state().enabled.get().then(|| {
                                                 use ankurah::View as _;
+                                                // Register the entity broadcast with the render
+                                                // effect so head changes re-render the chip.
+                                                // Inside the .then() ⇒ tracked only while x-ray
+                                                // is on (zero cost when off).
+                                                message_for_xray.track();
                                                 let head = message_for_xray.entity().head();
                                                 let concurrent = head.len() > 1;
                                                 let short = head.to_base64_short();

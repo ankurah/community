@@ -221,6 +221,13 @@ impl BusHandle {
 
     /// The connection-state transition log (newest first).
     pub fn conn_log(&self) -> ArcRwSignal<VecDeque<(f64, String)>> { self.0.conn_log.clone() }
+
+    /// Drop accumulated observations (live feed + connection log) so a
+    /// re-enable starts fresh instead of replaying stale rows.
+    pub fn clear_history(&self) {
+        self.0.feed.update(|f| f.clear());
+        self.0.conn_log.update(|l| l.clear());
+    }
 }
 
 /// Convert one changeset into feed rows. Add/Update/Remove get a row each

@@ -84,6 +84,7 @@ impl XRayState {
             self.inspect.set(None);
             bus::bus().set_tapping(false);
             bus::stop_connection_log();
+            bus::bus().clear_history();
         }
         persist_enabled(on);
     }
@@ -139,10 +140,10 @@ fn initially_enabled() -> bool {
         .unwrap_or(false)
 }
 
-/// The standalone v0 entry point: a floating bottom-right pill that toggles
-/// x-ray, plus the mounts for the system panel and the inspector drawer.
-/// Deliberately self-contained so v0 lands without touching the header or the
-/// message rows (those grow their own affordances in the integration pass).
+/// The x-ray host: restores persisted state, owns the Alt+X hotkey, and
+/// mounts the system panel + inspector drawer. The visible toggle lives in
+/// the header (integration pass); this component renders no chrome of its
+/// own so signed-in users who never touch x-ray never see it.
 #[component]
 pub fn XRayLauncher() -> impl IntoView {
     let st = state();
@@ -163,32 +164,10 @@ pub fn XRayLauncher() -> impl IntoView {
     });
     on_cleanup(move || handle.remove());
 
-    let enabled = st.enabled.clone();
     let panel_open = st.panel_open.clone();
     let inspect = st.inspect.clone();
-    let pill_enabled = enabled.clone();
-    let pill_pressed = enabled.clone();
 
     view! {
-        <button
-            class="xrayPill"
-            class:xrayPillActive=move || pill_enabled.get()
-            aria-pressed=move || if pill_pressed.get() { "true" } else { "false" }
-            title="X-ray mode (Alt+X)"
-            on:click=move |_| state().toggle()
-        >
-            // Aperture/scan glyph in the app's 24x24 stroked style.
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-                stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                <circle cx="12" cy="12" r="9" />
-                <path d="M3.6 9h16.8" />
-                <path d="M3.6 15h16.8" />
-                <path d="M12 3a13 13 0 0 1 0 18" />
-                <path d="M12 3a13 13 0 0 0 0 18" />
-            </svg>
-            <span class="xrayPillLabel">"X-ray"</span>
-        </button>
-
         <Show when=move || panel_open.get()>
             <SystemPanel />
         </Show>

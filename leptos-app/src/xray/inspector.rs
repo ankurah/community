@@ -9,6 +9,8 @@
 //! [`FETCH_CAP`] as a guard against pathological histories.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use leptos::prelude::*;
 use wasm_bindgen_futures::spawn_local;
@@ -49,7 +51,7 @@ enum Phase {
 }
 
 /// Fetch + assemble one entity's history.
-async fn fetch_history(target: InspectTarget) -> Phase {
+async fn fetch_history(target: InspectTarget, cancelled: Arc<AtomicBool>) -> Phase {
     let InspectTarget { collection, entity_id } = target;
 
     // Resolve a typed view when we know the collection. This provides (a) the
@@ -160,6 +162,12 @@ async fn fetch_history(target: InspectTarget) -> Phase {
         let getter = CachedEventGetter::new(collection.clone(), col.clone(), node, &cdata);
         let mut fetched_ids: Vec<EventId> = Vec::new();
         while let Some(id) = frontier.pop_front() {
+            // Drawer closed → stop walking. The phase signal is disposed by
+            // then, so the return value is discarded anyway; the point is not
+            // to keep issuing per-event fetches in the background.
+            if cancelled.load(Ordering::Relaxed) {
+                return Phase::Failed("Cancelled".to_string());
+            }
             if known.len() >= FETCH_CAP {
                 unresolved += 1 + frontier.len();
                 break;
@@ -247,12 +255,22 @@ pub fn XRayInspector(target: InspectTarget) -> impl IntoView {
     let phase = RwSignal::new(Phase::Loading);
     let selected = RwSignal::new(None::<EventId>);
 
+    // Cancellation: set on unmount so an in-flight walk stops issuing
+    // fetches after the drawer closes (rapid open/close would otherwise
+    // stack detached walkers).
+    let cancelled = Arc::new(AtomicBool::new(false));
+    on_cleanup({
+        let cancelled = cancelled.clone();
+        move || cancelled.store(true, Ordering::Relaxed)
+    });
     let fetch_target = target.clone();
+    let fetch_cancelled = cancelled.clone();
     let run_fetch = move || {
         let target = fetch_target.clone();
+        let cancelled = fetch_cancelled.clone();
         spawn_local(async move {
-            let result = fetch_history(target).await;
-            phase.set(result);
+            let result = fetch_history(target, cancelled).await;
+            let _ = phase.try_set(result);
         });
     };
     run_fetch();
