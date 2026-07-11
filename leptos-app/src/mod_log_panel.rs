@@ -89,8 +89,9 @@ pub fn ModLogPanel(on_close: impl Fn() + Clone + 'static) -> impl IntoView {
     }
 }
 
-/// One log row: actor avatar + name, what they did, the optional reason, the
-/// message's short id (full id on hover), and when.
+/// One log row: actor avatar + name, what they did, the optional reason, and
+/// when. Message-targeted rows carry the message's short id (full id on
+/// hover); user-targeted rows ("ban"/"unban") name the member instead.
 #[component]
 fn ModLogRow(action: ModActionView, names_by_user: Memo<HashMap<String, String>>) -> impl IntoView {
     let actor_id = action.actor().map(|a| a.id().to_base64()).unwrap_or_default();
@@ -107,14 +108,32 @@ fn ModLogRow(action: ModActionView, names_by_user: Memo<HashMap<String, String>>
     };
     let actor_name_for_initials = actor_name.clone();
 
+    // The target user's name, for user-targeted rows (live, like the actor's).
+    let target_user_id = action.user().ok().flatten().map(|u| u.id().to_base64());
+    let target_name = target_user_id.clone().map(|id| {
+        move || {
+            names_by_user
+                .with(|map| map.get(&id).filter(|n| !n.trim().is_empty()).cloned().unwrap_or_else(|| "Unknown".to_string()))
+        }
+    });
+
     let verb = match action.action().unwrap_or_default().as_str() {
         "delete" => "removed a message".to_string(),
         "restore" => "restored a message".to_string(),
+        "ban" => "banned".to_string(),
+        "unban" => "unbanned".to_string(),
+        other if target_user_id.is_some() => other.to_string(),
         other => format!("{} — message", other),
     };
 
-    let message_id = action.message().map(|m| m.id().to_base64()).unwrap_or_default();
-    let message_short = message_id.chars().take(8).collect::<String>();
+    // Legacy rows always have `message`; user-targeted rows never do.
+    let message_id = action.message().ok().flatten().map(|m| m.id().to_base64());
+    let message_chip = message_id.map(|id| {
+        let short = id.chars().take(8).collect::<String>();
+        view! {
+            <span class="modLogMsgRef" title=format!("Message {}", id)>{format!("⟨{}⟩", short)}</span>
+        }
+    });
 
     let ts = action.created_at().unwrap_or(0);
     let when = format!("{} · {}", fmt::day_label(ts), fmt::clock_time(ts));
@@ -133,9 +152,8 @@ fn ModLogRow(action: ModActionView, names_by_user: Memo<HashMap<String, String>>
                     " "
                     <span class="modLogVerb">{verb}</span>
                     " "
-                    <span class="modLogMsgRef" title=format!("Message {}", message_id)>
-                        {format!("⟨{}⟩", message_short)}
-                    </span>
+                    {target_name.map(|name| view! { <span class="modLogActor">{name}</span> })}
+                    {message_chip}
                 </div>
                 {reason.map(|r| view! { <div class="modLogReason">{format!("“{}”", r)}</div> })}
                 <div class="modLogWhen" title=when_title>{when}</div>

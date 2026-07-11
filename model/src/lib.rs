@@ -120,18 +120,34 @@ pub struct ReadState {
 }
 
 /// Public moderation-log row, created whenever a moderator acts on a message
-/// (e.g. deleting it). World-readable by design — the community can see what
-/// moderation happened — but only writable with the `moderate` privilege.
+/// (e.g. deleting it) or on a member (banning/unbanning). World-readable by
+/// design — the community can see what moderation happened — but only
+/// writable with the `moderate` privilege.
+///
+/// Exactly one of `message` / `user` is set per row: whichever names the
+/// target, with `action` saying what was done to it. Both are `Option`
+/// because a row only carries the property for its own target kind (and
+/// absent properties only read cleanly through `Option<T>`).
 #[derive(Model, Debug, Serialize, Deserialize)]
 pub struct ModAction {
     /// The moderator who acted.
     #[active_type(LWW)]
     pub actor: Ref<User>,
-    /// The message acted upon.
+    /// The message acted upon, for message-targeted actions ("delete",
+    /// "restore"). `None` on user-targeted rows, which have no message —
+    /// there is no null `Ref`, so `Option` is the only honest encoding.
+    /// Every pre-ban row has this property, so legacy rows read as `Some`;
+    /// rows created with `None` simply never write it, and queries filtering
+    /// on `message = ?` skip such rows (absent-property comparisons deny
+    /// per-row, fail-closed).
     #[active_type(LWW)]
-    pub message: Ref<Message>,
-    /// What was done, as a stable lowercase verb (e.g. "delete", "restore").
-    /// LWW, not collaborative text: it is an enum-like atom.
+    pub message: Option<Ref<Message>>,
+    /// The member acted upon, for user-targeted actions ("ban", "unban").
+    /// `None` on message-targeted rows and absent on all legacy rows.
+    #[active_type(LWW)]
+    pub user: Option<Ref<User>>,
+    /// What was done, as a stable lowercase verb (e.g. "delete", "restore",
+    /// "ban", "unban"). LWW, not collaborative text: it is an enum-like atom.
     #[active_type(LWW)]
     pub action: String,
     /// Optional human-readable justification, shown in the public log.
