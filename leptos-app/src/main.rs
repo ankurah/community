@@ -20,6 +20,7 @@ mod debug_overlay;
 mod editable_text_field;
 mod fmt;
 mod header;
+mod markdown;
 mod members_panel;
 mod message_context_menu;
 mod message_input;

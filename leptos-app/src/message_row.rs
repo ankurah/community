@@ -59,7 +59,7 @@ pub fn MessageRow(
         move || editing_message.get().as_ref().map(|em| em.id().to_base64() == message_for_editing.id().to_base64()).unwrap_or(false);
 
     let message_id = message.id().to_base64();
-    let message_text = message.text().unwrap_or_default();
+    let message_for_text = message.clone();
     let ts = message.timestamp().unwrap_or(0);
     let time_str = fmt::clock_time(ts);
     let stamp = fmt::full_stamp(ts);
@@ -155,7 +155,11 @@ pub fn MessageRow(
                     title=stamp
                     on:contextmenu=handle_context_menu
                 >
-                    <div class="messageText">{message_text.clone()}</div>
+                    // Reactive read: CRDT text edits (local or remote) re-render
+                    // the bubble; markdown parses only when the text changes.
+                    <div class="messageText">
+                        {move || crate::markdown::render_message(&message_for_text.text().unwrap_or_default())}
+                    </div>
                 </div>
                 <Show when=move || context_menu.get().is_some()>
                     {
