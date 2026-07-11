@@ -134,8 +134,9 @@ pid_is_alive() {
     kill -0 "$1" 2>/dev/null
 }
 
-# TCP connect probe (bash builtin) — the server is a WebSocket endpoint with no
-# plain-HTTP health route, so "port accepts a connection" is the readiness test.
+# TCP connect probe (bash builtin). The server's readiness signal is simply that
+# its port accepts a connection — a dependency-free check (no curl) that makes no
+# assumption about which HTTP routes exist yet.
 tcp_open() {
     (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null
 }
