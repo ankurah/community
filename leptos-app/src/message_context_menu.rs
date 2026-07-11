@@ -98,6 +98,70 @@ pub fn MessageContextMenu(
         }
     });
 
+    // Focus the first item when the menu opens, so arrow keys work immediately
+    // (mouse users see no ring — the global outline is :focus-visible only).
+    let focused_once = StoredValue::new(false);
+    Effect::new({
+        let menu_ref = menu_ref.clone();
+        move |_| {
+            if focused_once.get_value() {
+                return;
+            }
+            if let Some(menu_el) = menu_ref.get() {
+                if let Ok(Some(node)) = menu_el.query_selector("[role='menuitem']") {
+                    if let Ok(el) = node.dyn_into::<web_sys::HtmlElement>() {
+                        let _ = el.focus();
+                        focused_once.set_value(true);
+                    }
+                }
+            }
+        }
+    });
+
+    // Menu keyboard contract (#16): arrows cycle items, Home/End jump,
+    // Enter/Space activate (native button behavior), Tab closes. Escape is
+    // handled by the document-level listener above.
+    let handle_menu_keydown = {
+        let on_close = on_close.clone();
+        let menu_ref = menu_ref.clone();
+        move |e: KeyboardEvent| {
+            let key = e.key();
+            if key == "Tab" {
+                e.prevent_default();
+                on_close();
+                return;
+            }
+            if !matches!(key.as_str(), "ArrowDown" | "ArrowUp" | "Home" | "End") {
+                return;
+            }
+            e.prevent_default();
+            let Some(menu_el) = menu_ref.get_untracked() else { return };
+            let Ok(items) = menu_el.query_selector_all("[role='menuitem']") else { return };
+            let n = items.length();
+            if n == 0 {
+                return;
+            }
+            let active = window().and_then(|w| w.document()).and_then(|d| d.active_element());
+            let current = (0..n).find(|i| {
+                items
+                    .item(*i)
+                    .and_then(|node| node.dyn_into::<web_sys::Element>().ok())
+                    .as_ref()
+                    .map(|el| Some(el) == active.as_ref())
+                    .unwrap_or(false)
+            });
+            let next = match key.as_str() {
+                "Home" => 0,
+                "End" => n - 1,
+                "ArrowDown" => current.map(|c| (c + 1) % n).unwrap_or(0),
+                _ => current.map(|c| (c + n - 1) % n).unwrap_or(n - 1),
+            };
+            if let Some(el) = items.item(next).and_then(|node| node.dyn_into::<web_sys::HtmlElement>().ok()) {
+                let _ = el.focus();
+            }
+        }
+    };
+
     let handle_edit = {
         let on_close = on_close.clone();
         let message = message.clone();
@@ -131,14 +195,17 @@ pub fn MessageContextMenu(
         <div
             node_ref=menu_ref
             class="contextMenu"
+            role="menu"
+            aria-label="Message actions"
             style:position="fixed"
             style:left=move || format!("{}px", position.get().0)
             style:top=move || format!("{}px", position.get().1)
+            on:keydown=handle_menu_keydown
         >
             {is_own
                 .then(|| {
                     view! {
-                        <button class="contextMenuItem" on:click=handle_edit>
+                        <button class="contextMenuItem" role="menuitem" on:click=handle_edit>
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
                                 stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                                 <path d="M17 3a2.8 2.8 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5z" />
@@ -147,7 +214,7 @@ pub fn MessageContextMenu(
                         </button>
                     }
                 })}
-            <button class="contextMenuItem contextMenuItemDanger" on:click=handle_delete>
+            <button class="contextMenuItem contextMenuItemDanger" role="menuitem" on:click=handle_delete>
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
                     stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                     <path d="M3 6h18" />

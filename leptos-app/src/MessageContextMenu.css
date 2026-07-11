@@ -51,6 +51,13 @@
   background-color: var(--surface-3);
 }
 
+/* Keyboard navigation (#16): match the hover wash; the global outline ring
+   stays on :focus-visible, inset so it is not clipped by the menu edge. */
+.contextMenuItem:focus-visible {
+  background-color: var(--surface-3);
+  outline-offset: -2px;
+}
+
 .contextMenuItemDanger {
   color: var(--danger);
 }

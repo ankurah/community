@@ -107,6 +107,7 @@
 /* Bubbles ------------------------------------------------------------------ */
 
 .messageBubble {
+  position: relative; /* anchors the hover/focus actions trigger */
   padding: 9px 13px;
   max-width: 100%;
   background-color: var(--bubble-other-bg);
@@ -115,6 +116,52 @@
   box-shadow: var(--shadow-1);
   word-wrap: break-word;
   cursor: context-menu;
+}
+
+/* Visible actions affordance (#16): the keyboard/hover path to the same menu
+   right-click opens. Hidden until the row is hovered or focus lands inside. */
+
+.messageActions {
+  position: absolute;
+  top: -10px;
+  right: 8px;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 21px;
+  color: var(--text-3);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  box-shadow: var(--shadow-1);
+  cursor: pointer;
+  opacity: 0;
+  transition:
+    opacity var(--t-fast) var(--ease),
+    background-color var(--t-fast) var(--ease),
+    color var(--t-fast) var(--ease);
+}
+
+.messageRow:hover .messageActions,
+.messageRow:focus-within .messageActions,
+.messageActions[aria-expanded="true"] {
+  opacity: 1;
+}
+
+.messageActions:hover {
+  color: var(--text);
+  background: var(--surface-2);
+}
+
+.messageActions svg {
+  width: 14px;
+  height: 14px;
+}
+
+/* The global focus ring sits over the own-bubble evergreen — use mint there
+   so the ring stays visible in both themes. */
+.messageBubble.ownMessage .messageActions:focus-visible {
+  outline-color: var(--accent);
 }
 
 /* Tighten corners between messages of the same group. */

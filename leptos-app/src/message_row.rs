@@ -46,12 +46,39 @@ pub fn MessageRow(
         .map(|id| message_for_own.user().ok().map(|r| r.id().to_base64()).as_deref() == Some(id.as_str()))
         .unwrap_or(false);
 
+    // Whether the viewer can act on this message at all (own message, or any
+    // message for moderators). UI gating only — the server enforces the policy.
+    let can_act = is_own_message || crate::can_moderate();
+
+    // The visible "⋯" affordance (#16): keyboard/hover path to the same menu.
+    let trigger_ref = NodeRef::<leptos::html::Button>::new();
+    // Whether the menu was opened from the trigger (vs right-click); governs
+    // whether closing returns focus to the trigger.
+    let opened_from_trigger = StoredValue::new(false);
+    // Snapshot at mousedown: the menu's own outside-mousedown listener closes
+    // it before our click fires, so without this a click on the trigger of an
+    // open menu would instantly reopen it instead of toggling it closed.
+    let menu_was_open_at_mousedown = StoredValue::new(false);
+
     // Right-click opens the menu on your own messages; moderators can open it
     // on anyone's (UI gating only — the server enforces the write policy).
     let handle_context_menu = move |e: MouseEvent| {
         e.prevent_default();
-        if is_own_message || crate::can_moderate() {
+        if can_act {
+            opened_from_trigger.set_value(false);
             context_menu.set(Some((e.client_x(), e.client_y())));
+        }
+    };
+
+    let open_from_trigger = move |e: MouseEvent| {
+        e.stop_propagation();
+        if menu_was_open_at_mousedown.get_value() {
+            return; // toggle-off: the outside-mousedown listener already closed it
+        }
+        if let Some(btn) = trigger_ref.get_untracked() {
+            let rect = btn.get_bounding_client_rect();
+            opened_from_trigger.set_value(true);
+            context_menu.set(Some((rect.left() as i32, rect.bottom() as i32 + 6)));
         }
     };
 
@@ -160,6 +187,33 @@ pub fn MessageRow(
                     <div class="messageText">
                         {move || crate::markdown::render_message(&message_for_text.text().unwrap_or_default())}
                     </div>
+                    {can_act
+                        .then(|| {
+                            view! {
+                                <button
+                                    node_ref=trigger_ref
+                                    type="button"
+                                    class="messageActions"
+                                    aria-haspopup="menu"
+                                    aria-label="Message actions"
+                                    aria-expanded=move || {
+                                        if context_menu.get().is_some() { "true" } else { "false" }
+                                    }
+                                    title="Message actions"
+                                    on:mousedown=move |_| {
+                                        menu_was_open_at_mousedown
+                                            .set_value(context_menu.get_untracked().is_some())
+                                    }
+                                    on:click=open_from_trigger
+                                >
+                                    <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                                        <circle cx="5" cy="12" r="1.9" />
+                                        <circle cx="12" cy="12" r="1.9" />
+                                        <circle cx="19" cy="12" r="1.9" />
+                                    </svg>
+                                </button>
+                            }
+                        })}
                 </div>
                 <Show when=move || context_menu.get().is_some()>
                     {
@@ -173,7 +227,15 @@ pub fn MessageRow(
                                         message=message.clone()
                                         editing_message=editing_message
                                         is_own=is_own_message
-                                        on_close=move || context_menu.set(None)
+                                        on_close=move || {
+                                            context_menu.set(None);
+                                            // Keyboard path: hand focus back to the trigger.
+                                            if opened_from_trigger.get_value() {
+                                                if let Some(btn) = trigger_ref.get_untracked() {
+                                                    let _ = btn.focus();
+                                                }
+                                            }
+                                        }
                                     />
                                 }
                             })
