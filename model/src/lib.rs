@@ -137,9 +137,13 @@ pub struct ModAction {
     /// "restore"). `None` on user-targeted rows, which have no message —
     /// there is no null `Ref`, so `Option` is the only honest encoding.
     /// Every pre-ban row has this property, so legacy rows read as `Some`;
-    /// rows created with `None` simply never write it, and queries filtering
-    /// on `message = ?` skip such rows (absent-property comparisons deny
-    /// per-row, fail-closed).
+    /// rows created with `None` simply never write it. Queries filtering on
+    /// `message = ?` skip such rows on every engine, but the mechanisms
+    /// differ: sled and the reactor deny per-row on absent-property errors,
+    /// while IndexedDB excludes them via the composite equality index (null
+    /// is not a valid key) and would PROPAGATE a per-row error otherwise —
+    /// so keep `message` comparisons equality-only (no `!=`/`IN`) unless
+    /// the client fetch path grows real per-row fail-closed semantics.
     #[active_type(LWW)]
     pub message: Option<Ref<Message>>,
     /// The member acted upon, for user-targeted actions ("ban", "unban").
