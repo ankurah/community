@@ -42,6 +42,8 @@ pub fn Chat(
 
     // Query all users once (for author name lookup in message rows).
     let users = ctx().query::<UserView>("true").expect("failed to create UserView LiveQuery");
+    // Surface it in the X-ray queries card (app-lifetime; id discarded).
+    let _ = crate::xray::bus::bus().register("users (chat)", &users);
 
     // (Re)create the scroll manager whenever the selected room changes. viewport
     // height is a constructor argument, so we measure the container (if already

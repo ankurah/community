@@ -24,6 +24,9 @@ pub fn MessageContextMenu(
 ) -> impl IntoView {
     // UI gating only — the server enforces the write policy.
     let can_delete = is_own || crate::can_moderate();
+    // Captured before the action handlers below consume `message`/`on_close`.
+    let msg_id_for_inspect = message.id();
+    let on_close_for_inspect = on_close.clone();
     let menu_ref = NodeRef::<leptos::html::Div>::new();
     let position = RwSignal::new((x, y));
 
@@ -296,6 +299,33 @@ pub fn MessageContextMenu(
                                 <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
                             </svg>
                             {if is_own { "Delete" } else { "Delete (moderator)" }}
+                        </button>
+                    }
+                })}
+            // Menu mounts fresh per open, so a non-reactive read is correct:
+            // the item appears only while X-ray mode is on.
+            {crate::xray::state()
+                .enabled
+                .get_untracked()
+                .then(|| {
+                    let msg_id = msg_id_for_inspect.clone();
+                    let on_close_inspect = on_close_for_inspect.clone();
+                    view! {
+                        <button
+                            class="contextMenuItem"
+                            role="menuitem"
+                            on:click=move |_| {
+                                use ankurah::View as _;
+                                crate::xray::state().open_inspector(MessageView::collection(), msg_id.clone());
+                                on_close_inspect();
+                            }
+                        >
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                                stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                <circle cx="11" cy="11" r="7" />
+                                <path d="m21 21-4.3-4.3" />
+                            </svg>
+                            "Inspect (X-ray)"
                         </button>
                     }
                 })}
