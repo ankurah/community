@@ -11,7 +11,7 @@ use ankurah_virtual_scroll::{ScrollManager, ScrollMode};
 
 use crate::{
     chat_debug_header::ChatDebugHeader, ctx, message_input::MessageInput, message_list::MessageList,
-    notification_manager::NotificationManager,
+    read_state::ReadStateManager,
 };
 
 // ankurah-virtual-scroll tuning. viewport_height is a constructor argument in the
@@ -32,7 +32,7 @@ type Manager = SendWrapper<Arc<ScrollManager<MessageView>>>;
 pub fn Chat(
     room: RwSignal<Option<RoomView>>,
     current_user: RwSignal<Option<UserView>>,
-    notification_manager: NotificationManager,
+    read_state: ReadStateManager,
 ) -> impl IntoView {
     let show_debug = RwSignal::new(false);
     let editing_message = RwSignal::new(None::<MessageView>);
@@ -108,14 +108,17 @@ pub fn Chat(
         }
     });
 
-    // Mark the viewed room active while live so opening it clears its unread
-    // badge (mirrors the React effect that runs on room/manager change).
+    // Advance the persistent read cursor (#13) whenever the user is looking at
+    // the live tail of a room: on room switch, and again as new messages
+    // arrive while live (this effect tracks `messages`). Scrolled-up readers
+    // keep their cursor — history browsing doesn't mark anything read.
     Effect::new({
-        let notification_manager = notification_manager.clone();
+        let read_state = read_state.clone();
         move |_| {
-            if let (Some(m), Some(r)) = (manager.get(), room.get()) {
+            let newest = newest_timestamp(&messages.get());
+            if let (Some(m), Some(r), Some(ts)) = (manager.get(), room.get(), newest) {
                 if m.mode() == ScrollMode::Live {
-                    notification_manager.set_active_room(Some(r.id().to_base64()));
+                    read_state.mark_read(&r.id().to_base64(), ts);
                 }
             }
         }
@@ -147,7 +150,7 @@ pub fn Chat(
         >
             {
                 let users = users.clone();
-                let notification_manager = notification_manager.clone();
+                let read_state = read_state.clone();
                 move || {
                     let current_room = room.get()?;
                     let current_user_id = current_user.get().map(|u| u.id().to_base64());
@@ -156,7 +159,7 @@ pub fn Chat(
                     // Report the first/last *visible* message EntityIds to the manager so
                     // it can paginate (the current API is intersection/EntityId-based).
                     let handle_scroll = {
-                        let nm = notification_manager.clone();
+                        let read_state = read_state.clone();
                         move |_ev: leptos::ev::Event| {
                             let Some(m) = manager.get_untracked() else { return };
                             let Some(container) = messages_container_ref.get_untracked() else { return };
@@ -166,25 +169,30 @@ pub fn Chat(
                             if let Some((first, last)) = find_visible_ids(&container) {
                                 m.on_scroll(first, last, scrolling_backward);
                             }
-                            let active = if m.mode() == ScrollMode::Live {
-                                room.get_untracked().map(|r| r.id().to_base64())
-                            } else {
-                                None
-                            };
-                            nm.set_active_room(active);
+                            // Scrolled back to the live tail → the newest message is on
+                            // screen, so advance the read cursor.
+                            if m.mode() == ScrollMode::Live {
+                                if let (Some(r), Some(ts)) =
+                                    (room.get_untracked(), newest_timestamp(&messages.get_untracked()))
+                                {
+                                    read_state.mark_read(&r.id().to_base64(), ts);
+                                }
+                            }
                         }
                     };
 
                     // "Jump to current": scroll to bottom; the next scroll event drops the
                     // manager back into live/auto-scroll mode (there is no jumpToLive() API).
                     let handle_jump = {
-                        let nm = notification_manager.clone();
+                        let read_state = read_state.clone();
                         move |_| {
                             if let Some(el) = messages_container_ref.get_untracked() {
                                 el.set_scroll_top(el.scroll_height());
                             }
-                            if let Some(room) = room.get_untracked() {
-                                nm.set_active_room(Some(room.id().to_base64()));
+                            if let (Some(r), Some(ts)) =
+                                (room.get_untracked(), newest_timestamp(&messages.get_untracked()))
+                            {
+                                read_state.mark_read(&r.id().to_base64(), ts);
                             }
                         }
                     };
@@ -241,6 +249,12 @@ pub fn Chat(
             }
         </Show>
     }
+}
+
+/// Newest message timestamp in a visible set (they arrive ordered, but max()
+/// is cheap and immune to ordering changes).
+fn newest_timestamp(messages: &[MessageView]) -> Option<i64> {
+    messages.iter().filter_map(|m| m.timestamp().ok()).max()
 }
 
 /// Find the first and last message elements currently intersecting the scroll
