@@ -1,0 +1,110 @@
+/* Banned-client lockout — an opaque, full-viewport terminal state. Sits above
+   every modal/menu in the app (members overlay 1000, member menu 1100). */
+
+.banLock {
+  position: fixed;
+  inset: 0;
+  z-index: 3000;
+  display: grid;
+  place-items: center;
+  padding: var(--sp-5);
+  background: var(--bg);
+  animation: banLockIn 200ms var(--ease) both;
+}
+
+@keyframes banLockIn {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
+.banLockCard {
+  max-width: 440px;
+  width: 100%;
+  padding: var(--sp-7) var(--sp-6);
+  text-align: center;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-xl);
+  box-shadow: var(--shadow-2);
+}
+
+.banLockIcon {
+  display: grid;
+  place-items: center;
+  width: 52px;
+  height: 52px;
+  margin: 0 auto var(--sp-4);
+  color: var(--danger);
+  background: var(--danger-bg);
+  border: 1px solid var(--danger-border);
+  border-radius: var(--r-full);
+}
+
+.banLockIcon svg {
+  width: 24px;
+  height: 24px;
+}
+
+.banLockTitle {
+  margin: 0 0 var(--sp-3);
+  font-size: var(--fs-xl);
+  font-weight: 750;
+  letter-spacing: -0.01em;
+  line-height: 1.3;
+  color: var(--text);
+}
+
+/* The moderator's public reason, when one was given. */
+.banLockReason {
+  margin: 0 0 var(--sp-3);
+  padding: var(--sp-3) var(--sp-4);
+  font-size: var(--fs-base);
+  line-height: 1.5;
+  color: var(--text);
+  background: var(--surface-3);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+}
+
+.banLockNote {
+  margin: 0 0 var(--sp-5);
+  font-size: var(--fs-md);
+  line-height: 1.55;
+  color: var(--text-3);
+}
+
+.banLockButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 10px var(--sp-5);
+  font-size: var(--fs-md);
+  font-weight: 650;
+  color: var(--on-primary);
+  background: var(--primary);
+  border-radius: var(--r-md);
+  transition: background-color var(--t-fast) var(--ease);
+}
+
+.banLockButton:hover {
+  background: var(--primary-hover);
+}
+
+.banLockButton:active {
+  background: var(--primary-active);
+}
+
+@media (max-width: 480px) {
+  .banLockCard {
+    padding: var(--sp-6) var(--sp-5);
+  }
+
+  .banLockTitle {
+    font-size: var(--fs-lg);
+  }
+}

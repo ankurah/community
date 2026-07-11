@@ -14,6 +14,7 @@ use wasm_bindgen_futures::{spawn_local, JsFuture};
 use web_sys::window;
 
 mod auth;
+mod ban_lock;
 mod chat;
 mod chat_debug_header;
 mod editable_text_field;
@@ -327,6 +328,9 @@ pub fn ChatApp() -> impl IntoView {
 
     view! {
         <div class="container">
+            // Banned-client self-lock: watches the viewer's own active bans and
+            // replaces the UI with a lockout + delayed sign-out (see ban_lock.rs).
+            <ban_lock::BanLock />
             <Header current_user selected_room />
 
             <div class="mainContent">
