@@ -6,9 +6,12 @@ use ankurah::LiveQuery;
 use ankurah_signals::Get as AnkurahGet;
 use community_model::{MessageView, UserView};
 
+use std::collections::HashMap;
+
 use crate::fmt;
 use crate::message_context_menu::MessageContextMenu;
 use crate::profile_popover::ProfilePopover;
+use crate::reactions::{ReactionBar, ReactionChip};
 use community_model::ModActionView;
 
 /// Individual message row: optional day divider, avatar gutter (others only),
@@ -25,6 +28,9 @@ pub fn MessageRow(
     first_in_group: bool,
     last_in_group: bool,
     day_label: Option<String>,
+    /// Render-ready reaction chips per message id (shared, built once in the
+    /// list — see message_list.rs).
+    reaction_chips: Memo<HashMap<String, Vec<ReactionChip>>>,
 ) -> impl IntoView {
     let context_menu = RwSignal::new(None::<(i32, i32)>);
 
@@ -49,9 +55,8 @@ pub fn MessageRow(
         .map(|id| message_for_own.user().ok().map(|r| r.id().to_base64()).as_deref() == Some(id.as_str()))
         .unwrap_or(false);
 
-    // Whether the viewer can act on this message at all (own message, or any
-    // message for moderators). UI gating only — the server enforces the policy.
-    let can_act = is_own_message || crate::can_moderate();
+    // Since reactions (#14) every non-tombstone message has menu actions for
+    // every viewer; Edit/Delete are gated inside the menu itself.
 
     // Tombstone state (#10): deleted messages stay in the timeline as muted
     // rows. Reactive — a remote delete flips the row live.
@@ -75,7 +80,7 @@ pub fn MessageRow(
     let handle_context_menu = move |e: MouseEvent| {
         e.prevent_default();
         // Tombstones offer no actions — for the author or for moderators.
-        if can_act && !is_deleted_for_menu() {
+        if !is_deleted_for_menu() {
             opened_from_trigger.set_value(false);
             context_menu.set(Some((e.client_x(), e.client_y())));
         }
@@ -120,6 +125,12 @@ pub fn MessageRow(
     let message_id = message.id().to_base64();
     let message_for_text = message.clone();
     let message_for_edited = message.clone();
+    let message_for_bar = message.clone();
+    // This row's reaction chips, from the shared per-message map (#14).
+    let chips = Signal::derive({
+        let msg_id = message.id().to_base64();
+        move || reaction_chips.with(|m| m.get(&msg_id).cloned().unwrap_or_default())
+    });
     let ts = message.timestamp().unwrap_or(0);
     let time_str = fmt::clock_time(ts);
     let stamp = fmt::full_stamp(ts);
@@ -276,33 +287,28 @@ pub fn MessageRow(
                                                 })
                                         }}
                                     </div>
-                                    {can_act
-                                        .then(|| {
-                                            view! {
-                                                <button
-                                                    node_ref=trigger_ref
-                                                    type="button"
-                                                    class="messageActions"
-                                                    aria-haspopup="menu"
-                                                    aria-label="Message actions"
-                                                    aria-expanded=move || {
-                                                        if context_menu.get().is_some() { "true" } else { "false" }
-                                                    }
-                                                    title="Message actions"
-                                                    on:mousedown=move |_| {
-                                                        menu_was_open_at_mousedown
-                                                            .set_value(context_menu.get_untracked().is_some())
-                                                    }
-                                                    on:click=open_from_trigger
-                                                >
-                                                    <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-                                                        <circle cx="5" cy="12" r="1.9" />
-                                                        <circle cx="12" cy="12" r="1.9" />
-                                                        <circle cx="19" cy="12" r="1.9" />
-                                                    </svg>
-                                                </button>
-                                            }
-                                        })}
+                                    <button
+                                        node_ref=trigger_ref
+                                        type="button"
+                                        class="messageActions"
+                                        aria-haspopup="menu"
+                                        aria-label="Message actions"
+                                        aria-expanded=move || {
+                                            if context_menu.get().is_some() { "true" } else { "false" }
+                                        }
+                                        title="Message actions"
+                                        on:mousedown=move |_| {
+                                            menu_was_open_at_mousedown
+                                                .set_value(context_menu.get_untracked().is_some())
+                                        }
+                                        on:click=open_from_trigger
+                                    >
+                                        <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                                            <circle cx="5" cy="12" r="1.9" />
+                                            <circle cx="12" cy="12" r="1.9" />
+                                            <circle cx="19" cy="12" r="1.9" />
+                                        </svg>
+                                    </button>
                                 }
                             }
                         }
@@ -313,6 +319,16 @@ pub fn MessageRow(
                         }
                     </Show>
                 </div>
+                // Reaction chips (#14): under the bubble, never on tombstones.
+                <Show when={
+                    let is_deleted = is_deleted.clone();
+                    move || !chips.get().is_empty() && !is_deleted()
+                }>
+                    {
+                        let message_for_bar = message_for_bar.clone();
+                        move || view! { <ReactionBar message=message_for_bar.clone() chips=chips /> }
+                    }
+                </Show>
                 <Show when=move || profile.get().is_some()>
                     {move || {
                         profile

@@ -23,6 +23,41 @@
   }
 }
 
+/* Quick-reaction row (#14) at the top of the menu. */
+
+.contextMenuReactions {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+}
+
+/* Divider only when Edit/Delete items follow. */
+.contextMenuReactions.withItems {
+  margin-bottom: 4px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border);
+}
+
+.contextMenuEmoji {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  font-size: 16px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background-color var(--t-fast) var(--ease);
+}
+
+.contextMenuEmoji:hover,
+.contextMenuEmoji:focus-visible {
+  background-color: var(--surface-3);
+}
+
+.contextMenuEmoji:focus-visible {
+  outline-offset: -2px;
+}
+
 .contextMenuItem {
   display: flex;
   align-items: center;

@@ -30,6 +30,7 @@ mod notification_manager;
 mod profile_popover;
 mod qr_code_modal;
 mod queries;
+mod reactions;
 mod room_list;
 
 use chat::Chat;

@@ -7,19 +7,22 @@ use community_model::{MessageView, ModAction};
 
 use crate::ctx;
 
-/// Context menu for message actions (edit, delete).
-/// Appears on right-click of own messages, and — for moderators — anyone's.
+/// Context menu for message actions: react (everyone), edit (author),
+/// delete (author or moderator). Opens on right-click or the row's "⋯"
+/// trigger, on any non-tombstone message.
 #[component]
 pub fn MessageContextMenu(
     x: i32,
     y: i32,
     message: MessageView,
     editing_message: RwSignal<Option<MessageView>>,
-    /// Whether the message belongs to the viewer. Own messages offer Edit +
-    /// Delete; someone else's (the moderator case) offers delete only.
+    /// Whether the message belongs to the viewer (gates Edit; Delete also
+    /// opens to moderators).
     is_own: bool,
     on_close: impl Fn() + Clone + 'static,
 ) -> impl IntoView {
+    // UI gating only — the server enforces the write policy.
+    let can_delete = is_own || crate::can_moderate();
     let menu_ref = NodeRef::<leptos::html::Div>::new();
     let position = RwSignal::new((x, y));
 
@@ -171,6 +174,11 @@ pub fn MessageContextMenu(
         }
     };
 
+    // Clones for the quick-reaction row in the view below (handle_delete
+    // consumes the originals).
+    let message_for_react = message.clone();
+    let on_close_for_react = on_close.clone();
+
     let handle_delete = move |_: LeptosMouseEvent| {
         let message = message.clone();
         let on_close = on_close.clone();
@@ -237,6 +245,32 @@ pub fn MessageContextMenu(
             style:top=move || format!("{}px", position.get().1)
             on:keydown=handle_menu_keydown
         >
+            // Quick reactions (#14): the fixed set, for every viewer.
+            <div
+                class=if can_delete { "contextMenuReactions withItems" } else { "contextMenuReactions" }
+                role="none"
+            >
+                {crate::reactions::REACTION_EMOJIS
+                    .iter()
+                    .map(|emoji| {
+                        let on_close = on_close_for_react.clone();
+                        let message = message_for_react.clone();
+                        view! {
+                            <button
+                                class="contextMenuEmoji"
+                                role="menuitem"
+                                aria-label=format!("React with {}", emoji)
+                                on:click=move |_| {
+                                    crate::reactions::toggle_reaction(&message, emoji);
+                                    on_close();
+                                }
+                            >
+                                {*emoji}
+                            </button>
+                        }
+                    })
+                    .collect_view()}
+            </div>
             {is_own
                 .then(|| {
                     view! {
@@ -249,15 +283,20 @@ pub fn MessageContextMenu(
                         </button>
                     }
                 })}
-            <button class="contextMenuItem contextMenuItemDanger" role="menuitem" on:click=handle_delete>
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-                    stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                    <path d="M3 6h18" />
-                    <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
-                    <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-                </svg>
-                {if is_own { "Delete" } else { "Delete (moderator)" }}
-            </button>
+            {can_delete
+                .then(|| {
+                    view! {
+                        <button class="contextMenuItem contextMenuItemDanger" role="menuitem" on:click=handle_delete>
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                                stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                <path d="M3 6h18" />
+                                <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
+                                <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                            </svg>
+                            {if is_own { "Delete" } else { "Delete (moderator)" }}
+                        </button>
+                    }
+                })}
         </div>
     }
 }
