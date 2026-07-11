@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use ankurah::{LiveQuery, changes::ChangeSet};
-use ankurah_signals::{Get, Mut, Peek, Subscribe, SubscriptionGuard};
+use ankurah_signals::{Subscribe, SubscriptionGuard};
 use community_model::{MessageView, RoomView};
 use send_wrapper::SendWrapper;
 use wasm_bindgen::prelude::*;
@@ -11,21 +11,21 @@ use web_sys::{AudioBuffer, AudioContext};
 
 use crate::ctx;
 
-/// Manages notification sounds and unread message counts per room.
+/// Plays a notification sound when someone else posts a message, in any room.
 ///
-/// Uses one query per room (since GROUP BY is not yet available in Ankurah).
-/// Tracks messages from other users and plays notification sounds.
+/// Uses one LIMIT-10 query per room (there is no cross-room "new message"
+/// stream in Ankurah). Unread *badges* are not handled here — they are
+/// persistent, derived from `ReadState` rows by `crate::read_state::
+/// ReadStateManager` (issue #13).
 #[derive(Clone)]
 pub struct NotificationManager(SendWrapper<Arc<Inner>>);
 
 struct Inner {
     current_user_id: Mutex<Option<String>>,
-    active_room_id: Mutex<Option<String>>,
     room_queries: Mutex<HashMap<String, RoomQueryState>>,
     audio_context: SendWrapper<AudioContext>,
     audio_buffer: Mutex<Option<SendWrapper<AudioBuffer>>>,
     last_sound_played_at: Mutex<f64>,
-    unread_counts: Mut<HashMap<String, usize>>,
     _rooms_guard: Mutex<Option<SubscriptionGuard>>,
 }
 
@@ -37,16 +37,13 @@ struct RoomQueryState {
 impl NotificationManager {
     pub fn new(rooms: LiveQuery<RoomView>, current_user: Option<String>) -> Self {
         let audio_context = AudioContext::new().expect("Failed to create AudioContext");
-        let unread_counts = Mut::new(HashMap::new());
 
         let inner = Arc::new(Inner {
             current_user_id: Mutex::new(current_user),
-            active_room_id: Mutex::new(None),
             room_queries: Mutex::new(HashMap::new()),
             audio_context: SendWrapper::new(audio_context.clone()),
             audio_buffer: Mutex::new(None),
             last_sound_played_at: Mutex::new(0.0),
-            unread_counts: unread_counts.clone(),
             _rooms_guard: Mutex::new(None),
         });
 
@@ -130,8 +127,12 @@ impl NotificationManager {
         }
 
         // Create lightweight query for latest messages in this room
-        let predicate = format!("room = '{}' AND deleted = false ORDER BY timestamp DESC LIMIT 10", room_id);
-        let query = match ctx().query::<MessageView>(predicate.as_str()) {
+        let selection = crate::queries::selection(
+            "room = ? AND deleted = false ORDER BY timestamp DESC LIMIT 10",
+            [(&room.id()).into()],
+        )
+        .expect("static notification selection parses");
+        let query = match ctx().query::<MessageView>(selection) {
             Ok(q) => q,
             Err(e) => {
                 tracing::error!("Failed to create message query for room {}: {:?}", room_id, e);
@@ -140,7 +141,6 @@ impl NotificationManager {
         };
 
         let inner_for_sub = inner.clone();
-        let room_id_for_sub = room_id.clone();
         let notification_count = Arc::new(Mutex::new(0usize));
 
         let guard = query.subscribe(move |changeset: ChangeSet<MessageView>| {
@@ -166,19 +166,6 @@ impl NotificationManager {
 
             if !new_messages_from_others.is_empty() {
                 tracing::info!("NotificationManager: {} new messages from others", new_messages_from_others.len());
-
-                // Only increment unread count if not the active room
-                let active_room_id = inner_for_sub.active_room_id.lock().unwrap();
-                let is_active_room = active_room_id.as_ref() == Some(&room_id_for_sub);
-
-                if !is_active_room {
-                    let mut counts = inner_for_sub.unread_counts.peek().clone();
-                    let new_count = counts.get(&room_id_for_sub).unwrap_or(&0) + new_messages_from_others.len();
-                    counts.insert(room_id_for_sub.clone(), new_count);
-                    inner_for_sub.unread_counts.set(counts);
-                }
-
-                // Always play sound for messages from others (even in active room)
                 Self::play_notification_sound(inner_for_sub.clone());
             }
         });
@@ -192,11 +179,6 @@ impl NotificationManager {
 
     fn remove_room_query(inner: Arc<Inner>, room_id: String) {
         inner.room_queries.lock().unwrap().remove(&room_id);
-
-        // Remove unread count for this room
-        let mut counts = inner.unread_counts.peek().clone();
-        counts.remove(&room_id);
-        inner.unread_counts.set(counts);
     }
 
     fn play_notification_sound(inner: Arc<Inner>) {
@@ -264,31 +246,10 @@ impl NotificationManager {
         }
     }
 
-    /// Reactive unread count for one room (tracks the signal, so a badge that
-    /// reads this re-renders when the count changes).
-    pub fn unread_count(&self, room_id: &str) -> usize {
-        self.0.unread_counts.get().get(room_id).copied().unwrap_or(0)
-    }
-
     /// Update the current user's id. Notifications only fire for messages from
     /// *other* users, so this must be set once the async user load completes —
     /// otherwise (id = None) your own messages are treated as someone else's.
     pub fn set_current_user_id(&self, id: Option<String>) {
         *self.0.current_user_id.lock().unwrap() = id;
-    }
-
-    /// Set the currently active room (for marking messages as read).
-    /// Pass None to clear the active room.
-    pub fn set_active_room(&self, room_id: Option<String>) {
-        *self.0.active_room_id.lock().unwrap() = room_id.clone();
-        if let Some(room_id) = room_id {
-            self.mark_as_read(&room_id);
-        }
-    }
-
-    fn mark_as_read(&self, room_id: &str) {
-        let mut counts = self.0.unread_counts.peek().clone();
-        counts.remove(room_id);
-        self.0.unread_counts.set(counts);
     }
 }

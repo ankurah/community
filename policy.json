@@ -23,7 +23,7 @@
       "read": "view",
       "write": "post",
       "scope": [
-        { "filter": "user = $jwt.sub", "applies_to": "write", "unless_privilege": "moderate" }
+        { "filter": "user = $jwt.sub OR collaborative = true", "applies_to": "write", "unless_privilege": "moderate" }
       ]
     },
     "userroles": {
@@ -32,6 +32,24 @@
     },
     "ban": {
       "read": "moderate",
+      "write": "moderate"
+    },
+    "reaction": {
+      "read": "view",
+      "write": "post",
+      "scope": [
+        { "filter": "user = $jwt.sub", "applies_to": "write" }
+      ]
+    },
+    "readstate": {
+      "read": "view",
+      "write": "post",
+      "scope": [
+        { "filter": "user = $jwt.sub" }
+      ]
+    },
+    "modaction": {
+      "read": "view",
       "write": "moderate"
     }
   }

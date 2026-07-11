@@ -162,7 +162,8 @@
 
 /* Icon buttons (members, QR code) */
 .qrButton,
-.membersButton {
+.membersButton,
+.modLogButton {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -180,19 +181,22 @@
 }
 
 .qrButton svg,
-.membersButton svg {
+.membersButton svg,
+.modLogButton svg {
   width: 18px;
   height: 18px;
 }
 
 .qrButton:hover,
-.membersButton:hover {
+.membersButton:hover,
+.modLogButton:hover {
   background: var(--chrome-hover);
   color: var(--chrome-text);
 }
 
 .qrButton:active,
-.membersButton:active {
+.membersButton:active,
+.modLogButton:active {
   background: var(--chrome-active);
 }
 

@@ -1,10 +1,14 @@
+use std::collections::{HashMap, HashSet};
+
 use leptos::prelude::*;
 
 use ankurah::LiveQuery;
-use community_model::{MessageView, UserView};
+use ankurah_signals::Get as AnkurahGet;
+use community_model::{MessageView, ReactionView, UserView};
 
 use crate::fmt;
 use crate::message_row::MessageRow;
+use crate::reactions::{picker_index, ReactionChip};
 
 /// Consecutive messages by the same author are visually grouped. A group breaks
 /// when the author changes, the local calendar day changes, or the gap between
@@ -72,6 +76,45 @@ pub fn MessageList(
 ) -> impl IntoView {
     let rows = Signal::derive(move || group_rows(&messages.get()));
 
+    // Reactions (#14): one standing LiveQuery over active reactions, grouped
+    // into render-ready chips per message id. Reaction has no room ref, so a
+    // room-scoped predicate is inexpressible; per-row queries would churn
+    // subscriptions with every virtual-scroll mount/unmount. See reactions.rs.
+    let reactions = crate::ctx().query::<ReactionView>("active = true").expect("failed to create ReactionView LiveQuery");
+    let viewer_id = current_user_id.clone();
+    let reaction_chips = Memo::new(move |_| {
+        // Distinct users per (message, emoji): duplicate rows (possible under
+        // concurrent first-toggles) count once.
+        let mut sets: HashMap<String, HashMap<String, HashSet<String>>> = HashMap::new();
+        for row in reactions.get().iter() {
+            if !row.active().unwrap_or(false) {
+                continue;
+            }
+            let (Ok(message), Ok(user), Ok(emoji)) = (row.message(), row.user(), row.emoji()) else {
+                continue;
+            };
+            sets.entry(message.id().to_base64())
+                .or_default()
+                .entry(emoji)
+                .or_default()
+                .insert(user.id().to_base64());
+        }
+        sets.into_iter()
+            .map(|(message_id, by_emoji)| {
+                let mut chips: Vec<ReactionChip> = by_emoji
+                    .into_iter()
+                    .map(|(emoji, users)| ReactionChip {
+                        mine: viewer_id.as_deref().map(|id| users.contains(id)).unwrap_or(false),
+                        count: users.len(),
+                        emoji,
+                    })
+                    .collect();
+                chips.sort_by(|a, b| (picker_index(&a.emoji), &a.emoji).cmp(&(picker_index(&b.emoji), &b.emoji)));
+                (message_id, chips)
+            })
+            .collect::<HashMap<String, Vec<ReactionChip>>>()
+    });
+
     view! {
         <Show
             when=move || !messages.get().is_empty()
@@ -118,6 +161,7 @@ pub fn MessageList(
                                 first_in_group=row.first_in_group
                                 last_in_group=row.last_in_group
                                 day_label=row.day_label
+                                reaction_chips=reaction_chips
                             />
                         }
                     }

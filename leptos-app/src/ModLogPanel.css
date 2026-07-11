@@ -1,0 +1,67 @@
+/* Public moderation log panel (issue #10). Reuses the members-panel shell
+   (.membersOverlay/.membersContent/.membersHeader/...) so the two modals stay
+   visually identical; only the row anatomy is specific to the log. */
+
+.modLogContent {
+  max-width: 460px;
+}
+
+.modLogList {
+  gap: var(--sp-1);
+}
+
+.modLogRow {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-3);
+  padding: 8px var(--sp-2);
+  border-radius: var(--r-md);
+}
+
+.modLogRow:hover {
+  background: var(--surface-2);
+}
+
+.modLogBody {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.modLogLine {
+  font-size: var(--fs-md);
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.modLogActor {
+  font-weight: 650;
+}
+
+.modLogVerb {
+  color: var(--text-2);
+}
+
+/* Short message id — monospace chip, full id in the hover title. */
+.modLogMsgRef {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--text-3);
+  background: var(--surface-3);
+  border-radius: var(--r-sm);
+  padding: 1px 5px;
+  white-space: nowrap;
+}
+
+.modLogReason {
+  font-size: var(--fs-md);
+  font-style: italic;
+  color: var(--text-2);
+  overflow-wrap: anywhere;
+}
+
+.modLogWhen {
+  font-size: var(--fs-xs);
+  color: var(--text-faint);
+}

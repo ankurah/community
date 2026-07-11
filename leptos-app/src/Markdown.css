@@ -1,0 +1,119 @@
+/* Markdown subset inside message bubbles (#9). Rendered as typed nodes by
+   src/markdown.rs; these classes are the whole styling surface. */
+
+/* Block rhythm: paragraphs/code/quotes stack with a small gap. The fast path
+   (plain text) has no element children, so none of this applies to it. */
+.messageText p.mdP {
+  margin: 0;
+}
+
+.messageText > * + * {
+  margin-top: 5px;
+}
+
+.mdQuote > * + * {
+  margin-top: 5px;
+}
+
+.mdHeading {
+  font-weight: 750;
+}
+
+/* Inline code ------------------------------------------------------------- */
+
+.mdCode {
+  padding: 1px 5px;
+  font-family: var(--font-mono);
+  font-size: 0.88em;
+  background: var(--surface-3);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  overflow-wrap: anywhere;
+}
+
+.messageBubble.ownMessage .mdCode {
+  background: rgb(255 255 255 / 14%);
+  border-color: rgb(255 255 255 / 18%);
+}
+
+/* Code blocks --------------------------------------------------------------
+   Long lines scroll horizontally INSIDE the block — the bubble never widens. */
+
+.mdCodeBlock {
+  position: relative;
+  margin: 0;
+  padding: 8px 10px;
+  max-width: 100%;
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  line-height: 1.5;
+  background: var(--surface-3);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  white-space: pre;
+  overflow-x: auto;
+}
+
+.mdCodeBlock > code {
+  font-family: inherit;
+  font-size: inherit;
+}
+
+/* Language tag (captured for later tooling) doubles as a subtle label. */
+.mdCodeBlock[data-lang]::after {
+  content: attr(data-lang);
+  position: absolute;
+  top: 4px;
+  right: 8px;
+  font-family: var(--font-sans);
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  pointer-events: none;
+  user-select: none;
+}
+
+.messageBubble.ownMessage .mdCodeBlock {
+  background: rgb(0 0 0 / 22%);
+  border-color: rgb(255 255 255 / 14%);
+}
+
+.messageBubble.ownMessage .mdCodeBlock[data-lang]::after {
+  color: rgb(255 255 255 / 55%);
+}
+
+/* Quotes / lists / links ---------------------------------------------------- */
+
+.mdQuote {
+  padding-left: 9px;
+  border-left: 3px solid var(--border-strong);
+  color: var(--text-2);
+}
+
+.messageBubble.ownMessage .mdQuote {
+  border-left-color: rgb(255 255 255 / 35%);
+  color: rgb(242 250 246 / 82%);
+}
+
+.mdLi + .mdLi {
+  margin-top: 2px;
+}
+
+.mdLink {
+  color: var(--link);
+  font-weight: 550;
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, currentcolor 45%, transparent);
+  text-underline-offset: 2px;
+  overflow-wrap: anywhere;
+}
+
+.mdLink:hover {
+  text-decoration-color: currentcolor;
+}
+
+.messageBubble.ownMessage .mdLink {
+  color: var(--accent);
+}
