@@ -2,16 +2,18 @@ use leptos::prelude::*;
 use web_sys::window;
 
 use ankurah_signals::Get as AnkurahGet;
-use community_model::UserView;
+use community_model::{RoomView, UserView};
 
 use crate::{
-    ctx, editable_text_field::EditableTextField, fmt, members_panel::MembersPanel, qr_code_modal::QRCodeModal, ws_client,
+    ctx, editable_text_field::EditableTextField, fmt, members_panel::MembersPanel, qr_code_modal::QRCodeModal,
+    room_topic::RoomTopic, ws_client,
 };
 
-/// Header component displaying app title, user info, connection status, and
-/// the members / QR code / sign-out buttons.
+/// Header component displaying app title, the current room's topic, user
+/// info, connection status, and the members / mod log / QR code / sign-out
+/// buttons.
 #[component]
-pub fn Header(current_user: RwSignal<Option<UserView>>) -> impl IntoView {
+pub fn Header(current_user: RwSignal<Option<UserView>>, selected_room: RwSignal<Option<RoomView>>) -> impl IntoView {
     let show_qr_code = RwSignal::new(false);
     let show_members = RwSignal::new(false);
 
@@ -44,6 +46,7 @@ pub fn Header(current_user: RwSignal<Option<UserView>>) -> impl IntoView {
                     </div>
                     <h1 class="title">"Ankurah Community"</h1>
                 </div>
+                <RoomTopic room=selected_room />
                 <div class="headerRight">
                     <div class=move || {
                         let status = connection_status();

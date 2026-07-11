@@ -30,6 +30,7 @@ mod qr_code_modal;
 mod queries;
 mod read_state;
 mod room_list;
+mod room_topic;
 
 use chat::Chat;
 use debug_overlay::DebugOverlay;
@@ -326,7 +327,7 @@ pub fn ChatApp() -> impl IntoView {
         <DebugOverlay />
 
         <div class="container">
-            <Header current_user />
+            <Header current_user selected_room />
 
             <div class="mainContent">
                 <RoomList rooms selected_room read_state=read_state.clone() />

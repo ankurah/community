@@ -1,0 +1,98 @@
+/* Current room name + topic in the header (issue #12). Lives on the evergreen
+   chrome, so it uses the chrome-* tokens and stays readable in both themes. */
+
+.headerRoom {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0; /* allow the topic to truncate instead of pushing the header */
+  flex: 1;
+  margin: 0 var(--sp-4);
+}
+
+.headerRoomName {
+  flex-shrink: 0;
+  font-size: var(--fs-md);
+  font-weight: 650;
+  color: var(--chrome-text);
+  white-space: nowrap;
+}
+
+/* Display mode — a quiet inline button so it is keyboard-focusable when
+   editable; non-editable rooms get the same look minus pencil and cursor. */
+.headerTopic {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 3px 8px;
+  border-radius: var(--r-sm);
+  cursor: default;
+  color: var(--chrome-text-dim);
+}
+
+.headerTopic.editable {
+  cursor: pointer;
+}
+
+.headerTopic.editable:hover {
+  background: var(--chrome-hover);
+  color: var(--chrome-text);
+}
+
+.headerTopicText {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--fs-md);
+}
+
+.headerTopicText.placeholder {
+  font-style: italic;
+  opacity: 0.75;
+}
+
+/* Pencil appears on hover only — the topic reads as plain text otherwise. */
+.headerTopicPencil {
+  flex-shrink: 0;
+  width: 13px;
+  height: 13px;
+  opacity: 0;
+  transition: opacity var(--t-fast) var(--ease);
+}
+
+.headerTopic.editable:hover .headerTopicPencil,
+.headerTopic.editable:focus-visible .headerTopicPencil {
+  opacity: 1;
+}
+
+.headerTopicInput {
+  flex: 1;
+  min-width: 120px;
+  max-width: 420px;
+  padding: 4px 8px;
+  font: inherit;
+  font-size: var(--fs-md);
+  color: var(--chrome-text);
+  background: var(--chrome-hover);
+  border: 1px solid var(--chrome-border);
+  border-radius: var(--r-sm);
+  outline: none;
+}
+
+.headerTopicInput:focus {
+  border-color: var(--focus);
+}
+
+.headerTopicInput::placeholder {
+  color: var(--chrome-text-dim);
+}
+
+/* Tight screens: keep the room name, let the topic go first. */
+@media (max-width: 640px) {
+  .headerTopic,
+  .headerTopicInput {
+    display: none;
+  }
+}
