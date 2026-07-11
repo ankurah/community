@@ -82,10 +82,7 @@ fn non_author_denied_on_absent_collaborative_via_error_path() {
     // Left disjunct false → right disjunct touches the absent property and
     // errors. enforce_write_scope turns any evaluator error into
     // AccessDenied, so the outcome is a (correct) denial.
-    assert_eq!(
-        evaluate_predicate(&msg, &message_write_predicate(me)),
-        Err(FilterError::PropertyNotFound("collaborative".to_string()))
-    );
+    assert_eq!(evaluate_predicate(&msg, &message_write_predicate(me)), Err(FilterError::PropertyNotFound("collaborative".to_string())));
 }
 
 #[test]
@@ -141,6 +138,90 @@ fn reaction_scope_gates_writes_only_with_no_moderator_bypass() {
     assert!(rule.applies_to.applies_to_writes() && !rule.applies_to.applies_to_reads());
 }
 
+/// Build the ban read-scope predicate the way the agent does (same `?`
+/// placeholder discipline as [`message_write_predicate`]).
+fn ban_read_predicate(caller: EntityId) -> ankurah::ankql::ast::Predicate {
+    let config = policy();
+    let rule = &config.collections["ban"].scope[0];
+    let query = rule.filter.replace("$jwt.sub", "?");
+    parse_selection(&query).expect("ban scope filter parses").predicate.populate([Expr::from(&caller)]).expect("one placeholder, one value")
+}
+
+/// A ban row as the scope evaluator sees it. `user` is a required field set at
+/// creation, so unlike `collaborative` there is no absent-property error path
+/// to model here.
+struct FakeBan {
+    user: EntityId,
+}
+
+impl Filterable for FakeBan {
+    fn collection(&self) -> &str {
+        "ban"
+    }
+    fn value(&self, name: &str) -> Option<Value> {
+        match name {
+            "user" => Some(Value::EntityId(self.user)),
+            _ => None,
+        }
+    }
+}
+
+/// The ban signal is self-readable: a banned user's own rows pass the read
+/// scope, so the client's self-lock LiveQuery (`user = ? AND active = true`)
+/// actually receives the ban that locks it out.
+#[test]
+fn banned_user_sees_their_own_ban_rows() {
+    let me = EntityId::new();
+    let ban = FakeBan { user: me };
+    assert_eq!(evaluate_predicate(&ban, &ban_read_predicate(me)), Ok(true));
+}
+
+/// Non-moderators must not learn who else is banned: any row whose `user` is
+/// someone else fails the read scope.
+#[test]
+fn non_moderator_cannot_see_others_ban_rows() {
+    let me = EntityId::new();
+    let them = EntityId::new();
+    let ban = FakeBan { user: them };
+    assert_eq!(evaluate_predicate(&ban, &ban_read_predicate(me)), Ok(false));
+}
+
+/// Moderators see every ban row: the read scope carries
+/// `unless_privilege: "moderate"`, and both privileged roles hold that
+/// privilege (the agent skips the filter entirely for them).
+#[test]
+fn moderators_bypass_the_ban_read_scope() {
+    let config = policy();
+    let rule = &config.collections["ban"].scope[0];
+    assert_eq!(rule.unless_privilege.as_deref(), Some("moderate"), "moderators must see all ban rows");
+    assert!(
+        config.roles_have_privilege(&["moderator".to_string()], "moderate")
+            && config.roles_have_privilege(&["admin".to_string()], "moderate"),
+        "both privileged roles hold `moderate`, so both bypass the ban read scope"
+    );
+    // The scope gates reads only: writes are already collection-gated to
+    // `moderate` below, and a read-write scope would be misleading about
+    // where write enforcement actually lives.
+    assert!(rule.applies_to.applies_to_reads() && !rule.applies_to.applies_to_writes(), "ban scope filters visibility only");
+    assert_eq!(rule.filter, "user = $jwt.sub");
+}
+
+/// Members can read (their own) ban rows but never write any: `ban.read` is
+/// the baseline `view` privilege, `ban.write` stays `moderate`, and the
+/// member role does not hold `moderate`.
+#[test]
+fn members_read_bans_but_cannot_write_them() {
+    let config = policy();
+    let rules = &config.collections["ban"];
+    assert_eq!(rules.read.as_deref(), Some("view"), "every member passes the collection read gate; the scope does the row filtering");
+    assert_eq!(rules.write.as_deref(), Some("moderate"), "only moderators issue or lift bans");
+    assert!(
+        !config.roles_have_privilege(&["member".to_string()], "moderate"),
+        "the member role must not hold `moderate`, or the ban write gate is meaningless"
+    );
+    assert_eq!(rules.scope.len(), 1, "exactly the self-visibility rule — a second scope rule would AND in and narrow it");
+}
+
 #[test]
 fn modaction_is_world_readable_and_moderator_writable() {
     let config = policy();
@@ -156,13 +237,12 @@ fn modaction_is_world_readable_and_moderator_writable() {
 #[test]
 fn model_collection_names_match_policy_keys() {
     let config = policy();
-    for collection in
-        [community_model::Reaction::collection(), community_model::ReadState::collection(), community_model::ModAction::collection()]
-    {
-        assert!(
-            config.collections.contains_key(collection.as_str()),
-            "policy.json has no entry for collection '{}'",
-            collection.as_str()
-        );
+    for collection in [
+        community_model::Reaction::collection(),
+        community_model::ReadState::collection(),
+        community_model::ModAction::collection(),
+        community_model::Ban::collection(),
+    ] {
+        assert!(config.collections.contains_key(collection.as_str()), "policy.json has no entry for collection '{}'", collection.as_str());
     }
 }

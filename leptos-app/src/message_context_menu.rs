@@ -220,7 +220,8 @@ pub fn MessageContextMenu(
                 if !is_own {
                     trx.create(&ModAction {
                         actor: crate::current_user_id().into(),
-                        message: ankurah::Ref::from(&message),
+                        message: Some(ankurah::Ref::from(&message)),
+                        user: None,
                         action: "delete".to_string(),
                         reason,
                         created_at: js_sys::Date::now() as i64,
