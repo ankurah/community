@@ -130,8 +130,12 @@ impl NotificationManager {
         }
 
         // Create lightweight query for latest messages in this room
-        let predicate = format!("room = '{}' AND deleted = false ORDER BY timestamp DESC LIMIT 10", room_id);
-        let query = match ctx().query::<MessageView>(predicate.as_str()) {
+        let selection = crate::queries::selection(
+            "room = ? AND deleted = false ORDER BY timestamp DESC LIMIT 10",
+            [(&room.id()).into()],
+        )
+        .expect("static notification selection parses");
+        let query = match ctx().query::<MessageView>(selection) {
             Ok(q) => q,
             Err(e) => {
                 tracing::error!("Failed to create message query for room {}: {:?}", room_id, e);

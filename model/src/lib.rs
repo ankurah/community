@@ -18,6 +18,12 @@ pub struct Room {
     /// them moderator-managed only (see the room write scope in policy.json:
     /// `created_by = $jwt.sub` unless the caller holds `moderate`).
     pub created_by: Option<Ref<User>>,
+    /// Room topic, shown in the chat header. `Option` is required, not
+    /// stylistic: rooms created before this field existed have no `topic`
+    /// property at all, and only `Option<T>` maps an absent property to
+    /// `None` (`Property for Option<T>` catches `PropertyError::Missing`;
+    /// bare types surface it as an error).
+    pub topic: Option<String>,
 }
 
 /// Server-maintained display cache of a user's roles — one row per user.
@@ -64,4 +70,71 @@ pub struct Message {
     pub timestamp: i64,
     #[active_type(LWW)]
     pub deleted: bool,
+    /// When the author last edited the message (ms since epoch), `None` if
+    /// never edited. `Option<i64>` because messages predating this field have
+    /// no such property and only `Option<T>` reads an absent property as
+    /// `None` instead of `PropertyError::Missing`.
+    pub edited_at: Option<i64>,
+    /// Author opt-in allowing other members to edit this message's text (the
+    /// message write scope in policy.json is `user = $jwt.sub OR
+    /// collaborative = true`). `Option<bool>` rather than `bool`: legacy
+    /// messages have no such property, and a bare `bool` read would error
+    /// with `PropertyError::Missing` instead of defaulting. Absent/`None`
+    /// means not collaborative. Only the author can flip this (a non-author
+    /// write must satisfy the scope on the post-write state too, and with
+    /// `collaborative` no longer `true` it would not).
+    pub collaborative: Option<bool>,
+}
+
+/// A user's emoji reaction to a message. One row per (message, user, emoji);
+/// un-reacting flips `active` off rather than deleting the row (entity
+/// deletion does not exist in ankurah 0.9.0), and re-reacting flips it back.
+/// The reaction write scope in policy.json (`user = $jwt.sub`) has no
+/// `unless_privilege`: moderators do not edit other people's reactions.
+#[derive(Model, Debug, Serialize, Deserialize)]
+pub struct Reaction {
+    #[active_type(LWW)]
+    pub message: Ref<Message>,
+    #[active_type(LWW)]
+    pub user: Ref<User>,
+    /// The emoji itself (e.g. "👍"). LWW, not collaborative text: it is an
+    /// atom chosen from a picker, never edited character-wise.
+    #[active_type(LWW)]
+    pub emoji: String,
+    #[active_type(LWW)]
+    pub active: bool,
+}
+
+/// Per-user, per-room read cursor: the timestamp of the newest message the
+/// user has seen in that room. One row per (user, room), upserted as the user
+/// views rooms; unread badges are messages newer than `last_read_ts`. The
+/// readstate policy scopes both reads and writes to `user = $jwt.sub`, so
+/// these rows are private to their owner.
+#[derive(Model, Debug, Serialize, Deserialize)]
+pub struct ReadState {
+    #[active_type(LWW)]
+    pub user: Ref<User>,
+    #[active_type(LWW)]
+    pub room: Ref<Room>,
+    pub last_read_ts: i64,
+}
+
+/// Public moderation-log row, created whenever a moderator acts on a message
+/// (e.g. deleting it). World-readable by design — the community can see what
+/// moderation happened — but only writable with the `moderate` privilege.
+#[derive(Model, Debug, Serialize, Deserialize)]
+pub struct ModAction {
+    /// The moderator who acted.
+    #[active_type(LWW)]
+    pub actor: Ref<User>,
+    /// The message acted upon.
+    #[active_type(LWW)]
+    pub message: Ref<Message>,
+    /// What was done, as a stable lowercase verb (e.g. "delete", "restore").
+    /// LWW, not collaborative text: it is an enum-like atom.
+    #[active_type(LWW)]
+    pub action: String,
+    /// Optional human-readable justification, shown in the public log.
+    pub reason: Option<String>,
+    pub created_at: i64,
 }
