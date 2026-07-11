@@ -5,7 +5,9 @@
 //! is purely to avoid offering an edit that would be rejected.
 //!
 //! Deliberately its own minimal inline editor rather than reusing
-//! `EditableTextField` (that file belongs to the messages branch).
+//! `EditableTextField`: the topic wants empty-input→None mapping,
+//! moderator/creator gating, and commit-on-Enter — a narrower contract
+//! than the generic field offers.
 
 use leptos::prelude::*;
 use web_sys::KeyboardEvent;

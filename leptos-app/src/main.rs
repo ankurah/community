@@ -16,17 +16,16 @@ use web_sys::window;
 mod auth;
 mod chat;
 mod chat_debug_header;
-mod debug_overlay;
 mod editable_text_field;
 mod fmt;
 mod header;
 mod markdown;
 mod members_panel;
 mod message_context_menu;
-mod mod_log_panel;
 mod message_input;
 mod message_list;
 mod message_row;
+mod mod_log_panel;
 mod notification_manager;
 mod profile_popover;
 mod qr_code_modal;
@@ -37,7 +36,6 @@ mod room_list;
 mod room_topic;
 
 use chat::Chat;
-use debug_overlay::DebugOverlay;
 use header::Header;
 use notification_manager::NotificationManager;
 use read_state::ReadStateManager;
@@ -328,8 +326,6 @@ pub fn ChatApp() -> impl IntoView {
     let read_state = ReadStateManager::new(rooms.clone(), current_user_id());
 
     view! {
-        <DebugOverlay />
-
         <div class="container">
             <Header current_user selected_room />
 

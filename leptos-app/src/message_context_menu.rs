@@ -1,5 +1,6 @@
 use leptos::ev::MouseEvent as LeptosMouseEvent;
 use leptos::prelude::*;
+use send_wrapper::SendWrapper;
 use wasm_bindgen::JsCast;
 use web_sys::{KeyboardEvent, MouseEvent, window};
 
@@ -64,40 +65,41 @@ pub fn MessageContextMenu(
         }
     });
 
-    // Handle click outside and escape key
-    Effect::new({
+    // Outside-click + Escape dismiss. Registered once at mount and removed on
+    // unmount, so repeated menu opens never accumulate document listeners.
+    let click_closure = wasm_bindgen::closure::Closure::wrap(Box::new({
         let on_close = on_close.clone();
         let menu_ref = menu_ref.clone();
-        move |_| {
-            let on_close_click = on_close.clone();
-            let on_close_key = on_close.clone();
-            let menu_ref_click = menu_ref.clone();
-
-            let click_handler = wasm_bindgen::closure::Closure::wrap(Box::new(move |e: MouseEvent| {
-                if let Some(menu_el) = menu_ref_click.get() {
-                    if let Some(target) = e.target() {
-                        if let Ok(target_el) = target.dyn_into::<web_sys::Node>() {
-                            if !menu_el.contains(Some(&target_el)) {
-                                on_close_click();
-                            }
+        move |e: MouseEvent| {
+            if let Some(menu_el) = menu_ref.get_untracked() {
+                if let Some(target) = e.target() {
+                    if let Ok(target_el) = target.dyn_into::<web_sys::Node>() {
+                        if !menu_el.contains(Some(&target_el)) {
+                            on_close();
                         }
                     }
                 }
-            }) as Box<dyn FnMut(_)>);
-
-            let key_handler = wasm_bindgen::closure::Closure::wrap(Box::new(move |e: KeyboardEvent| {
-                if e.key() == "Escape" {
-                    on_close_key();
-                }
-            }) as Box<dyn FnMut(_)>);
-
-            if let Some(doc) = window().and_then(|w| w.document()) {
-                let _ = doc.add_event_listener_with_callback("mousedown", click_handler.as_ref().unchecked_ref());
-                let _ = doc.add_event_listener_with_callback("keydown", key_handler.as_ref().unchecked_ref());
             }
-
-            click_handler.forget();
-            key_handler.forget();
+        }
+    }) as Box<dyn FnMut(_)>);
+    let key_closure = wasm_bindgen::closure::Closure::wrap(Box::new({
+        let on_close = on_close.clone();
+        move |e: KeyboardEvent| {
+            if e.key() == "Escape" {
+                on_close();
+            }
+        }
+    }) as Box<dyn FnMut(_)>);
+    if let Some(doc) = window().and_then(|w| w.document()) {
+        let _ = doc.add_event_listener_with_callback("mousedown", click_closure.as_ref().unchecked_ref());
+        let _ = doc.add_event_listener_with_callback("keydown", key_closure.as_ref().unchecked_ref());
+    }
+    let dismiss_closures = SendWrapper::new((click_closure, key_closure));
+    on_cleanup(move || {
+        let (click_closure, key_closure) = dismiss_closures.take();
+        if let Some(doc) = window().and_then(|w| w.document()) {
+            let _ = doc.remove_event_listener_with_callback("mousedown", click_closure.as_ref().unchecked_ref());
+            let _ = doc.remove_event_listener_with_callback("keydown", key_closure.as_ref().unchecked_ref());
         }
     });
 
