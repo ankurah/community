@@ -1,6 +1,7 @@
+use std::collections::HashMap;
+
 use leptos::prelude::*;
 
-use ankurah::LiveQuery;
 use ankurah_signals::Get as AnkurahGet;
 use community_model::{UserRolesView, UserView};
 
@@ -18,6 +19,28 @@ pub fn MembersPanel(on_close: impl Fn() + Clone + 'static) -> impl IntoView {
     // Server-maintained role cache (read-only for clients): one row per user
     // holding the lowercase role keys minted into their latest session token.
     let user_roles = ctx().query::<UserRolesView>("true").expect("failed to create UserRolesView LiveQuery");
+
+    // Collapse the cache into a keyed map (user id → role keys), rebuilt once
+    // whenever it changes. Each row then does an O(1) lookup instead of scanning
+    // every userroles row on every render (previously O(users × userroles)).
+    let roles_by_user = Memo::new(move |_| {
+        user_roles
+            .get()
+            .iter()
+            .filter_map(|row| {
+                let id = row.user().ok()?.id().to_base64();
+                let roles = row
+                    .roles()
+                    .ok()
+                    .and_then(|json| {
+                        json.as_array()
+                            .map(|arr| arr.iter().filter_map(|v| v.as_str()).map(|s| s.to_string()).collect::<Vec<String>>())
+                    })
+                    .unwrap_or_default();
+                Some((id, roles))
+            })
+            .collect::<HashMap<String, Vec<String>>>()
+    });
 
     let users_for_count = users.clone();
     let users_for_loading = users.clone();
@@ -75,12 +98,8 @@ pub fn MembersPanel(on_close: impl Fn() + Clone + 'static) -> impl IntoView {
                             }
                         }
                         key=|user: &UserView| user.id()
-                        children={
-                            let user_roles = user_roles.clone();
-                            move |user: UserView| {
-                                let user_roles = user_roles.clone();
-                                view! { <MemberRow user user_roles /> }
-                            }
+                        children=move |user: UserView| {
+                            view! { <MemberRow user roles_by_user /> }
                         }
                     />
                 </div>
@@ -98,7 +117,7 @@ pub fn MembersPanel(on_close: impl Fn() + Clone + 'static) -> impl IntoView {
 /// neither does a user with no `userroles` row yet (they have never signed in
 /// since the cache was introduced).
 #[component]
-fn MemberRow(user: UserView, user_roles: LiveQuery<UserRolesView>) -> impl IntoView {
+fn MemberRow(user: UserView, roles_by_user: Memo<HashMap<String, Vec<String>>>) -> impl IntoView {
     let user_id = user.id().to_base64();
     let hue = fmt::hue_class(&user_id);
 
@@ -110,23 +129,16 @@ fn MemberRow(user: UserView, user_roles: LiveQuery<UserRolesView>) -> impl IntoV
     };
     let name_for_initials = name.clone();
 
-    // Badge-worthy roles for this user (reactive: rows appear/change as the
-    // server refreshes the cache on sign-in). "member" is the baseline and
-    // gets no badge; anything else renders capitalized.
+    // Badge-worthy roles for this user, via an O(1) lookup into the shared map
+    // (reactive: rows appear/change as the server refreshes the cache on
+    // sign-in). "member" is the baseline and gets no badge; anything else
+    // renders capitalized.
     let badge_roles = move || {
-        user_roles
-            .get()
-            .iter()
-            .find(|row| row.user().ok().map(|r| r.id().to_base64()).as_deref() == Some(user_id.as_str()))
-            .and_then(|row| row.roles().ok())
-            .and_then(|json| {
-                json.as_array()
-                    .map(|arr| arr.iter().filter_map(|v| v.as_str()).map(|s| s.to_string()).collect::<Vec<String>>())
-            })
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|role| role != "member")
-            .collect::<Vec<String>>()
+        roles_by_user.with(|map| {
+            map.get(&user_id)
+                .map(|roles| roles.iter().filter(|role| role.as_str() != "member").cloned().collect::<Vec<String>>())
+                .unwrap_or_default()
+        })
     };
 
     view! {

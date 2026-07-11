@@ -49,7 +49,7 @@ async fn make_storage() -> Result<Storage> {
     // Cloud Run (prod: Cloud SQL socket). The fallback is only for direct runs.
     let uri = std::env::var("DATABASE_URL")
         .unwrap_or_else(|_| "postgres://postgres:ankurah@localhost:5432/community".to_string());
-    Ok(Postgres::open(&uri).await?)
+    Postgres::open(&uri).await
 }
 
 /// Ankurah access-token lifetime. Long-ish because there is no refresh flow yet:
