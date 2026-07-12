@@ -38,6 +38,7 @@ mod reactions;
 mod read_state;
 mod room_list;
 mod room_topic;
+mod user_detail_panel;
 mod xray;
 
 use chat::Chat;

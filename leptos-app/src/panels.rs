@@ -14,6 +14,7 @@
 //! style as `ctx()` / `xray::state()` — so deep components (member rows,
 //! mention chips) can open surfaces without prop-drilling.
 
+use ankurah::proto::EntityId;
 use leptos::prelude::*;
 use std::sync::OnceLock;
 
@@ -24,6 +25,9 @@ pub enum Surface {
     ModLog,
     Inbox,
     Qr,
+    /// Member detail sidebar (#57), reachable from members rows, the profile
+    /// popover, and mention chips — anywhere a user is on screen.
+    UserDetail(EntityId),
 }
 
 /// Owner of the single open-surface slot.

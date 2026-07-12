@@ -73,6 +73,16 @@ pub fn initials(name: &str) -> String {
     }
 }
 
+/// "moderator" → "Moderator" for role-badge labels (role keys are lowercase
+/// ASCII). Shared by the members panel, profile popover, and user detail.
+pub fn capitalize(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
 /// Deterministic avatar hue class (`hue-0`..`hue-7`) from a stable id string.
 pub fn hue_class(id: &str) -> &'static str {
     let sum: u32 = id.bytes().map(u32::from).sum();

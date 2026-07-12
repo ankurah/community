@@ -135,6 +135,16 @@
   background: rgb(255 255 255 / 13%);
 }
 
+/* Resolved mentions are buttons — they open the member detail sidebar (#57).
+   (Unknown mentions stay inert spans, so no hover state applies to them.) */
+button.mdMention:hover {
+  background: color-mix(in srgb, var(--link) 22%, transparent);
+}
+
+.messageBubble.ownMessage button.mdMention:hover {
+  background: rgb(255 255 255 / 22%);
+}
+
 .mdMentionUnknown {
   font-weight: 550;
   font-style: italic;

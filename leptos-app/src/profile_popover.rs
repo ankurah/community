@@ -15,7 +15,10 @@ use web_sys::{window, KeyboardEvent, MouseEvent};
 use ankurah_signals::Get as AnkurahGet;
 use community_model::{UserRolesView, UserView};
 
-use crate::{ctx, fmt};
+use crate::{
+    ctx, fmt,
+    panels::{panels, Surface},
+};
 
 #[component]
 pub fn ProfilePopover(
@@ -147,7 +150,23 @@ pub fn ProfilePopover(
                     {move || fmt::initials(&name_for_initials())}
                 </div>
                 <div class="profileIdentity">
-                    <div class="profileName">{name}</div>
+                    // The name is the doorway to the full member detail (#57):
+                    // clicking it swaps this popover for the sidebar.
+                    <button
+                        type="button"
+                        class="profileName"
+                        title="View member"
+                        on:click={
+                            let on_close = on_close.clone();
+                            let detail_target = user.id();
+                            move |_| {
+                                panels().open(Surface::UserDetail(detail_target.clone()));
+                                on_close();
+                            }
+                        }
+                    >
+                        {name}
+                    </button>
                     <div class="profileFirstSeen">{first_seen}</div>
                 </div>
             </div>
@@ -164,7 +183,7 @@ pub fn ProfilePopover(
                                             <span class=format!(
                                                 "profileBadge role-{}",
                                                 role,
-                                            )>{capitalize(&role)}</span>
+                                            )>{fmt::capitalize(&role)}</span>
                                         }
                                     })
                                     .collect_view()}
@@ -173,14 +192,5 @@ pub fn ProfilePopover(
                     })
             }}
         </div>
-    }
-}
-
-/// "moderator" → "Moderator" for badge labels (role keys are lowercase ASCII).
-fn capitalize(s: &str) -> String {
-    let mut chars = s.chars();
-    match chars.next() {
-        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
-        None => String::new(),
     }
 }

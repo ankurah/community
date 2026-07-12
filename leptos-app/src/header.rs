@@ -8,7 +8,7 @@ use crate::{
     ctx, editable_text_field::EditableTextField, fmt, members_panel::MembersPanel, mod_log_panel::ModLogPanel,
     notification_inbox::{NotificationBadge, NotificationInbox},
     panels::{panels, Surface},
-    qr_code_modal::QRCodeModal, room_topic::RoomTopic, ws_client,
+    qr_code_modal::QRCodeModal, room_topic::RoomTopic, user_detail_panel::UserDetailPanel, ws_client,
 };
 
 /// Header component displaying app title, the current room's topic, user
@@ -224,6 +224,9 @@ pub fn Header(current_user: RwSignal<Option<UserView>>, selected_room: RwSignal<
                 Some(Surface::ModLog) => view! { <ModLogPanel on_close=move || panels().close() /> }.into_any(),
                 Some(Surface::Inbox) => {
                     view! { <NotificationInbox selected_room on_close=move || panels().close() /> }.into_any()
+                }
+                Some(Surface::UserDetail(user_id)) => {
+                    view! { <UserDetailPanel user_id on_close=move || panels().close() /> }.into_any()
                 }
                 None => ().into_any(),
             }}
