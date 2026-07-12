@@ -353,6 +353,9 @@ fn MemberActionMenu(menu: MemberMenuState, rows: Vec<BanView>, on_close: impl Fn
         let on_close = on_close.clone();
         move |e: KeyboardEvent| {
             if e.key() == "Escape" {
+                // Consumed: Escape closes the innermost layer only — this
+                // menu, not the members panel under it (see panels.rs).
+                e.prevent_default();
                 on_close();
             }
         }

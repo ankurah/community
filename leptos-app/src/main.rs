@@ -30,6 +30,7 @@ mod message_row;
 mod mod_log_panel;
 mod notification_inbox;
 mod notification_manager;
+mod panels;
 mod profile_popover;
 mod qr_code_modal;
 mod queries;

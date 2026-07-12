@@ -6,18 +6,30 @@ use community_model::{RoomView, UserView};
 
 use crate::{
     ctx, editable_text_field::EditableTextField, fmt, members_panel::MembersPanel, mod_log_panel::ModLogPanel,
-    notification_inbox::{NotificationBadge, NotificationInbox}, qr_code_modal::QRCodeModal, room_topic::RoomTopic, ws_client,
+    notification_inbox::{NotificationBadge, NotificationInbox},
+    panels::{panels, Surface},
+    qr_code_modal::QRCodeModal, room_topic::RoomTopic, ws_client,
 };
 
 /// Header component displaying app title, the current room's topic, user
 /// info, connection status, and the members / mod log / notifications / QR
-/// code / sign-out buttons.
+/// code / sign-out buttons. Also hosts the exclusive surfaces those buttons
+/// open — one at a time, via the panel manager (#58) — and the app-wide
+/// Escape that closes the open one.
 #[component]
 pub fn Header(current_user: RwSignal<Option<UserView>>, selected_room: RwSignal<Option<RoomView>>) -> impl IntoView {
-    let show_qr_code = RwSignal::new(false);
-    let show_members = RwSignal::new(false);
-    let show_mod_log = RwSignal::new(false);
-    let show_notifications = RwSignal::new(false);
+    // Escape closes the open surface — one window-level listener for every
+    // surface, instead of a per-panel handler. Layering: nested dismissables
+    // (context menus, popovers, the composer's edit/mention states) consume
+    // their Escape with preventDefault, and element/document listeners run
+    // before this window-level one — so an unconsumed Escape is ours. The
+    // isComposing guard keeps an IME cancel from also closing a panel.
+    let esc_handle = window_event_listener(leptos::ev::keydown, move |ev| {
+        if ev.key() == "Escape" && !ev.default_prevented() && !ev.is_composing() && panels().current_untracked().is_some() {
+            panels().close();
+        }
+    });
+    on_cleanup(move || esc_handle.remove());
 
     // Live connection state from the WebSocket client. Reading the reactive
     // `Read<ConnectionState>` under the ReactiveGraphObserver re-renders on change.
@@ -100,8 +112,9 @@ pub fn Header(current_user: RwSignal<Option<UserView>>, selected_room: RwSignal<
                     </div>
                     <button
                         class="membersButton"
-                        on:click=move |_| show_members.set(true)
+                        on:click=move |_| panels().toggle(Surface::Members)
                         title="Members"
+                        aria-pressed=move || panels().is_open(&Surface::Members).to_string()
                     >
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
                             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -113,8 +126,9 @@ pub fn Header(current_user: RwSignal<Option<UserView>>, selected_room: RwSignal<
                     </button>
                     <button
                         class="modLogButton"
-                        on:click=move |_| show_mod_log.set(true)
+                        on:click=move |_| panels().toggle(Surface::ModLog)
                         title="Moderation log"
+                        aria-pressed=move || panels().is_open(&Surface::ModLog).to_string()
                     >
                         // Gavel — the public record of moderator actions.
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
@@ -128,8 +142,9 @@ pub fn Header(current_user: RwSignal<Option<UserView>>, selected_room: RwSignal<
                     </button>
                     <button
                         class="notificationButton"
-                        on:click=move |_| show_notifications.set(true)
+                        on:click=move |_| panels().toggle(Surface::Inbox)
                         title="Notifications"
+                        aria-pressed=move || panels().is_open(&Surface::Inbox).to_string()
                         // Without this, a nonzero badge becomes the button's
                         // accessible name ("3, button") — the SVG is
                         // aria-hidden and name-from-content falls to the badge.
@@ -160,8 +175,9 @@ pub fn Header(current_user: RwSignal<Option<UserView>>, selected_room: RwSignal<
                     </button>
                     <button
                         class="qrButton"
-                        on:click=move |_| show_qr_code.set(true)
+                        on:click=move |_| panels().toggle(Surface::Qr)
                         title="Show QR Code"
+                        aria-pressed=move || panels().is_open(&Surface::Qr).to_string()
                     >
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
                             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -197,18 +213,20 @@ pub fn Header(current_user: RwSignal<Option<UserView>>, selected_room: RwSignal<
                     </button>
                 </div>
             </div>
-            <Show when=move || show_qr_code.get()>
-                <QRCodeModal url=current_url.clone() on_close=move || show_qr_code.set(false) />
-            </Show>
-            <Show when=move || show_members.get()>
-                <MembersPanel on_close=move || show_members.set(false) />
-            </Show>
-            <Show when=move || show_mod_log.get()>
-                <ModLogPanel on_close=move || show_mod_log.set(false) />
-            </Show>
-            <Show when=move || show_notifications.get()>
-                <NotificationInbox selected_room on_close=move || show_notifications.set(false) />
-            </Show>
+            // The one open surface (#58). Components mount fresh per open —
+            // exactly what the per-signal `<Show>` blocks did — and their ×
+            // buttons / overlay clicks close through the same manager.
+            {move || match panels().current() {
+                Some(Surface::Qr) => {
+                    view! { <QRCodeModal url=current_url.clone() on_close=move || panels().close() /> }.into_any()
+                }
+                Some(Surface::Members) => view! { <MembersPanel on_close=move || panels().close() /> }.into_any(),
+                Some(Surface::ModLog) => view! { <ModLogPanel on_close=move || panels().close() /> }.into_any(),
+                Some(Surface::Inbox) => {
+                    view! { <NotificationInbox selected_room on_close=move || panels().close() /> }.into_any()
+                }
+                None => ().into_any(),
+            }}
         </>
     }
 }

@@ -77,6 +77,9 @@ pub fn ProfilePopover(
         let on_close = on_close.clone();
         move |e: KeyboardEvent| {
             if e.key() == "Escape" {
+                // Consumed: the header's window-level Escape (panel manager)
+                // skips defaultPrevented events, so only this popover closes.
+                e.prevent_default();
                 on_close();
             }
         }

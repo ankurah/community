@@ -193,7 +193,12 @@ fn NewRoomInput(selected_room: RwSignal<Option<RoomView>>, on_cancel: impl Fn() 
                     });
                 }
             }
-            "Escape" => on_cancel(),
+            "Escape" => {
+                // Consumed: cancels the room-name input without also closing
+                // an open header surface (see panels.rs).
+                ev.prevent_default();
+                on_cancel();
+            }
             _ => {}
         }
     };
