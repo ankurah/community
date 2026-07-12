@@ -33,8 +33,7 @@ pub fn NotificationBadge() -> impl IntoView {
     // belt-and-braces.
     let unseen = ctx()
         .query::<NotificationView>(
-            queries::selection("recipient = ? AND seen = false", [(&me).into()])
-                .expect("static unseen-notifications selection parses"),
+            queries::selection("recipient = ? AND seen = false", [(&me).into()]).expect("static unseen-notifications selection parses"),
         )
         .expect("failed to create NotificationView LiveQuery");
 
@@ -70,16 +69,13 @@ pub fn NotificationInbox(
     // multiply and histories grow.
     let notifications = ctx()
         .query::<NotificationView>(
-            queries::selection("recipient = ? ORDER BY created_at DESC", [(&me).into()])
-                .expect("static notifications selection parses"),
+            queries::selection("recipient = ? ORDER BY created_at DESC", [(&me).into()]).expect("static notifications selection parses"),
         )
         .expect("failed to create NotificationView LiveQuery");
 
     // The user's single preferences row (created on first change).
     let prefs = ctx()
-        .query::<NotificationPrefView>(
-            queries::selection("user = ?", [(&me).into()]).expect("static notificationpref selection parses"),
-        )
+        .query::<NotificationPrefView>(queries::selection("user = ?", [(&me).into()]).expect("static notificationpref selection parses"))
         .expect("failed to create NotificationPrefView LiveQuery");
 
     // Actor names via the users-map idiom (members panel / mod log), and room
@@ -100,21 +96,11 @@ pub fn NotificationInbox(
     });
 
     let names_by_user = Memo::new(move |_| {
-        users
-            .get()
-            .iter()
-            .map(|u| (u.id().to_base64(), u.display_name().unwrap_or_default()))
-            .collect::<HashMap<String, String>>()
+        users.get().iter().map(|u| (u.id().to_base64(), u.display_name().unwrap_or_default())).collect::<HashMap<String, String>>()
     });
     let room_names = Memo::new({
         let rooms = rooms.clone();
-        move |_| {
-            rooms
-                .get()
-                .iter()
-                .map(|r| (r.id().to_base64(), r.name().unwrap_or_default()))
-                .collect::<HashMap<String, String>>()
-        }
+        move |_| rooms.get().iter().map(|r| (r.id().to_base64(), r.name().unwrap_or_default())).collect::<HashMap<String, String>>()
     });
 
     // Inbox list vs preferences view, swapped by the sliders button.
@@ -320,10 +306,8 @@ fn NotificationRow(
     // "in #room-name", resolved live from the rooms map; omitted entirely if
     // the notification carries no room.
     let room_fragment = notification.room().ok().flatten().map(|r| r.id().to_base64()).map(|id| {
-        let name = move || {
-            room_names
-                .with(|map| map.get(&id).filter(|n| !n.trim().is_empty()).cloned().unwrap_or_else(|| "a room".to_string()))
-        };
+        let name =
+            move || room_names.with(|map| map.get(&id).filter(|n| !n.trim().is_empty()).cloned().unwrap_or_else(|| "a room".to_string()));
         view! {
             " "
             <span class="notifRoomName">{move || format!("in #{}", name())}</span>
@@ -429,13 +413,7 @@ fn NotificationPrefs(rooms: LiveQuery<RoomView>, prefs: LiveQuery<NotificationPr
     // writes both pin the lowest id, so the twin is simply inert.
     let own_pref = {
         let prefs = prefs.clone();
-        move || {
-            prefs
-                .get()
-                .into_iter()
-                .filter(|p| p.user().map(|u| u.id() == me).unwrap_or(false))
-                .min_by_key(|p| p.id().to_base64())
-        }
+        move || prefs.get().into_iter().filter(|p| p.user().map(|u| u.id() == me).unwrap_or(false)).min_by_key(|p| p.id().to_base64())
     };
 
     let own_pref_for_mentions = own_pref.clone();
@@ -532,11 +510,8 @@ fn update_pref(prefs: LiveQuery<NotificationPrefView>, created_id: Arc<Mutex<Opt
     let me = current_user_id();
     wasm_bindgen_futures::spawn_local(async move {
         match (|| async {
-            let existing = prefs
-                .peek()
-                .into_iter()
-                .filter(|p| p.user().map(|u| u.id() == me).unwrap_or(false))
-                .min_by_key(|p| p.id().to_base64());
+            let existing =
+                prefs.peek().into_iter().filter(|p| p.user().map(|u| u.id() == me).unwrap_or(false)).min_by_key(|p| p.id().to_base64());
             let existing = match existing {
                 Some(row) => Some(row),
                 None => {
@@ -559,8 +534,7 @@ fn update_pref(prefs: LiveQuery<NotificationPrefView>, created_id: Arc<Mutex<Opt
                             .muted_rooms()
                             .ok()
                             .and_then(|json| {
-                                json.as_array()
-                                    .map(|arr| arr.iter().filter_map(|v| v.as_str()).map(|s| s.to_string()).collect())
+                                json.as_array().map(|arr| arr.iter().filter_map(|v| v.as_str()).map(|s| s.to_string()).collect())
                             })
                             .unwrap_or_default();
                         if *muted {
@@ -582,9 +556,8 @@ fn update_pref(prefs: LiveQuery<NotificationPrefView>, created_id: Arc<Mutex<Opt
                             (false, set)
                         }
                     };
-                    let created = trx
-                        .create(&NotificationPref { user: me.into(), mentions_only, muted_rooms: muted_set_to_json(&set) })
-                        .await?;
+                    let created =
+                        trx.create(&NotificationPref { user: me.into(), mentions_only, muted_rooms: muted_set_to_json(&set) }).await?;
                     *created_id.lock().unwrap() = Some(created.id());
                 }
             }

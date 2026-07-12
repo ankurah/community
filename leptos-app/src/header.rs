@@ -5,15 +5,8 @@ use ankurah_signals::Get as AnkurahGet;
 use community_model::{RoomView, UserView};
 
 use crate::{
-    ctx,
-    editable_text_field::EditableTextField,
-    fmt,
-    members_panel::MembersPanel,
-    mod_log_panel::ModLogPanel,
-    notification_inbox::{NotificationBadge, NotificationInbox},
-    qr_code_modal::QRCodeModal,
-    room_topic::RoomTopic,
-    ws_client,
+    ctx, editable_text_field::EditableTextField, fmt, members_panel::MembersPanel, mod_log_panel::ModLogPanel,
+    notification_inbox::{NotificationBadge, NotificationInbox}, qr_code_modal::QRCodeModal, room_topic::RoomTopic, ws_client,
 };
 
 /// Header component displaying app title, the current room's topic, user
