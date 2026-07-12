@@ -30,6 +30,7 @@ mod message_row;
 mod mod_log_panel;
 mod notification_inbox;
 mod notification_manager;
+mod panels;
 mod profile_popover;
 mod qr_code_modal;
 mod queries;
@@ -37,6 +38,7 @@ mod reactions;
 mod read_state;
 mod room_list;
 mod room_topic;
+mod user_detail_panel;
 mod xray;
 
 use chat::Chat;

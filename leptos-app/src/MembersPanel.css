@@ -116,12 +116,17 @@
   font-size: var(--fs-md);
 }
 
+/* Each row is a button: the whole surface opens the member detail sidebar
+   (#57) — the hover wash is a real affordance now, not just decoration. */
 .memberRow {
   display: flex;
   align-items: center;
   gap: var(--sp-3);
+  width: 100%;
   padding: 7px var(--sp-2);
   border-radius: var(--r-md);
+  text-align: left;
+  transition: background-color var(--t-fast) var(--ease);
 }
 
 .memberRow:hover {
@@ -204,83 +209,6 @@
 
 .memberRowBanned .memberName {
   color: var(--text-3);
-}
-
-/* Moderator-only "⋯" trigger: quiet until the row is hovered, the button is
-   focused, or its menu is open — but never fully hidden (touch has no hover). */
-.memberActionsBtn {
-  flex-shrink: 0;
-  width: 28px;
-  height: 28px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: var(--r-sm);
-  font-size: var(--fs-base);
-  line-height: 1;
-  color: var(--text-3);
-  opacity: 0.45;
-  transition:
-    opacity var(--t-fast) var(--ease),
-    color var(--t-fast) var(--ease),
-    background-color var(--t-fast) var(--ease);
-}
-
-.memberRow:hover .memberActionsBtn,
-.memberActionsBtn:focus-visible,
-.memberActionsBtn[aria-expanded="true"] {
-  opacity: 1;
-}
-
-.memberActionsBtn:hover {
-  background: var(--surface-3);
-  color: var(--text);
-}
-
-/* The action menu itself — fixed-position so the scrolling roster can't clip
-   it; sits above the members overlay (z-index 1000). */
-.memberMenu {
-  position: fixed;
-  z-index: 1100;
-  min-width: 170px;
-  padding: var(--sp-1);
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--r-md);
-  box-shadow: var(--shadow-2);
-  animation: membersOverlayIn 120ms var(--ease) both;
-}
-
-.memberMenuItem {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
-  width: 100%;
-  padding: 8px 10px;
-  border-radius: var(--r-sm);
-  font-size: var(--fs-md);
-  font-weight: 550;
-  color: var(--text);
-  text-align: left;
-  transition: background-color var(--t-fast) var(--ease);
-}
-
-.memberMenuItem svg {
-  width: 15px;
-  height: 15px;
-  flex-shrink: 0;
-}
-
-.memberMenuItem:hover {
-  background: var(--surface-2);
-}
-
-.memberMenuItem.memberMenuItemDanger {
-  color: var(--danger);
-}
-
-.memberMenuItem.memberMenuItemDanger:hover {
-  background: var(--danger-bg);
 }
 
 .membersNote {

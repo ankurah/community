@@ -58,13 +58,21 @@
   min-width: 0;
 }
 
+/* A button since #57: clicking the name opens the member detail sidebar.
+   display block keeps the button shrink-wrapping its line like the old div. */
 .profileName {
+  display: block;
+  max-width: 100%;
   font-size: var(--fs-base);
   font-weight: 700;
   color: var(--text);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.profileName:hover {
+  text-decoration: underline;
 }
 
 .profileFirstSeen {

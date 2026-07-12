@@ -47,11 +47,34 @@ struct MentionCtx<'a> {
 }
 
 impl MentionCtx<'_> {
-    /// The highlighted `@name` span for a mention id; unknown ids (user not
-    /// loaded, or a foreign id) render as a muted `@unknown`.
+    /// The highlighted `@name` chip for a mention id — a button opening the
+    /// member's detail sidebar (#57). Unknown ids (user not loaded, or a
+    /// foreign id) render as a muted, inert `@unknown` span.
     fn view(&self, idx: usize) -> AnyView {
-        match self.ids.get(idx).and_then(|id| self.names.get(id)) {
-            Some(name) => view! { <span class="mdMention">{format!("@{name}")}</span> }.into_any(),
+        let resolved = self.ids.get(idx).and_then(|id| {
+            let name = self.names.get(id)?;
+            // parse_mentions only matches well-formed ids, so this parse
+            // failing would take an id that resolved a name yet isn't an
+            // EntityId — not reachable, but degrade to inert rather than
+            // panic if it ever is.
+            let entity_id = ankurah::EntityId::from_base64(id).ok()?;
+            Some((name, entity_id))
+        });
+        match resolved {
+            Some((name, entity_id)) => {
+                let open_detail = move |e: leptos::ev::MouseEvent| {
+                    // Keep the click from reaching the bubble (x-ray's
+                    // click-to-inspect exempts buttons, but be explicit).
+                    e.stop_propagation();
+                    crate::panels::panels().open(crate::panels::Surface::UserDetail(entity_id.clone()));
+                };
+                view! {
+                    <button type="button" class="mdMention" title="View member" on:click=open_detail>
+                        {format!("@{name}")}
+                    </button>
+                }
+                .into_any()
+            }
             None => view! { <span class="mdMention mdMentionUnknown">"@unknown"</span> }.into_any(),
         }
     }

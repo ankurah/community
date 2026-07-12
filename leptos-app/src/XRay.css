@@ -21,6 +21,18 @@
   cursor: zoom-in;
 }
 
+/* The prose cursor (#59) yields while x-ray is on: the WHOLE bubble is the
+   inspect target, and zoom-in is the mode's affordance. Cursor is inherited,
+   so the explicit cursors inside the bubble (.messageText's text, and the
+   default on the (edited) suffix and co-edit badge — spans, so the bubble's
+   button/a click exemption doesn't apply to them) need x-ray-scoped
+   overrides. */
+.messageBubble.xrayInspectable .messageText,
+.messageBubble.xrayInspectable .messageEdited,
+.messageBubble.xrayInspectable .coEditBadge {
+  cursor: zoom-in;
+}
+
 /* Hover = a translucent amber wash over the whole bubble. The inset shadow
    composites OVER the bubble's own background, so it reads as a highlight
    in both themes rather than replacing the theme color. */
@@ -488,10 +500,13 @@
 
 /* ---- L1 inspector drawer ------------------------------------------------------ */
 
+/* Above the user-detail sidebar (900) — the drawer is modal (scrim), and the
+   sidebar is the one surface that leaves the chat clickable underneath, so
+   click-to-inspect can open this while it's up. Below context menus (1000). */
 .xrayDrawerScrim {
   position: fixed;
   inset: 0;
-  z-index: 70;
+  z-index: 950;
   background: rgb(16 40 36 / 25%);
   display: flex;
   justify-content: flex-end;
