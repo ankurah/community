@@ -10,9 +10,10 @@ curtain.
   your own messages, a moderator can delete anyone's. They may add a short,
   public reason. The message becomes a muted note reading **"Removed by a
   moderator"** — the text is gone, but the fact of the removal stays visible.
-- **Ban a member.** From the members panel, a moderator opens a member's action
-  menu and chooses **Ban**, optionally with a reason.
-- **Unban a member.** The same menu lifts a ban.
+- **Ban a member.** A moderator opens a member's detail sidebar (click their
+  row in the members panel, their name on a profile card, or an @mention) and
+  chooses **Ban member**, optionally with a reason.
+- **Unban a member.** The same place lifts a ban.
 
 Because roles come from the identity provider, a moderator's abilities are the
 same everywhere they sign in.
