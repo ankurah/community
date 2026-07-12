@@ -81,15 +81,25 @@ pub fn MessageRow(
     // open menu would instantly reopen it instead of toggling it closed.
     let menu_was_open_at_mousedown = StoredValue::new(false);
 
-    // Right-click opens the menu on your own messages; moderators can open it
-    // on anyone's (UI gating only — the server enforces the write policy).
+    // Right-click opens the actions menu at the cursor (#59) — additive to
+    // the ⋯ trigger and its keyboard path. The browser menu is suppressed on
+    // the bubble only, and two spots fall through to it deliberately:
+    // tombstones (no actions to offer) and links (the browser's open-in-new-
+    // tab / copy-link menu is the useful one there).
     let handle_context_menu = move |e: MouseEvent| {
-        e.prevent_default();
-        // Tombstones offer no actions — for the author or for moderators.
-        if !is_deleted_for_menu() {
-            opened_from_trigger.set_value(false);
-            context_menu.set(Some((e.client_x(), e.client_y())));
+        if is_deleted_for_menu() {
+            return;
         }
+        if let Some(target) = e.target() {
+            if let Ok(el) = target.dyn_into::<web_sys::Element>() {
+                if el.closest("a").ok().flatten().is_some() {
+                    return;
+                }
+            }
+        }
+        e.prevent_default();
+        opened_from_trigger.set_value(false);
+        context_menu.set(Some((e.client_x(), e.client_y())));
     };
 
     let open_from_trigger = move |e: MouseEvent| {

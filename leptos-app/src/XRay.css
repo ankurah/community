@@ -21,6 +21,13 @@
   cursor: zoom-in;
 }
 
+/* The prose cursor (#59) yields while x-ray is on: the WHOLE bubble is the
+   inspect target, and zoom-in is the mode's affordance. Cursor is inherited,
+   so .messageText's explicit `text` needs this x-ray-scoped override. */
+.messageBubble.xrayInspectable .messageText {
+  cursor: zoom-in;
+}
+
 /* Hover = a translucent amber wash over the whole bubble. The inset shadow
    composites OVER the bubble's own background, so it reads as a highlight
    in both themes rather than replacing the theme color. */
