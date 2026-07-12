@@ -39,6 +39,9 @@ pub fn Chat(
     let manager = RwSignal::new(None::<Manager>);
     let messages_container_ref = NodeRef::<Div>::new();
     let last_scroll_top = StoredValue::new(0);
+    // Pixel-level "user is at the bottom" truth, maintained by handle_scroll.
+    // Starts true: a freshly opened room renders at the live tail.
+    let pinned_to_bottom = StoredValue::new(true);
 
     // Query all users once (for author name lookup in message rows).
     let users = ctx().query::<UserView>("true").expect("failed to create UserView LiveQuery");
@@ -102,12 +105,30 @@ pub fn Chat(
         Signal::derive(move || manager.get().map(|m| m.mode() != ScrollMode::Live).unwrap_or(false));
     let item_count = Signal::derive(move || messages.get().len());
 
-    // Auto-scroll to the bottom while in live mode and new messages arrive.
+    // Auto-scroll to the bottom when new messages arrive, on two conditions
+    // OR'd together:
+    // - `should_auto_scroll`: the manager says we're in Live mode; and
+    // - `pinned_to_bottom && !has_more_following`: the PIXEL truth says the
+    //   user is at the bottom of the full timeline. This is the self-heal for
+    //   the stranded state where the manager left Live mode but the viewport
+    //   sits at the bottom (mode re-entry requires a scroll EVENT, which a
+    //   reader who never touches the wheel will never produce) — without it,
+    //   arrivals silently stop scrolling. The programmatic scroll below fires
+    //   a scroll event, so `handle_scroll` reports at-bottom and the manager
+    //   re-enters Live on its own.
     Effect::new(move |_| {
         let _ = messages.get();
-        if should_auto_scroll.get() {
+        let pinned = pinned_to_bottom.get_value() && !has_more_following.get_untracked();
+        if should_auto_scroll.get() || pinned {
             if let Some(el) = messages_container_ref.get_untracked() {
                 el.set_scroll_top(el.scroll_height());
+                // Once more next frame: same-tick layout shifts (composer
+                // autosize, code-block fonts) can move the bottom after this
+                // effect measured it.
+                let el = el.clone();
+                request_animation_frame(move || {
+                    el.set_scroll_top(el.scroll_height());
+                });
             }
         }
     });
@@ -170,6 +191,11 @@ pub fn Chat(
                             let scroll_top = container.scroll_top();
                             let scrolling_backward = scroll_top < last_scroll_top.get_value();
                             last_scroll_top.set_value(scroll_top);
+                            // ≤4px slack: fractional zoom/DPI can leave sub-pixel
+                            // gaps at the true bottom.
+                            let at_bottom_px =
+                                container.scroll_height() - container.client_height() - scroll_top <= 4;
+                            pinned_to_bottom.set_value(at_bottom_px);
                             if let Some((first, last)) = find_visible_ids(&container) {
                                 m.on_scroll(first, last, scrolling_backward);
                             }
