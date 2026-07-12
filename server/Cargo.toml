@@ -17,17 +17,23 @@ community-model = { path = "../model" }
 
 anyhow = "1.0"
 axum = { version = "0.8", features = ["ws"] }
-tokio = { version = "1.38", features = ["macros", "net", "rt-multi-thread"] }
+# `sync`/`time` back the workers' channels and fetch budgets (already in the
+# build transitively via ankurah/reqwest; declared because we use them directly).
+tokio = { version = "1.38", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["fs", "trace", "cors"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"
 
 # OIDC: validate idp.to ID tokens (RS256 via JWKS) and fetch the JWKS.
+# reqwest is rustls-only (no openssl) and doubles as the unfurl worker's
+# HTTP client; `url` is reqwest's own URL type (same crate, zero new code)
+# taken directly so the SSRF guard can match on url::Host.
 jsonwebtoken = "9"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+url = "2"
 
 [features]
 # Storage engine for the durable (server) node. `cargo generate` sets `default`

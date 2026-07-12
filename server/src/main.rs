@@ -24,6 +24,7 @@ use tower_http::{
 use tracing::{info, warn, Level};
 
 mod oidc;
+mod workers;
 use oidc::{OidcVerifier, VerifiedIdentity};
 
 #[cfg(all(feature = "sled", not(feature = "postgres")))]
@@ -101,6 +102,12 @@ async fn main() -> Result<()> {
 
     // Seed the default community rooms (idempotent).
     ensure_default_rooms(&system_ctx).await?;
+
+    // Server-side reactive workers (mention fan-out → notification rows,
+    // link unfurl → linkpreview rows): a standing message LiveQuery on the
+    // privileged context — the durable-node sibling of the policy watcher
+    // that `JwtAgent` already started via on_node_ready. See workers/mod.rs.
+    workers::start(system_ctx.clone());
 
     // Where the built SPA lives. In prod the container copies `trunk build`
     // output here; in dev the dir is absent and trunk serves the SPA itself
