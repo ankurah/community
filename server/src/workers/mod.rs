@@ -135,3 +135,114 @@ pub(crate) fn remember(cache: &mut HashMap<EntityId, u64>, id: EntityId, sig: u6
     }
     cache.insert(id, sig);
 }
+
+/// Runtime proof of the keystone claim — that a standing LiveQuery on a
+/// durable node's context really does drive the workers for freshly
+/// committed messages — on a real (sled) node. Gated on the sled feature:
+/// run with `cargo test -p community-server --no-default-features --features
+/// sled`. The default (postgres) test run skips it because it would need a
+/// live database.
+#[cfg(all(test, feature = "sled"))]
+mod tests {
+    use super::*;
+    use ankurah::policy::{PermissiveAgent, DEFAULT_CONTEXT};
+    use ankurah::Node;
+    use ankurah_storage_sled::SledStorageEngine;
+    use community_model::{LinkPreview, LinkPreviewView, Message, NotificationView, Room, User};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    async fn test_context() -> Context {
+        // The same durable-node dance as main(), with the permissive agent —
+        // worker mechanics don't depend on which policy agent runs, only on
+        // having a privileged-equivalent Context.
+        let node = Node::new_durable(Arc::new(SledStorageEngine::new_test().unwrap()), PermissiveAgent::new());
+        node.system.wait_loaded().await;
+        if node.system.root().is_none() {
+            node.system.create().await.unwrap();
+        }
+        node.system.wait_system_ready().await;
+        node.context_async(DEFAULT_CONTEXT).await
+    }
+
+    /// Poll until the notification materializes, or fail after a generous
+    /// deadline — the workers are asynchronous by design, so assertions on
+    /// their output must wait for them.
+    async fn wait_for_first_notification(ctx: &Context) -> NotificationView {
+        for _ in 0..200 {
+            if let Some(n) = ctx.fetch::<NotificationView>("true").await.unwrap().into_iter().next() {
+                return n;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        panic!("timed out waiting for the mention notification");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn workers_react_to_committed_messages_end_to_end() {
+        let ctx = test_context().await;
+        start(ctx.clone());
+
+        // Seed users, a room, and (crucially, BEFORE any message references
+        // it) a LinkPreview row — its existence must stop the unfurl worker
+        // from ever fetching this URL. Tests must not touch the network.
+        let url = "https://example.invalid/cached-before-message";
+        let trx = ctx.begin();
+        let author = trx.create(&User { display_name: "Author".into(), oidc_sub: None }).await.unwrap().id();
+        let recipient = trx.create(&User { display_name: "Recipient".into(), oidc_sub: None }).await.unwrap().id();
+        let room = trx.create(&Room { name: "general".into(), created_by: None, topic: None }).await.unwrap().id();
+        trx.create(&LinkPreview {
+            url: url.to_string(),
+            title: Some("seeded".into()),
+            description: None,
+            image_url: None,
+            fetched_at: 1,
+            ok: true,
+        })
+        .await
+        .unwrap();
+        trx.commit().await.unwrap();
+
+        // A message mentioning the recipient (and the author — self-mentions
+        // must NOT notify) and carrying the pre-cached URL.
+        let text = format!("hey <@{}> (ignore <@{}>) see {url}", recipient.to_base64(), author.to_base64());
+        let trx = ctx.begin();
+        let message =
+            trx.create(&Message { user: author.into(), room: room.into(), text, timestamp: 1, deleted: false, edited_at: None, collaborative: None })
+                .await
+                .unwrap()
+                .id();
+        trx.commit().await.unwrap();
+
+        // The reactive path (or the boot sweep, if the commit won the race
+        // against LiveQuery activation — both are correct) must produce the
+        // notification without any polling logic in the worker itself.
+        let notification = wait_for_first_notification(&ctx).await;
+        assert_eq!(notification.recipient().unwrap().id(), recipient);
+        assert_eq!(notification.kind().unwrap(), "mention");
+        assert_eq!(notification.message().unwrap().map(|r| r.id()), Some(message));
+        assert_eq!(notification.actor().unwrap().map(|r| r.id()), Some(author));
+        assert_eq!(notification.room().unwrap().map(|r| r.id()), Some(room));
+        assert!(!notification.seen().unwrap());
+
+        // Idempotency under edits: change the text but keep the mention. The
+        // Update flows through the same pipeline; the existence check must
+        // swallow it.
+        let trx = ctx.begin();
+        let editable = ctx.fetch::<community_model::MessageView>("true").await.unwrap().into_iter().next().unwrap().edit(&trx).unwrap();
+        editable.text().replace(&format!("edited <@{}> {url}", recipient.to_base64())).unwrap();
+        trx.commit().await.unwrap();
+
+        // Deliberately generous settle time; then: still exactly one
+        // notification (self-mention excluded, edit not double-delivered)...
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let notifications = ctx.fetch::<NotificationView>("true").await.unwrap();
+        assert_eq!(notifications.len(), 1, "exactly one notification: no self-mention row, no edit duplicate");
+        // ...and still exactly one LinkPreview row, the seeded one — the
+        // worker recognized it and never re-fetched (had it tried to fetch,
+        // .invalid can't resolve and a second ok:false row would exist).
+        let previews = ctx.fetch::<LinkPreviewView>("true").await.unwrap();
+        assert_eq!(previews.len(), 1, "pre-cached URL must not be re-fetched or duplicated");
+        assert_eq!(previews[0].title().unwrap().as_deref(), Some("seeded"));
+    }
+}
