@@ -8,9 +8,10 @@ use community_model::{MessageView, ModAction};
 
 use crate::ctx;
 
-/// Context menu for message actions: react (everyone), edit (author),
-/// delete (author or moderator). Opens on right-click or the row's "⋯"
-/// trigger, on any non-tombstone message.
+/// Context menu for message actions: react and reply (everyone), edit
+/// (author, or anyone on a collaborative message — #38), the author's
+/// collaborative toggle, delete (author or moderator). Opens on right-click
+/// or the row's "⋯" trigger, on any non-tombstone message.
 #[component]
 pub fn MessageContextMenu(
     x: i32,
@@ -20,10 +21,20 @@ pub fn MessageContextMenu(
     /// Whether the message belongs to the viewer (gates Edit; Delete also
     /// opens to moderators).
     is_own: bool,
+    /// Resolved display name of the message's author, for the reply quote
+    /// (#23). Resolved by the row at open time — the menu has no users query.
+    author_name: String,
     on_close: impl Fn() + Clone + 'static,
 ) -> impl IntoView {
     // UI gating only — the server enforces the write policy.
     let can_delete = is_own || crate::can_moderate();
+    // Co-editing (#38). The menu mounts fresh per open, so a non-reactive
+    // read is correct (same pattern as the X-ray item below).
+    let is_collaborative = message.collaborative().ok().flatten().unwrap_or(false);
+    // The message write scope (`user = $jwt.sub OR collaborative = true`)
+    // already permits non-author edits of collaborative messages; this only
+    // surfaces what the server allows.
+    let can_edit = is_own || is_collaborative;
     // Captured before the action handlers below consume `message`/`on_close`.
     let msg_id_for_inspect = message.id();
     let on_close_for_inspect = on_close.clone();
@@ -179,6 +190,49 @@ pub fn MessageContextMenu(
         }
     };
 
+    // Reply (#23), v1 text convention: prefill the composer with an editable
+    // quoted snippet of this message (see message_input::request_reply_prefill).
+    let handle_reply = {
+        let on_close = on_close.clone();
+        let message = message.clone();
+        move |_: LeptosMouseEvent| {
+            crate::message_input::request_reply_prefill(
+                &author_name,
+                &message.text().unwrap_or_default(),
+                editing_message,
+            );
+            on_close();
+        }
+    };
+
+    // Author's co-edit toggle (#38): flips `collaborative` between Some(true)
+    // and Some(false). Only the author sees this — the write scope would deny
+    // a non-author flipping it off anyway (the post-write state must still
+    // satisfy `user = $jwt.sub OR collaborative = true`).
+    let handle_toggle_collab = {
+        let on_close = on_close.clone();
+        let message = message.clone();
+        move |_: LeptosMouseEvent| {
+            let message = message.clone();
+            let on_close = on_close.clone();
+            let make_collaborative = !is_collaborative;
+            wasm_bindgen_futures::spawn_local(async move {
+                match (|| async {
+                    let trx = ctx().begin();
+                    message.edit(&trx)?.collaborative().set(&Some(make_collaborative))?;
+                    trx.commit().await?;
+                    Ok::<_, Box<dyn std::error::Error>>(())
+                })()
+                .await
+                {
+                    Ok(_) => {}
+                    Err(e) => tracing::error!("Failed to toggle collaborative editing: {}", e),
+                }
+                on_close();
+            });
+        }
+    };
+
     // Clones for the quick-reaction row in the view below (handle_delete
     // consumes the originals).
     let message_for_react = message.clone();
@@ -251,11 +305,9 @@ pub fn MessageContextMenu(
             style:top=move || format!("{}px", position.get().1)
             on:keydown=handle_menu_keydown
         >
-            // Quick reactions (#14): the fixed set, for every viewer.
-            <div
-                class=if can_delete { "contextMenuReactions withItems" } else { "contextMenuReactions" }
-                role="none"
-            >
+            // Quick reactions (#14): the fixed set, for every viewer. Always
+            // `withItems`: Reply (#23) is offered on every non-tombstone row.
+            <div class="contextMenuReactions withItems" role="none">
                 {crate::reactions::REACTION_EMOJIS
                     .iter()
                     .map(|emoji| {
@@ -277,7 +329,15 @@ pub fn MessageContextMenu(
                     })
                     .collect_view()}
             </div>
-            {is_own
+            <button class="contextMenuItem" role="menuitem" on:click=handle_reply>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                    stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <polyline points="9 14 4 9 9 4" />
+                    <path d="M20 20v-7a4 4 0 0 0-4-4H4" />
+                </svg>
+                "Reply"
+            </button>
+            {can_edit
                 .then(|| {
                     view! {
                         <button class="contextMenuItem" role="menuitem" on:click=handle_edit>
@@ -286,6 +346,35 @@ pub fn MessageContextMenu(
                                 <path d="M17 3a2.8 2.8 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5z" />
                             </svg>
                             "Edit message"
+                        </button>
+                    }
+                })}
+            {is_own
+                .then(|| {
+                    view! {
+                        <button class="contextMenuItem" role="menuitem" on:click=handle_toggle_collab>
+                            {if is_collaborative {
+                                view! {
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                                        stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                        <rect x="3" y="11" width="18" height="11" rx="2" />
+                                        <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+                                    </svg>
+                                }
+                                    .into_any()
+                            } else {
+                                view! {
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                                        stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                        <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />
+                                        <circle cx="9" cy="7" r="4" />
+                                        <path d="M22 21v-2a4 4 0 0 0-3-3.87" />
+                                        <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+                                    </svg>
+                                }
+                                    .into_any()
+                            }}
+                            {if is_collaborative { "Make private again" } else { "Allow others to edit" }}
                         </button>
                     }
                 })}

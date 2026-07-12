@@ -117,3 +117,33 @@
 .messageBubble.ownMessage .mdLink {
   color: var(--accent);
 }
+
+/* Mentions (#18) ------------------------------------------------------------
+   `<@id>` tokens render as inline @name chips; unknown ids stay muted. */
+
+.mdMention {
+  padding: 1px 5px;
+  border-radius: 6px;
+  font-weight: 650;
+  color: var(--link);
+  background: color-mix(in srgb, var(--link) 12%, transparent);
+  overflow-wrap: anywhere;
+}
+
+.messageBubble.ownMessage .mdMention {
+  color: var(--accent);
+  background: rgb(255 255 255 / 13%);
+}
+
+.mdMentionUnknown,
+.messageBubble.ownMessage .mdMentionUnknown {
+  font-weight: 550;
+  font-style: italic;
+  color: var(--text-3);
+  background: var(--surface-3);
+}
+
+.messageBubble.ownMessage .mdMentionUnknown {
+  color: rgb(242 250 246 / 65%);
+  background: rgb(255 255 255 / 10%);
+}

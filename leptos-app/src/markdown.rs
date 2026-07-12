@@ -16,25 +16,123 @@
 //! Links render as real anchors with `target="_blank"` and
 //! `rel="noopener noreferrer"`, but only for http(s) destinations — any other
 //! scheme (`javascript:`, `data:`, …) renders as plain text. URL unfurling is
-//! deliberately out of scope here (#20).
+//! deliberately out of scope here (#20 — see link_preview.rs).
+//!
+//! Mention tokens (#18): `<@BASE64_ENTITY_ID>` (the canonical format shared
+//! with the server via `community_model::parse_mentions`) render as a
+//! highlighted `@name` span — typed nodes again, so the XSS posture is
+//! unchanged. Tokens are swapped for private-use sentinel pairs BEFORE the
+//! markdown parse (pulldown-cmark would otherwise split the `<@…>` across
+//! Text events) and swapped back into views afterwards; inside code spans
+//! and code blocks the literal token text is restored instead — code means
+//! verbatim.
 
 use leptos::prelude::*;
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag};
+use std::collections::HashMap;
+
+/// Sentinel pair bracketing an extracted mention's index during the markdown
+/// parse. Private-use codepoints: meaningless in prose, invisible to the
+/// parser's syntax, and any pre-existing occurrences are stripped from the
+/// input first so crafted text cannot forge an entry.
+const MENTION_OPEN: char = '\u{E000}';
+const MENTION_CLOSE: char = '\u{E001}';
+
+/// Mention context for one render: the token ids (in order of first
+/// appearance, deduped — indices match the sentinels) and the id → display
+/// name map resolved by the caller.
+struct MentionCtx<'a> {
+    ids: &'a [String],
+    names: &'a HashMap<String, String>,
+}
+
+impl MentionCtx<'_> {
+    /// The highlighted `@name` span for a mention id; unknown ids (user not
+    /// loaded, or a foreign id) render as a muted `@unknown`.
+    fn view(&self, idx: usize) -> AnyView {
+        match self.ids.get(idx).and_then(|id| self.names.get(id)) {
+            Some(name) => view! { <span class="mdMention">{format!("@{name}")}</span> }.into_any(),
+            None => view! { <span class="mdMention mdMentionUnknown">"@unknown"</span> }.into_any(),
+        }
+    }
+
+    /// The literal token text (`<@id>`) for restoring verbatim contexts
+    /// (code spans / code blocks). A dangling index yields the empty string —
+    /// unreachable after the pre-strip, but never worth panicking over.
+    fn literal(&self, idx: usize) -> String { self.ids.get(idx).map(|id| format!("<@{id}>")).unwrap_or_default() }
+}
+
+/// One piece of sentinel-bracketed text: a plain run or a mention index.
+enum Segment<'a> {
+    Text(&'a str),
+    Mention(usize),
+}
+
+/// Split sentinel-bracketed text into [`Segment`]s, calling `f` for each.
+fn for_each_segment(s: &str, mut f: impl FnMut(Segment)) {
+    let mut rest = s;
+    while let Some(open) = rest.find(MENTION_OPEN) {
+        if open > 0 {
+            f(Segment::Text(&rest[..open]));
+        }
+        let after = &rest[open + MENTION_OPEN.len_utf8()..];
+        match after.find(MENTION_CLOSE) {
+            Some(close) => {
+                if let Ok(idx) = after[..close].parse::<usize>() {
+                    f(Segment::Mention(idx));
+                }
+                rest = &after[close + MENTION_CLOSE.len_utf8()..];
+            }
+            None => rest = after, // dangling open sentinel: drop it
+        }
+    }
+    if !rest.is_empty() {
+        f(Segment::Text(rest));
+    }
+}
 
 /// Fast path: skip parsing entirely when the text contains none of the
 /// characters that can open a construct we render. `.` is deliberately not
 /// gated (every sentence has one), so a *lone* ordered list ("1. foo") renders
 /// literally — it only becomes a list when combined with other markdown.
-fn has_markdown(text: &str) -> bool {
-    text.bytes().any(|b| matches!(b, b'*' | b'_' | b'`' | b'[' | b'<' | b'>' | b'#' | b'-' | b'+'))
-}
+fn has_markdown(text: &str) -> bool { text.bytes().any(|b| matches!(b, b'*' | b'_' | b'`' | b'[' | b'<' | b'>' | b'#' | b'-' | b'+')) }
 
 /// Render message text: plain text node when no markdown characters are
-/// present, otherwise the parsed subset. The result always lives inside the
-/// row's `.messageText` div, so the virtual-scroll DOM contract is untouched.
-pub fn render_message(text: &str) -> AnyView {
+/// present, otherwise the parsed subset. Mention tokens resolve against
+/// `mention_names` (id → display name; pass an empty map to render tokens as
+/// `@unknown`). The result always lives inside the row's `.messageText` div,
+/// so the virtual-scroll DOM contract is untouched.
+pub fn render_message(text: &str, mention_names: &HashMap<String, String>) -> AnyView {
+    // Mentions first (#18): swap each token for a sentinel pair so the
+    // markdown parser treats it as opaque text. The canonical scanner is
+    // shared with the server — both sides must agree on what mentions.
+    let mention_ids = community_model::parse_mentions(text);
+    let prepared: String;
+    let (text, mentions) = if mention_ids.is_empty() {
+        (text, None)
+    } else {
+        let mut p = text.replace([MENTION_OPEN, MENTION_CLOSE], "");
+        for (i, id) in mention_ids.iter().enumerate() {
+            p = p.replace(&format!("<@{id}>"), &format!("{MENTION_OPEN}{i}{MENTION_CLOSE}"));
+        }
+        prepared = p;
+        (prepared.as_str(), Some(MentionCtx { ids: &mention_ids, names: mention_names }))
+    };
+
     if !has_markdown(text) {
-        return text.to_string().into_any();
+        return match &mentions {
+            None => text.to_string().into_any(),
+            Some(ctx) => {
+                let mut children: Vec<AnyView> = Vec::new();
+                for_each_segment(text, |seg| {
+                    children.push(match seg {
+                        Segment::Text(t) => t.to_string().into_any(),
+                        Segment::Mention(idx) => ctx.view(idx),
+                    })
+                });
+                children.into_any()
+            }
+        };
     }
 
     let mut stack = vec![Frame::new(FrameKind::Root)];
@@ -85,15 +183,17 @@ pub fn render_message(text: &str) -> AnyView {
                     }
                 }
             }
-            Event::Text(t) => push_text(&mut stack, &t),
+            Event::Text(t) => push_text(&mut stack, &t, mentions.as_ref()),
             Event::Code(t) => {
                 if let Some(top) = stack.last_mut() {
-                    top.children.push(view! { <code class="mdCode">{t.to_string()}</code> }.into_any());
+                    // Inline code is verbatim: restore literal `<@id>` text.
+                    let code = restore_literals(&t, mentions.as_ref());
+                    top.children.push(view! { <code class="mdCode">{code}</code> }.into_any());
                 }
             }
             // `.messageText` is `white-space: pre-wrap`, so a newline text node
             // is a line break.
-            Event::SoftBreak | Event::HardBreak => push_text(&mut stack, "\n"),
+            Event::SoftBreak | Event::HardBreak => push_text(&mut stack, "\n", mentions.as_ref()),
             // XSS posture: raw HTML is dropped, never rendered.
             Event::Html(_) | Event::InlineHtml(_) => {}
             // Rules ("---") are noise in chat; requires other markdown present
@@ -187,13 +287,38 @@ impl Frame {
     }
 }
 
-/// Append text to the top frame — into the raw buffer for code blocks,
-/// as a DOM text node everywhere else.
-fn push_text(stack: &mut [Frame], s: &str) {
+/// Append text to the top frame — into the raw buffer for code blocks
+/// (restoring literal mention tokens: code is verbatim), as DOM text nodes
+/// and mention spans everywhere else.
+fn push_text(stack: &mut [Frame], s: &str, mentions: Option<&MentionCtx>) {
     match stack.last_mut() {
-        Some(Frame { kind: FrameKind::Code { text, .. }, .. }) => text.push_str(s),
-        Some(frame) => frame.children.push(s.to_string().into_any()),
+        Some(Frame { kind: FrameKind::Code { text, .. }, .. }) => text.push_str(&restore_literals(s, mentions)),
+        Some(frame) => match mentions {
+            None => frame.children.push(s.to_string().into_any()),
+            Some(ctx) => for_each_segment(s, |seg| {
+                frame.children.push(match seg {
+                    Segment::Text(t) => t.to_string().into_any(),
+                    Segment::Mention(idx) => ctx.view(idx),
+                })
+            }),
+        },
         None => {}
+    }
+}
+
+/// Replace sentinel pairs with the literal `<@id>` token text (for code
+/// contexts, where mentions must not render as chips).
+fn restore_literals(s: &str, mentions: Option<&MentionCtx>) -> String {
+    match mentions {
+        None => s.to_string(),
+        Some(ctx) => {
+            let mut out = String::with_capacity(s.len());
+            for_each_segment(s, |seg| match seg {
+                Segment::Text(t) => out.push_str(t),
+                Segment::Mention(idx) => out.push_str(&ctx.literal(idx)),
+            });
+            out
+        }
     }
 }
 

@@ -4,7 +4,7 @@ use leptos::prelude::*;
 
 use ankurah::LiveQuery;
 use ankurah_signals::Get as AnkurahGet;
-use community_model::{MessageView, ReactionView, UserView};
+use community_model::{LinkPreviewView, MessageView, ReactionView, UserView};
 
 use crate::fmt;
 use crate::message_row::MessageRow;
@@ -75,6 +75,32 @@ pub fn MessageList(
     editing_message: RwSignal<Option<MessageView>>,
 ) -> impl IntoView {
     let rows = Signal::derive(move || group_rows(&messages.get()));
+
+    // Mention rendering (#18): one id → display-name map shared by every row,
+    // rebuilt when the users list (or any display name — View field reads are
+    // tracked) changes. Rows' text closures read it through `.with`, so a
+    // rename re-renders mentions live without per-row user lookups.
+    let mention_names = Memo::new({
+        let users = users.clone();
+        move |_| {
+            users
+                .get()
+                .iter()
+                .filter_map(|u| {
+                    let name = u.display_name().unwrap_or_default();
+                    (!name.is_empty()).then(|| (u.id().to_base64(), name))
+                })
+                .collect::<HashMap<String, String>>()
+        }
+    });
+
+    // Link previews (#20): one standing LiveQuery for the whole list, same
+    // shape and rationale as the reactions query below — LinkPreview rows are
+    // keyed by url with no room ref, and per-row queries would churn with the
+    // virtual scroller. `ok = false` rows are excluded: the client renders
+    // failed unfurls as plain links, so it never needs them.
+    let link_previews =
+        crate::ctx().query::<LinkPreviewView>("ok = true").expect("failed to create LinkPreviewView LiveQuery");
 
     // Reactions (#14): one standing LiveQuery over active reactions, grouped
     // into render-ready chips per message id. Reaction has no room ref, so a
@@ -151,6 +177,7 @@ pub fn MessageList(
                 children={
                     let users = users.clone();
                     let current_user_id = current_user_id.clone();
+                    let link_previews = link_previews.clone();
                     move |row: RowCtx| {
                         view! {
                             <MessageRow
@@ -162,6 +189,8 @@ pub fn MessageList(
                                 last_in_group=row.last_in_group
                                 day_label=row.day_label
                                 reaction_chips=reaction_chips
+                                mention_names=mention_names
+                                link_previews=link_previews.clone()
                             />
                         }
                     }

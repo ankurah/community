@@ -4,11 +4,12 @@ use wasm_bindgen::JsCast;
 
 use ankurah::LiveQuery;
 use ankurah_signals::Get as AnkurahGet;
-use community_model::{MessageView, UserView};
+use community_model::{LinkPreviewView, MessageView, UserView};
 
 use std::collections::HashMap;
 
 use crate::fmt;
+use crate::link_preview::LinkPreviewCard;
 use crate::message_context_menu::MessageContextMenu;
 use crate::profile_popover::ProfilePopover;
 use crate::reactions::{ReactionBar, ReactionChip};
@@ -31,6 +32,11 @@ pub fn MessageRow(
     /// Render-ready reaction chips per message id (shared, built once in the
     /// list — see message_list.rs).
     reaction_chips: Memo<HashMap<String, Vec<ReactionChip>>>,
+    /// Mention id → display name (#18; shared, built once in the list).
+    mention_names: Memo<HashMap<String, String>>,
+    /// Successful link-preview rows (#20; one shared LiveQuery, see
+    /// message_list.rs). Each row looks its own URLs up by string equality.
+    link_previews: LiveQuery<LinkPreviewView>,
 ) -> impl IntoView {
     let context_menu = RwSignal::new(None::<(i32, i32)>);
 
@@ -125,6 +131,7 @@ pub fn MessageRow(
     let message_id = message.id().to_base64();
     let message_for_text = message.clone();
     let message_for_edited = message.clone();
+    let message_for_collab = message.clone();
     let message_for_xray = message.clone();
     // X-ray: the message itself is the inspect target — no per-message id
     // chrome; a distinct hover treatment (CSS) marks the mode instead.
@@ -146,6 +153,7 @@ pub fn MessageRow(
         crate::xray::state().open_inspector(MessageView::collection(), xray_click_id.clone());
     };
     let message_for_bar = message.clone();
+    let message_for_preview = message.clone();
     // This row's reaction chips, from the shared per-message map (#14).
     let chips = Signal::derive({
         let msg_id = message.id().to_base64();
@@ -173,6 +181,7 @@ pub fn MessageRow(
     let avatar_hue = fmt::hue_class(&author_user_id);
     let author_for_avatar = author.clone();
     let author_for_name = author.clone();
+    let author_for_menu = author.clone();
     let message_for_tomb = message.clone();
 
     view! {
@@ -288,18 +297,23 @@ pub fn MessageRow(
                         fallback={
                             let message_for_text = message_for_text.clone();
                             let message_for_edited = message_for_edited.clone();
+                            let message_for_collab = message_for_collab.clone();
                             move || {
                                 let message_for_text = message_for_text.clone();
                                 let message_for_edited = message_for_edited.clone();
+                                let message_for_collab = message_for_collab.clone();
                                 view! {
                                     // Reactive read: CRDT text edits (local or remote)
-                                    // re-render the bubble; markdown parses only when
-                                    // the text changes.
+                                    // re-render the bubble; markdown parses when the
+                                    // text — or the mention-name map (#18) — changes.
                                     <div class="messageText">
                                         {move || {
-                                            crate::markdown::render_message(
-                                                &message_for_text.text().unwrap_or_default(),
-                                            )
+                                            mention_names.with(|names| {
+                                                crate::markdown::render_message(
+                                                    &message_for_text.text().unwrap_or_default(),
+                                                    names,
+                                                )
+                                            })
                                         }}
                                         {move || {
                                             message_for_edited
@@ -313,6 +327,32 @@ pub fn MessageRow(
                                                             title=format!("Edited {}", fmt::full_stamp(ts))
                                                         >
                                                             "(edited)"
+                                                        </span>
+                                                    }
+                                                })
+                                        }}
+                                        // Co-edit indicator (#38): persistent, subtle, and
+                                        // reactive — a remote toggle flips it live. It is
+                                        // the discoverability surface for the "Edit" item
+                                        // other members get on this message.
+                                        {move || {
+                                            message_for_collab
+                                                .collaborative()
+                                                .ok()
+                                                .flatten()
+                                                .unwrap_or(false)
+                                                .then(|| {
+                                                    view! {
+                                                        <span
+                                                            class="coEditBadge"
+                                                            title="Collaborative message — anyone can edit it (right-click for Edit)"
+                                                        >
+                                                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                                                stroke-width="2.4" stroke-linecap="round"
+                                                                stroke-linejoin="round" aria-hidden="true">
+                                                                <path d="M17 3a2.8 2.8 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5z" />
+                                                            </svg>
+                                                            "co-edit"
                                                         </span>
                                                     }
                                                 })
@@ -350,6 +390,27 @@ pub fn MessageRow(
                         }
                     </Show>
                 </div>
+                // Link preview card (#20): under the bubble (outside it — the
+                // bubble root and its data-msg-id contract stay untouched),
+                // never on tombstones. The component itself decides whether
+                // any of the message's URLs has a preview worth rendering.
+                <Show when={
+                    let is_deleted = is_deleted.clone();
+                    move || !is_deleted()
+                }>
+                    {
+                        let message_for_preview = message_for_preview.clone();
+                        let link_previews = link_previews.clone();
+                        move || {
+                            view! {
+                                <LinkPreviewCard
+                                    message=message_for_preview.clone()
+                                    previews=link_previews.clone()
+                                />
+                            }
+                        }
+                    }
+                </Show>
                 // Reaction chips (#14): under the bubble, never on tombstones.
                 <Show when={
                     let is_deleted = is_deleted.clone();
@@ -382,6 +443,7 @@ pub fn MessageRow(
                 }>
                     {
                         let message = message.clone();
+                        let author_for_menu = author_for_menu.clone();
                         move || {
                             context_menu.get().map(|(x, y)| {
                                 view! {
@@ -391,6 +453,11 @@ pub fn MessageRow(
                                         message=message.clone()
                                         editing_message=editing_message
                                         is_own=is_own_message
+                                        // Resolved at open time, for the reply quote (#23).
+                                        author_name=author_for_menu()
+                                            .map(|u| u.display_name().unwrap_or_default())
+                                            .filter(|n| !n.is_empty())
+                                            .unwrap_or_else(|| "Unknown".to_string())
                                         on_close=move || {
                                             context_menu.set(None);
                                             // Keyboard path: hand focus back to the trigger.
