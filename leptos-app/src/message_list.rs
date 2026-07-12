@@ -98,9 +98,14 @@ pub fn MessageList(
     // shape and rationale as the reactions query below — LinkPreview rows are
     // keyed by url with no room ref, and per-row queries would churn with the
     // virtual scroller. `ok = false` rows are excluded: the client renders
-    // failed unfurls as plain links, so it never needs them.
+    // failed unfurls as plain links, so it never needs them. Grouped into a
+    // url-keyed map (the mention_names/reaction_chips idiom) so each row's
+    // lookup is O(its own URLs), not a scan of every preview ever cached.
     let link_previews =
         crate::ctx().query::<LinkPreviewView>("ok = true").expect("failed to create LinkPreviewView LiveQuery");
+    let previews_by_url = Memo::new(move |_| {
+        link_previews.get().into_iter().filter_map(|p| p.url().ok().map(|u| (u, p))).collect::<HashMap<String, LinkPreviewView>>()
+    });
 
     // Reactions (#14): one standing LiveQuery over active reactions, grouped
     // into render-ready chips per message id. Reaction has no room ref, so a
@@ -177,7 +182,6 @@ pub fn MessageList(
                 children={
                     let users = users.clone();
                     let current_user_id = current_user_id.clone();
-                    let link_previews = link_previews.clone();
                     move |row: RowCtx| {
                         view! {
                             <MessageRow
@@ -190,7 +194,7 @@ pub fn MessageList(
                                 day_label=row.day_label
                                 reaction_chips=reaction_chips
                                 mention_names=mention_names
-                                link_previews=link_previews.clone()
+                                link_previews=previews_by_url
                             />
                         }
                     }

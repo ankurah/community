@@ -17,6 +17,10 @@ community-model = { path = "../model" }
 
 anyhow = "1.0"
 axum = { version = "0.8", features = ["ws"] }
+# Worker supervision: catch_unwind on the consumer futures so a panic inside
+# one respawns it instead of silently killing derived-data production.
+# Already in the build transitively (axum/ankurah); declared for direct use.
+futures-util = "0.3"
 # `sync`/`time` back the workers' channels and fetch budgets (already in the
 # build transitively via ankurah/reqwest; declared because we use them directly).
 tokio = { version = "1.38", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }

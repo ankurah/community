@@ -130,6 +130,10 @@ pub fn Header(current_user: RwSignal<Option<UserView>>, selected_room: RwSignal<
                         class="notificationButton"
                         on:click=move |_| show_notifications.set(true)
                         title="Notifications"
+                        // Without this, a nonzero badge becomes the button's
+                        // accessible name ("3, button") — the SVG is
+                        // aria-hidden and name-from-content falls to the badge.
+                        aria-label="Notifications"
                     >
                         // Bell — your inbox of mentions, with an unseen-count badge.
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"

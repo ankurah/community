@@ -45,7 +45,9 @@ pub fn NotificationBadge() -> impl IntoView {
         let count = unseen.get().iter().filter(|n| is_mine(n, me) && !n.seen().unwrap_or(true)).count();
         (count > 0).then(|| {
             let label = if count > 99 { "99+".to_string() } else { count.to_string() };
-            view! { <span class="notifBellBadge">{label}</span> }
+            // aria-hidden: the button carries aria-label="Notifications"; the
+            // badge is decoration to a screen reader, not the button's name.
+            view! { <span class="notifBellBadge" aria-hidden="true">{label}</span> }
         })
     }
 }
@@ -64,12 +66,14 @@ pub fn NotificationInbox(
 ) -> impl IntoView {
     let me = current_user_id();
 
-    // The user's whole inbox, newest-first. Self-scoped by policy, and small
-    // by nature today (mentions only); revisit with LIMIT/pagination if kinds
-    // multiply and histories grow.
+    // The user's inbox, newest-first. Self-scoped by policy. Notification
+    // rows are never deleted (`seen` is the lifecycle), so the LIMIT is what
+    // keeps a long-lived account's panel-open cost flat — 200 covers weeks of
+    // mentions; anyone scrolling past that wants search, not more inbox.
     let notifications = ctx()
         .query::<NotificationView>(
-            queries::selection("recipient = ? ORDER BY created_at DESC", [(&me).into()]).expect("static notifications selection parses"),
+            queries::selection("recipient = ? ORDER BY created_at DESC LIMIT 200", [(&me).into()])
+                .expect("static notifications selection parses"),
         )
         .expect("failed to create NotificationView LiveQuery");
 
@@ -455,6 +459,10 @@ fn NotificationPrefs(rooms: LiveQuery<RoomView>, prefs: LiveQuery<NotificationPr
             </label>
 
             <div class="notifPrefsSection">"Muted rooms"</div>
+            // Honest scope note: the fan-out worker consults mutes when it
+            // creates notification rows; the per-message sound chime is a
+            // separate (wave-1) path that does not read prefs yet.
+            <div class="notifPrefsSectionHint">"Stops inbox notifications from a room. Message sounds are not affected yet."</div>
             <For
                 each={
                     let rooms = rooms.clone();
@@ -501,75 +509,99 @@ fn NotificationPrefs(rooms: LiveQuery<RoomView>, prefs: LiveQuery<NotificationPr
     }
 }
 
-/// Upsert the user's `NotificationPref` row with one change. Prefers the row
-/// from the LiveQuery, then a row this client created that the LiveQuery
-/// hasn't delivered yet; only creates when neither exists. Mute changes read
-/// the row's current set at write time, so two quick toggles on different
-/// rooms both land.
+/// Queue one pref change for the strictly-serialized writer. Writes must not
+/// overlap: two in-flight changes would both read the pre-write mute set and
+/// the second whole-array commit would drop the first (lost update), and two
+/// racing FIRST changes would each create a row (twins the UI then can't
+/// repair — rows are not deletable). Pushes are synchronous and wasm is
+/// single-threaded (tasks interleave only at awaits), so the queue + pump
+/// flag below serialize without locks; the pump applies one change at a time
+/// and each application peeks state AFTER its predecessor committed.
 fn update_pref(prefs: LiveQuery<NotificationPrefView>, created_id: Arc<Mutex<Option<EntityId>>>, change: PrefChange) {
-    let me = current_user_id();
+    PREF_QUEUE.with(|q| q.borrow_mut().push_back(change));
+    if PREF_PUMP_RUNNING.with(|r| r.replace(true)) {
+        return; // a pump is already draining; it will pick this change up
+    }
     wasm_bindgen_futures::spawn_local(async move {
-        match (|| async {
-            let existing =
-                prefs.peek().into_iter().filter(|p| p.user().map(|u| u.id() == me).unwrap_or(false)).min_by_key(|p| p.id().to_base64());
-            let existing = match existing {
-                Some(row) => Some(row),
-                None => {
-                    let recorded = *created_id.lock().unwrap();
-                    match recorded {
-                        Some(id) => ctx().get::<NotificationPrefView>(id).await.ok(),
-                        None => None,
+        while let Some(change) = PREF_QUEUE.with(|q| q.borrow_mut().pop_front()) {
+            if let Err(e) = apply_pref_change(&prefs, &created_id, change).await {
+                tracing::error!("Failed to update notification preferences: {}", e);
+            }
+        }
+        // No await between the final pop and this reset, so a push cannot
+        // slip into the gap and strand a change with no pump.
+        PREF_PUMP_RUNNING.with(|r| r.set(false));
+    });
+}
+
+thread_local! {
+    static PREF_QUEUE: std::cell::RefCell<std::collections::VecDeque<PrefChange>> =
+        std::cell::RefCell::new(std::collections::VecDeque::new());
+    static PREF_PUMP_RUNNING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Apply one pref change: upsert the user's `NotificationPref` row. Prefers
+/// the row from the LiveQuery (lowest id — the canonical row if twins exist),
+/// then a row this client created that the LiveQuery hasn't delivered yet;
+/// only creates when neither exists.
+async fn apply_pref_change(
+    prefs: &LiveQuery<NotificationPrefView>,
+    created_id: &Arc<Mutex<Option<EntityId>>>,
+    change: PrefChange,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let me = current_user_id();
+    let existing =
+        prefs.peek().into_iter().filter(|p| p.user().map(|u| u.id() == me).unwrap_or(false)).min_by_key(|p| p.id().to_base64());
+    let existing = match existing {
+        Some(row) => Some(row),
+        None => {
+            let recorded = *created_id.lock().unwrap();
+            match recorded {
+                Some(id) => ctx().get::<NotificationPrefView>(id).await.ok(),
+                None => None,
+            }
+        }
+    };
+
+    let trx = ctx().begin();
+    match existing {
+        Some(row) => match &change {
+            PrefChange::MentionsOnly(v) => {
+                row.edit(&trx)?.mentions_only().set(v)?;
+            }
+            PrefChange::Mute(room_id, muted) => {
+                let mut set: HashSet<String> = row
+                    .muted_rooms()
+                    .ok()
+                    .and_then(|json| {
+                        json.as_array().map(|arr| arr.iter().filter_map(|v| v.as_str()).map(|s| s.to_string()).collect())
+                    })
+                    .unwrap_or_default();
+                if *muted {
+                    set.insert(room_id.clone());
+                } else {
+                    set.remove(room_id);
+                }
+                row.edit(&trx)?.muted_rooms().set(&muted_set_to_json(&set))?;
+            }
+        },
+        None => {
+            let (mentions_only, set) = match &change {
+                PrefChange::MentionsOnly(v) => (*v, HashSet::new()),
+                PrefChange::Mute(room_id, muted) => {
+                    let mut set = HashSet::new();
+                    if *muted {
+                        set.insert(room_id.clone());
                     }
+                    (false, set)
                 }
             };
-
-            let trx = ctx().begin();
-            match existing {
-                Some(row) => match &change {
-                    PrefChange::MentionsOnly(v) => {
-                        row.edit(&trx)?.mentions_only().set(v)?;
-                    }
-                    PrefChange::Mute(room_id, muted) => {
-                        let mut set: HashSet<String> = row
-                            .muted_rooms()
-                            .ok()
-                            .and_then(|json| {
-                                json.as_array().map(|arr| arr.iter().filter_map(|v| v.as_str()).map(|s| s.to_string()).collect())
-                            })
-                            .unwrap_or_default();
-                        if *muted {
-                            set.insert(room_id.clone());
-                        } else {
-                            set.remove(room_id);
-                        }
-                        row.edit(&trx)?.muted_rooms().set(&muted_set_to_json(&set))?;
-                    }
-                },
-                None => {
-                    let (mentions_only, set) = match &change {
-                        PrefChange::MentionsOnly(v) => (*v, HashSet::new()),
-                        PrefChange::Mute(room_id, muted) => {
-                            let mut set = HashSet::new();
-                            if *muted {
-                                set.insert(room_id.clone());
-                            }
-                            (false, set)
-                        }
-                    };
-                    let created =
-                        trx.create(&NotificationPref { user: me.into(), mentions_only, muted_rooms: muted_set_to_json(&set) }).await?;
-                    *created_id.lock().unwrap() = Some(created.id());
-                }
-            }
-            trx.commit().await?;
-            Ok::<_, Box<dyn std::error::Error>>(())
-        })()
-        .await
-        {
-            Ok(_) => {}
-            Err(e) => tracing::error!("Failed to update notification preferences: {}", e),
+            let created = trx.create(&NotificationPref { user: me.into(), mentions_only, muted_rooms: muted_set_to_json(&set) }).await?;
+            *created_id.lock().unwrap() = Some(created.id());
         }
-    });
+    }
+    trx.commit().await?;
+    Ok(())
 }
 
 /// Stable JSON encoding for `muted_rooms`: a sorted array of room id strings.

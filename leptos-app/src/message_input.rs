@@ -25,10 +25,28 @@ static COMPOSE_PREFILL: std::sync::RwLock<Option<String>> = std::sync::RwLock::n
 
 fn take_compose_prefill() -> Option<String> { COMPOSE_PREFILL.write().ok().and_then(|mut slot| slot.take()) }
 
+/// Replace mention tokens with plain `@DisplayName` text for human-editable
+/// contexts — the reply quote. Raw `<@…>` tokens in a quote would (a) show
+/// base64 gibberish in the composer and (b) re-notify everyone mentioned in
+/// the ORIGINAL message when the reply sends, because the server scans the
+/// new message's text with the same parser. Plain `@name` text does neither.
+pub fn resolve_mention_tokens(text: &str, names: &std::collections::HashMap<String, String>) -> String {
+    let mut out = text.to_string();
+    for id in community_model::parse_mentions(text) {
+        let name = names.get(&id).cloned().filter(|n| !n.is_empty()).unwrap_or_else(|| "unknown".to_string());
+        out = out.replace(&format!("<@{id}>"), &format!("@{name}"));
+    }
+    out
+}
+
 /// Start a reply to `author`'s message (#23, v1 text convention): prefill the
 /// composer with an editable quoted snippet — Slack-style — rather than a
 /// durable reference. A `re: Ref<Message>` model field is a fast-follow; no
 /// Message field stores the referenced id today.
+///
+/// `text` should already have mention tokens resolved to plain names
+/// ([`resolve_mention_tokens`]) — the caller holds the name map, this module
+/// does not.
 ///
 /// Cancels any in-progress edit: a reply composes a NEW message, and the
 /// `editing_message` write doubles as the composer's wake-up call.
@@ -230,7 +248,22 @@ pub fn MessageInput(
 
         if let Some(text) = take_compose_prefill() {
             mention_draft.set(None);
-            message_input.set(text);
+            if prev.flatten().is_some() {
+                // The composer held an edit mirror; the reply cancelled that
+                // edit (documented in request_reply_prefill), so the mirror
+                // must not survive into the new message.
+                message_input.set(text);
+            } else {
+                // The composer holds an unsent draft (possibly empty):
+                // replying must not destroy it — quote on top, draft below.
+                message_input.update(|draft| {
+                    if draft.trim().is_empty() {
+                        *draft = text;
+                    } else {
+                        *draft = format!("{text}{draft}");
+                    }
+                });
+            }
             if let Some(el) = textarea_ref.get_untracked() {
                 let _ = el.focus();
             }
@@ -303,6 +336,9 @@ pub fn MessageInput(
                 let user_ref = ankurah::Ref::from(&user);
                 let room_ref = ankurah::Ref::from(&room);
                 let input_text = input_text.trim().to_string();
+                // Clear synchronously: clearing only in the async completion
+                // left a window where a second Enter re-sent the same text.
+                message_input.set(String::new());
                 wasm_bindgen_futures::spawn_local(async move {
                     let result = async {
                         let trx = ctx().begin();
@@ -310,7 +346,7 @@ pub fn MessageInput(
                         trx.create(&Message {
                             user: user_ref,
                             room: room_ref,
-                            text: input_text,
+                            text: input_text.clone(),
                             timestamp,
                             deleted: false,
                             edited_at: None,
@@ -321,9 +357,17 @@ pub fn MessageInput(
                         Ok::<_, Box<dyn std::error::Error>>(())
                     }
                     .await;
-                    match result {
-                        Ok(_) => message_input.set(String::new()),
-                        Err(e) => tracing::error!("Failed to send message: {}", e),
+                    if let Err(e) = result {
+                        tracing::error!("Failed to send message: {}", e);
+                        // Put the failed text back — above anything typed since,
+                        // never over it.
+                        message_input.update(|current| {
+                            if current.trim().is_empty() {
+                                *current = input_text;
+                            } else {
+                                *current = format!("{input_text}\n{current}");
+                            }
+                        });
                     }
                 });
             }
@@ -396,7 +440,11 @@ pub fn MessageInput(
                         return;
                     }
                     "Enter" | "Tab" if !e.shift_key() => {
-                        if !e.is_composing() {
+                        // keyCode 229: WebKit fires the composition-commit
+                        // keydown AFTER compositionend with isComposing=false
+                        // — without this check Safari IME users select a
+                        // candidate and we treat it as popup confirmation.
+                        if !e.is_composing() && e.key_code() != 229 {
                             e.prevent_default();
                             let idx = mention_selected.get_untracked().min(matches.len() - 1);
                             insert_mention(&matches[idx]);
@@ -413,9 +461,12 @@ pub fn MessageInput(
                 }
             }
             // Enter sends; Shift+Enter falls through to the textarea's native
-            // newline (#50). An Enter that confirms an IME composition
-            // (isComposing) must not send the message.
-            if e.key() == "Enter" && !e.shift_key() && !e.is_composing() {
+            // newline (#50). An Enter that confirms an IME composition must
+            // not send: isComposing covers Chrome/Firefox, and keyCode 229
+            // covers WebKit, which fires the commit keydown after
+            // compositionend with isComposing already false. repeat() drops
+            // key-autorepeat so holding Enter sends once, not once per repeat.
+            if e.key() == "Enter" && !e.shift_key() && !e.is_composing() && e.key_code() != 229 && !e.repeat() {
                 e.prevent_default();
                 send();
             } else if e.key() == "Escape" && editing_message.get().is_some() {

@@ -53,7 +53,9 @@ const MAX_IMAGE_URL_CHARS: usize = 2048;
 const USER_AGENT: &str = concat!("community-linkpreview/", env!("CARGO_PKG_VERSION"));
 
 /// Consumer loop: one message at a time, errors contained per message/URL.
-pub async fn run(ctx: Context, mut rx: UnboundedReceiver<MessageView>) {
+/// The receiver is borrowed from the supervisor (`workers::supervise`), which
+/// respawns this loop if it ever panics.
+pub async fn run(ctx: Context, rx: &mut UnboundedReceiver<MessageView>) {
     info!("link-unfurl worker started (message URLs → linkpreview rows)");
     // message id → signature of the URL list already fully handled (same
     // optimization-only role as the mention worker's cache).
@@ -229,7 +231,11 @@ fn build_client(pin: Option<(String, Vec<SocketAddr>)>) -> Result<reqwest::Clien
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(CONNECT_TIMEOUT)
         .timeout(TOTAL_BUDGET)
-        .user_agent(USER_AGENT);
+        .user_agent(USER_AGENT)
+        // reqwest honors HTTP(S)_PROXY env vars by default; a proxy resolves
+        // hostnames itself, which would sidestep the vetted-address pin. No
+        // deployment of ours sets a proxy — refuse ambient ones outright.
+        .no_proxy();
     if let Some((domain, addrs)) = pin {
         builder = builder.resolve_to_addrs(&domain, &addrs);
     }

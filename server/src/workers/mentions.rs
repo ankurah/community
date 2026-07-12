@@ -33,8 +33,10 @@ use super::{now_ms, remember, signature};
 /// `Notification.kind`; the client inbox matches on it.
 const MENTION_KIND: &str = "mention";
 
-/// Consumer loop: one message at a time, errors contained per message.
-pub async fn run(ctx: Context, mut rx: UnboundedReceiver<MessageView>) {
+/// Consumer loop: one message at a time, errors contained per message. The
+/// receiver is borrowed from the supervisor (`workers::supervise`), which
+/// respawns this loop if it ever panics.
+pub async fn run(ctx: Context, rx: &mut UnboundedReceiver<MessageView>) {
     info!("notification fan-out worker started (mention tokens → notification rows)");
     // message id → signature of the mention list already fully delivered, so
     // per-keystroke edit Updates don't re-run storage queries. Purely an
@@ -163,16 +165,21 @@ async fn mention_notification_exists(ctx: &Context, recipient: EntityId, message
 /// Whether the recipient's `NotificationPref` (if any) allows delivering
 /// `kind` for an event in `room`. Runs under Root, which bypasses the
 /// pref collection's owner-only scope. No pref row means default-allow.
+///
+/// Duplicate rows can exist (two devices racing their first-ever write; rows
+/// are not deletable in ankurah 0.9.0). The client pins the LOWEST id — by
+/// base64, its exact comparator — as THE row for display and edits, so this
+/// evaluates only that row: honoring a twin the UI neither shows nor edits
+/// would suppress a room's notifications forever with no user-reachable
+/// repair.
 async fn pref_allows_delivery(ctx: &Context, recipient: EntityId, kind: &str, room_b64: &str) -> Result<bool> {
     let predicate = parse_selection("user = ?")?.predicate.populate([Expr::from(&recipient)])?;
-    for pref in ctx.fetch::<NotificationPrefView>(predicate).await? {
-        let muted_rooms = pref.muted_rooms()?.into_inner();
-        let mentions_only = pref.mentions_only()?;
-        if !pref_allows(kind, mentions_only, &muted_rooms, room_b64) {
-            return Ok(false);
-        }
-    }
-    Ok(true)
+    let Some(pref) = ctx.fetch::<NotificationPrefView>(predicate).await?.into_iter().min_by_key(|p| p.id().to_base64()) else {
+        return Ok(true);
+    };
+    let muted_rooms = pref.muted_rooms()?.into_inner();
+    let mentions_only = pref.mentions_only()?;
+    Ok(pref_allows(kind, mentions_only, &muted_rooms, room_b64))
 }
 
 /// Pure pref policy, factored out for testing:

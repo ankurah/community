@@ -135,8 +135,7 @@
   background: rgb(255 255 255 / 13%);
 }
 
-.mdMentionUnknown,
-.messageBubble.ownMessage .mdMentionUnknown {
+.mdMentionUnknown {
   font-weight: 550;
   font-style: italic;
   color: var(--text-3);

@@ -32,6 +32,13 @@
 //! Both consumers are fed from ONE LiveQuery (one reactor registration, one
 //! in-memory resultset) through separate channels, so a slow unfurl (network
 //! I/O) can never delay mention delivery.
+//!
+//! Each consumer runs under a respawn supervisor ([`supervise`]): the
+//! supervisor owns the channel receiver and lends it per attempt, so a panic
+//! inside a consumer is caught and logged, the channel stays open (producers
+//! keep buffering through the pause), and consumption resumes — only the
+//! in-flight message is dropped, healed by the next boot sweep or the
+//! message's next change.
 
 pub mod mentions;
 pub mod og;
@@ -39,12 +46,16 @@ pub mod ssrf;
 pub mod unfurl;
 
 use std::collections::HashMap;
+use std::panic::AssertUnwindSafe;
 
 use ankurah::changes::{ChangeSet, ItemChange};
 use ankurah::signals::{Peek, Subscribe};
 use ankurah::{Context, EntityId, LiveQuery};
 use anyhow::Result;
 use community_model::MessageView;
+use futures_util::future::BoxFuture;
+use futures_util::FutureExt;
+use tokio::sync::mpsc::UnboundedReceiver;
 use tracing::{error, info};
 
 /// Start the worker subsystem on the durable node's privileged (Root)
@@ -78,8 +89,10 @@ async fn watch_messages(ctx: Context) -> Result<()> {
                     // Add covers new messages AND un-deletes; Update covers
                     // text edits (which may introduce mentions/URLs).
                     ItemChange::Add { item, .. } | ItemChange::Update { item, .. } => {
-                        // send() only fails if a consumer died, which is
-                        // already fatal-logged by the consumer itself.
+                        // send() fails only at process teardown: the
+                        // supervisor owns each receiver for the process
+                        // lifetime (a consumer panic pauses consumption
+                        // without closing the channel).
                         let _ = mention_tx.send(item.clone());
                         let _ = unfurl_tx.send(item.clone());
                     }
@@ -91,8 +104,14 @@ async fn watch_messages(ctx: Context) -> Result<()> {
         })
     };
 
-    tokio::spawn(mentions::run(ctx.clone(), mention_rx));
-    tokio::spawn(unfurl::run(ctx.clone(), unfurl_rx));
+    {
+        let ctx = ctx.clone();
+        supervise("notification fan-out", mention_rx, move |rx| mentions::run(ctx.clone(), rx).boxed());
+    }
+    {
+        let ctx = ctx.clone();
+        supervise("link-unfurl", unfurl_rx, move |rx| unfurl::run(ctx.clone(), rx).boxed());
+    }
 
     live.wait_initialized().await;
     let backlog: Vec<MessageView> = live.resultset().peek();
@@ -107,6 +126,31 @@ async fn watch_messages(ctx: Context) -> Result<()> {
     std::future::pending::<()>().await;
     drop((live, subscription_guard)); // unreachable; documents what parking keeps alive
     Ok(())
+}
+
+/// Run one consumer under a respawn supervisor. The supervisor owns the
+/// channel receiver and lends it to each attempt, so a panic inside the
+/// consumer — caught here, logged loudly — never closes the channel:
+/// producers keep buffering through the pause and only the in-flight message
+/// is dropped (idempotent probes heal it on the message's next change or the
+/// next boot sweep). A graceful channel close ends the supervisor: that only
+/// happens at process teardown.
+fn supervise(
+    name: &'static str,
+    mut rx: UnboundedReceiver<MessageView>,
+    run: impl for<'a> Fn(&'a mut UnboundedReceiver<MessageView>) -> BoxFuture<'a, ()> + Send + 'static,
+) {
+    tokio::spawn(async move {
+        loop {
+            match AssertUnwindSafe(run(&mut rx)).catch_unwind().await {
+                Ok(()) => break,
+                Err(_) => {
+                    error!("{name} worker panicked; respawning consumer in 5s (channel intact, in-flight message dropped)");
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                }
+            }
+        }
+    });
 }
 
 /// ms since epoch — the project's timestamp unit (`Message.timestamp` is

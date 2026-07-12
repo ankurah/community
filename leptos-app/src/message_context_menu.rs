@@ -24,6 +24,10 @@ pub fn MessageContextMenu(
     /// Resolved display name of the message's author, for the reply quote
     /// (#23). Resolved by the row at open time — the menu has no users query.
     author_name: String,
+    /// Message text with mention tokens already resolved to plain `@names`
+    /// (also by the row at open time — the menu has no name map). Quoting raw
+    /// tokens would re-notify the original mentionees when the reply sends.
+    reply_source: String,
     on_close: impl Fn() + Clone + 'static,
 ) -> impl IntoView {
     // UI gating only — the server enforces the write policy.
@@ -194,13 +198,8 @@ pub fn MessageContextMenu(
     // quoted snippet of this message (see message_input::request_reply_prefill).
     let handle_reply = {
         let on_close = on_close.clone();
-        let message = message.clone();
         move |_: LeptosMouseEvent| {
-            crate::message_input::request_reply_prefill(
-                &author_name,
-                &message.text().unwrap_or_default(),
-                editing_message,
-            );
+            crate::message_input::request_reply_prefill(&author_name, &reply_source, editing_message);
             on_close();
         }
     };

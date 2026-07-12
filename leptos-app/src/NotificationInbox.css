@@ -208,6 +208,14 @@
   cursor: pointer;
 }
 
+/* Scope note under the muted-rooms heading (normal case, not the heading's
+   uppercase voice). */
+.notifPrefsSectionHint {
+  padding: 0 var(--sp-2);
+  font-size: var(--fs-sm);
+  color: var(--text-3);
+}
+
 /* Muted-rooms section heading — sidebar-title voice, panel-surface colors. */
 .notifPrefsSection {
   margin-top: var(--sp-3);

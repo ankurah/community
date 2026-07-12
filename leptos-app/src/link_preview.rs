@@ -11,10 +11,11 @@
 //! v1 renders `image_url` as-is (it is validated http(s) server-side); an
 //! image proxy is a later hardening pass.
 
-use leptos::prelude::*;
+use std::collections::HashMap;
 
-use ankurah::LiveQuery;
-use ankurah_signals::Get as AnkurahGet;
+use leptos::prelude::*;
+use wasm_bindgen::JsCast;
+
 use community_model::{extract_urls, LinkPreviewView, MessageView};
 
 /// Registrable host part of a URL, for the card's domain label — enough
@@ -33,19 +34,16 @@ fn domain_of(url: &str) -> String {
 /// URLs, and the shared previews LiveQuery pops the card in moments after
 /// the server's unfurl worker writes the row.
 #[component]
-pub fn LinkPreviewCard(message: MessageView, previews: LiveQuery<LinkPreviewView>) -> impl IntoView {
+pub fn LinkPreviewCard(message: MessageView, previews: Memo<HashMap<String, LinkPreviewView>>) -> impl IntoView {
     move || {
         let text = message.text().unwrap_or_default();
         let urls = extract_urls(&text);
         if urls.is_empty() {
             return None;
         }
-        // The query predicate is `ok = true`, so "first URL with a row" is
-        // "first URL that unfurled successfully".
-        let rows = previews.get();
-        let (url, preview) = urls
-            .into_iter()
-            .find_map(|u| rows.iter().find(|p| p.url().ok().as_deref() == Some(u.as_str())).map(|p| (u, p.clone())))?;
+        // The map is built from an `ok = true` query, so "first URL with an
+        // entry" is "first URL that unfurled successfully".
+        let (url, preview) = urls.into_iter().find_map(|u| previews.with(|m| m.get(&u).cloned()).map(|p| (u, p)))?;
 
         let title = preview.title().ok().flatten().map(|t| t.trim().to_string()).filter(|t| !t.is_empty());
         let description = preview.description().ok().flatten().map(|d| d.trim().to_string()).filter(|d| !d.is_empty());
@@ -72,7 +70,26 @@ pub fn LinkPreviewCard(message: MessageView, previews: LiveQuery<LinkPreviewView
                     .map(|src| {
                         view! {
                             <div class="linkPreviewThumb" aria-hidden="true">
-                                <img src=src alt="" loading="lazy" referrerpolicy="no-referrer" />
+                                // on:error hides the whole thumb box: a dead
+                                // image (or an http:// one the browser blocks
+                                // on our https origin) would otherwise leave a
+                                // permanent empty gray square on the card.
+                                <img
+                                    src=src
+                                    alt=""
+                                    loading="lazy"
+                                    referrerpolicy="no-referrer"
+                                    on:error=|e: leptos::ev::ErrorEvent| {
+                                        if let Some(thumb) = e
+                                            .target()
+                                            .and_then(|t| t.dyn_into::<web_sys::Element>().ok())
+                                            .and_then(|img| img.parent_element())
+                                            .and_then(|p| p.dyn_into::<web_sys::HtmlElement>().ok())
+                                        {
+                                            let _ = web_sys::HtmlElement::style(&thumb).set_property("display", "none");
+                                        }
+                                    }
+                                />
                             </div>
                         }
                     })}

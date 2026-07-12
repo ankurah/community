@@ -34,9 +34,9 @@ pub fn MessageRow(
     reaction_chips: Memo<HashMap<String, Vec<ReactionChip>>>,
     /// Mention id → display name (#18; shared, built once in the list).
     mention_names: Memo<HashMap<String, String>>,
-    /// Successful link-preview rows (#20; one shared LiveQuery, see
-    /// message_list.rs). Each row looks its own URLs up by string equality.
-    link_previews: LiveQuery<LinkPreviewView>,
+    /// Successful link previews by url (#20; shared, built once in the list
+    /// from its one LiveQuery). Each row looks its own URLs up by key.
+    link_previews: Memo<HashMap<String, LinkPreviewView>>,
 ) -> impl IntoView {
     let context_menu = RwSignal::new(None::<(i32, i32)>);
 
@@ -400,12 +400,11 @@ pub fn MessageRow(
                 }>
                     {
                         let message_for_preview = message_for_preview.clone();
-                        let link_previews = link_previews.clone();
                         move || {
                             view! {
                                 <LinkPreviewCard
                                     message=message_for_preview.clone()
-                                    previews=link_previews.clone()
+                                    previews=link_previews
                                 />
                             }
                         }
@@ -458,6 +457,10 @@ pub fn MessageRow(
                                             .map(|u| u.display_name().unwrap_or_default())
                                             .filter(|n| !n.is_empty())
                                             .unwrap_or_else(|| "Unknown".to_string())
+                                        reply_source=crate::message_input::resolve_mention_tokens(
+                                            &message.text().unwrap_or_default(),
+                                            &mention_names.get_untracked(),
+                                        )
                                         on_close=move || {
                                             context_menu.set(None);
                                             // Keyboard path: hand focus back to the trigger.

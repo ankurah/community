@@ -117,6 +117,13 @@ fn forbidden_ipv6(ip: Ipv6Addr) -> Option<&'static str> {
         return forbidden_ipv4(v4).map(|_| "IPv4-mapped form of a forbidden IPv4 range");
     }
     let seg = ip.segments();
+    if seg[..4] == [0, 0, 0, 0] && seg[4] == 0xffff && seg[5] == 0 {
+        // Deprecated SIIT "IPv4-translated" ::ffff:0:a.b.c.d (RFC 2765) — the
+        // v4-embedding sibling that `to_ipv4_mapped` misses (ffff sits in
+        // seg[4], not seg[5]). Unroutable on modern hosts and nothing
+        // legitimate lives here: refuse wholesale, like ::/96 below.
+        return Some("::ffff:0:0/96 (deprecated IPv4-translated)");
+    }
     if seg[..6] == [0, 0, 0, 0, 0, 0] {
         // Deprecated IPv4-compatible ::a.b.c.d (and the rest of ::/96):
         // nothing legitimate lives here; refuse wholesale.
@@ -299,6 +306,10 @@ mod tests {
         // Deprecated IPv4-compatible form: refused wholesale, even "public".
         assert!(forbidden_ip(v6("::127.0.0.1")).is_some());
         assert!(forbidden_ip(v6("::8.8.8.8")).is_some(), "::/96 is refused wholesale");
+        // Deprecated SIIT IPv4-translated form (ffff in the WRONG segment for
+        // to_ipv4_mapped): refused wholesale, even embedding a public v4.
+        assert!(forbidden_ip(v6("::ffff:0:127.0.0.1")).is_some());
+        assert!(forbidden_ip(v6("::ffff:0:8.8.8.8")).is_some(), "::ffff:0:0/96 is refused wholesale");
         // But a mapped PUBLIC v4 is fine — it is just that v4 address.
         assert!(forbidden_ip(v6("::ffff:8.8.8.8")).is_none());
     }

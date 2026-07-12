@@ -19,6 +19,22 @@ const MAX_MENTION_ID_LEN: usize = 64;
 /// worker, LinkPreview rows) shouldn't carry unbounded strings.
 const MAX_URL_LEN: usize = 2048;
 
+/// Tokens may only START within this prefix of the text. One pathological
+/// multi-megabyte message must not translate into unbounded scan work — this
+/// runs on every client render AND in the server workers. A token that starts
+/// inside the window may complete past it.
+const MAX_SCAN_BYTES: usize = 64 * 1024;
+
+/// Most mention tokens one message can emit. Bounds the notification fan-out
+/// a single message can trigger (the serial fan-out worker probes storage per
+/// token). Part of the shared contract: the server notifies exactly the
+/// mentions the client highlights.
+const MAX_MENTIONS: usize = 20;
+
+/// Most URLs one message can emit. Bounds the unfurl worker's per-message
+/// fetch work (serial, up to 5 s per URL) and LinkPreview row creation.
+const MAX_URLS: usize = 8;
+
 /// Extract mention tokens from message text, in order of first appearance,
 /// deduplicated.
 ///
@@ -32,11 +48,18 @@ const MAX_URL_LEN: usize = 2048;
 /// `<@abc`, a payload with characters outside the charset, or an empty `<@>`
 /// yields nothing. Duplicate mentions of the same id collapse to one entry so
 /// a message that shouts `<@X> <@X> <@X>` produces one notification, not three.
+///
+/// Bounded: tokens must start within the first [`MAX_SCAN_BYTES`] of text, and
+/// at most [`MAX_MENTIONS`] distinct ids are returned (first-seen wins). Both
+/// bounds are part of the shared contract — the server fans out exactly the
+/// mentions the client highlights.
 pub fn parse_mentions(text: &str) -> Vec<String> {
     let bytes = text.as_bytes();
+    let scan_end = bytes.len().min(MAX_SCAN_BYTES);
     let mut out: Vec<String> = Vec::new();
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
     let mut i = 0;
-    while i + 1 < bytes.len() {
+    while i + 1 < scan_end && out.len() < MAX_MENTIONS {
         if bytes[i] != b'<' || bytes[i + 1] != b'@' {
             i += 1;
             continue;
@@ -52,7 +75,7 @@ pub fn parse_mentions(text: &str) -> Vec<String> {
             // All boundary bytes (`<`, `@`, `>`, base64url) are ASCII, so these
             // indices are guaranteed char boundaries and the slice is valid UTF-8.
             let id = &text[start..end];
-            if !out.iter().any(|existing| existing == id) {
+            if seen.insert(id) {
                 out.push(id.to_string());
             }
             i = end + 1;
@@ -82,11 +105,17 @@ fn is_base64url_byte(b: u8) -> bool { b.is_ascii_alphanumeric() || b == b'-' || 
 /// The returned string is otherwise the URL exactly as written (no lowercasing,
 /// no query stripping): it is the `LinkPreview.url` dedup key, and any
 /// normalization here would have to be mirrored forever by every consumer.
+///
+/// Bounded: URLs must start within the first [`MAX_SCAN_BYTES`] of text, and
+/// at most [`MAX_URLS`] distinct URLs are returned (first-seen wins) — one
+/// message can commission at most that much unfurl work.
 pub fn extract_urls(text: &str) -> Vec<String> {
     let bytes = text.as_bytes();
+    let scan_end = bytes.len().min(MAX_SCAN_BYTES);
     let mut out: Vec<String> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut i = 0;
-    while i < bytes.len() {
+    while i < scan_end && out.len() < MAX_URLS {
         let rest = &text[i..];
         let scheme_len = if starts_with_ignore_case(rest, "https://") {
             8
@@ -98,7 +127,10 @@ pub fn extract_urls(text: &str) -> Vec<String> {
         };
         // Consume until a terminator byte. Multi-byte UTF-8 continuation bytes
         // are all >= 0x80 and never match the ASCII terminators, so a byte scan
-        // is safe; we only slice at ASCII positions.
+        // is safe; we only slice at ASCII positions. The run deliberately has
+        // no length cap: truncating it would resume the scan INSIDE an overlong
+        // URL and extract bogus sub-URLs from its query string — an overlong
+        // URL must be skipped wholesale instead.
         let start = i;
         let mut end = i + scheme_len;
         while end < bytes.len() && !is_url_terminator(bytes[end]) {
@@ -108,7 +140,8 @@ pub fn extract_urls(text: &str) -> Vec<String> {
         // Must have SOMETHING after the scheme (a bare "http://" is prose),
         // and stay within sane length bounds.
         if candidate.len() > scheme_len && candidate.len() <= MAX_URL_LEN {
-            if !out.iter().any(|existing| existing == candidate) {
+            if !seen.contains(candidate) {
+                seen.insert(candidate.to_string());
                 out.push(candidate.to_string());
             }
         }
@@ -299,5 +332,33 @@ mod tests {
     fn overlong_urls_are_skipped() {
         let long = format!("https://example.com/{}", "a".repeat(MAX_URL_LEN));
         assert!(extract_urls(&long).is_empty());
+    }
+
+    #[test]
+    fn mention_count_is_capped() {
+        // 22-char distinct payloads, alphabetically generated.
+        let text: String = (0..MAX_MENTIONS + 5).map(|n| format!("<@Payload{:014}> ", n)).collect();
+        let got = parse_mentions(&text);
+        assert_eq!(got.len(), MAX_MENTIONS);
+        assert_eq!(got[0], "Payload00000000000000"); // first-seen wins
+    }
+
+    #[test]
+    fn url_count_is_capped() {
+        let text: String = (0..MAX_URLS + 4).map(|n| format!("https://example.com/{n} ")).collect();
+        let got = extract_urls(&text);
+        assert_eq!(got.len(), MAX_URLS);
+        assert_eq!(got[0], "https://example.com/0");
+    }
+
+    #[test]
+    fn tokens_must_start_within_the_scan_window() {
+        // Starting past the window: ignored entirely.
+        let far = format!("{}<@{ID_A}> https://example.com/far", " ".repeat(MAX_SCAN_BYTES));
+        assert!(parse_mentions(&far).is_empty());
+        assert!(extract_urls(&far).is_empty());
+        // Starting inside the window: allowed to complete past it.
+        let straddle = format!("{}<@{ID_A}>", " ".repeat(MAX_SCAN_BYTES - 2));
+        assert_eq!(parse_mentions(&straddle), vec![ID_A.to_string()]);
     }
 }
