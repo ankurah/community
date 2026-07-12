@@ -304,6 +304,13 @@ pub fn MessageRow(
                                                 let concurrent = head.len() > 1;
                                                 let short = head.to_base64_short();
                                                 let msg_id = message_for_xray.id();
+                                                // The identifier lives in the tooltip, not the
+                                                // bubble: a raw short-id on every message is
+                                                // noise even in x-ray mode (product feedback).
+                                                let tip = format!(
+                                                    "Event head {short}{} — click to inspect (X-ray)",
+                                                    if concurrent { " · concurrent heads" } else { "" }
+                                                );
                                                 view! {
                                                     <button
                                                         type="button"
@@ -312,14 +319,15 @@ pub fn MessageRow(
                                                         } else {
                                                             "xrayChip xrayMono"
                                                         }
-                                                        title="Inspect event history (X-ray)"
+                                                        title=tip
+                                                        aria-label="Inspect event history (X-ray)"
                                                         on:click=move |_| {
                                                             use ankurah::View as _;
                                                             crate::xray::state()
                                                                 .open_inspector(MessageView::collection(), msg_id.clone())
                                                         }
                                                     >
-                                                        {short}
+                                                        "⌗"
                                                     </button>
                                                 }
                                             })
