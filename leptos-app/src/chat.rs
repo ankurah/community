@@ -2,6 +2,7 @@ use leptos::html::Div;
 use leptos::prelude::*;
 use send_wrapper::SendWrapper;
 use std::sync::Arc;
+use wasm_bindgen::closure::Closure;
 use wasm_bindgen::JsCast;
 
 use ankurah::EntityId;
@@ -42,6 +43,10 @@ pub fn Chat(
     // Pixel-level "user is at the bottom" truth, maintained by handle_scroll.
     // Starts true: a freshly opened room renders at the live tail.
     let pinned_to_bottom = StoredValue::new(true);
+    // The row stack inside the scroll container — the ResizeObserver target
+    // (the rows themselves are the container's flex items via <For>, so growth
+    // needs one wrapping box to observe).
+    let messages_content_ref = NodeRef::<Div>::new();
 
     // Query all users once (for author name lookup in message rows).
     let users = ctx().query::<UserView>("true").expect("failed to create UserView LiveQuery");
@@ -131,6 +136,29 @@ pub fn Chat(
                 });
             }
         }
+    });
+
+    // Re-pin the tail through ASYNCHRONOUS row growth. The effect above
+    // handles message arrivals, but preview cards, reaction chips, and images
+    // land on their own signals moments after the rows render and grow them
+    // without firing any scroll event — which is exactly how a first load
+    // settles "close but not at" the bottom. A ResizeObserver on the row
+    // stack re-scrolls on any content-height change while the user is pinned
+    // (and only then — a reader scrolled up is never yanked down).
+    Effect::new(move |prev: Option<Option<SendWrapper<ContentResizeGuard>>>| {
+        drop(prev); // a room switch rebinds the refs: disconnect the old observer
+        let _ = messages_container_ref.get(); // track both bindings
+        let content = messages_content_ref.get()?;
+        let callback = Closure::<dyn FnMut()>::new(move || {
+            if pinned_to_bottom.get_value()
+                && let Some(el) = messages_container_ref.get_untracked()
+            {
+                el.set_scroll_top(el.scroll_height());
+            }
+        });
+        let observer = web_sys::ResizeObserver::new(callback.as_ref().unchecked_ref()).ok()?;
+        observer.observe(&content);
+        Some(SendWrapper::new(ContentResizeGuard { observer, _callback: callback }))
     });
 
     // Advance the persistent read cursor (#13) whenever the user is looking at
@@ -247,12 +275,14 @@ pub fn Chat(
                             </button>
 
                             <div class="messagesContainer" node_ref=messages_container_ref on:scroll=handle_scroll>
-                                <MessageList
-                                    messages=messages
-                                    users=users.clone()
-                                    current_user_id=current_user_id.clone()
-                                    editing_message=editing_message
-                                />
+                                <div class="messagesContent" node_ref=messages_content_ref>
+                                    <MessageList
+                                        messages=messages
+                                        users=users.clone()
+                                        current_user_id=current_user_id.clone()
+                                        editing_message=editing_message
+                                    />
+                                </div>
                             </div>
 
                             <Show when=move || show_jump_to_current.get()>
@@ -278,6 +308,18 @@ pub fn Chat(
             }
         </Show>
     }
+}
+
+/// Disconnects the content ResizeObserver when dropped (room switch or
+/// unmount). The callback closure must outlive the observer, so they travel
+/// together.
+struct ContentResizeGuard {
+    observer: web_sys::ResizeObserver,
+    _callback: Closure<dyn FnMut()>,
+}
+
+impl Drop for ContentResizeGuard {
+    fn drop(&mut self) { self.observer.disconnect(); }
 }
 
 /// Newest message timestamp in a visible set (they arrive ordered, but max()

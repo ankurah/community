@@ -168,6 +168,15 @@
   display: none; /* Chrome, Safari, Opera */
 }
 
+/* Single observable box around the row stack (the ResizeObserver target that
+   keeps the tail pinned through async row growth — see chat.rs). Replicates
+   the container's column stacking so row layout is unchanged; the container
+   keeps the scrolling and padding. */
+.messagesContent {
+  display: flex;
+  flex-direction: column;
+}
+
 .jumpToCurrent {
   position: absolute;
   bottom: var(--sp-5);
