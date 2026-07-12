@@ -36,7 +36,9 @@ pub fn SystemPanel() -> impl IntoView {
         Err(e) => Some(format!("x-ray feed queries unavailable: {}", e)),
     };
 
-    let close = move |_| state().panel_open.set(false);
+    // The panel's × IS the off switch — x-ray is one mode, not a panel plus a
+    // residue of chips (the dismiss-panel-only half-state read as "stuck on").
+    let close = move |_| state().set_enabled(false);
 
     view! {
         <aside class="xrayPanel" role="complementary" aria-label="X-ray system panel">

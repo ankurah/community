@@ -48,10 +48,11 @@ pub struct InspectTarget {
 #[derive(Clone)]
 pub struct XRayState {
     /// Master switch. Persisted to `localStorage["xray"]`; `?xray=1` sets it on load.
+    /// X-ray is ONE mode: on shows everything (panel, chips, inspector
+    /// affordances), off shows nothing. A dismissable-panel half-state was
+    /// tried and read as "x-ray is stuck on" — every close affordance now
+    /// flips this one switch.
     pub enabled: ArcRwSignal<bool>,
-    /// Whether the L2 system panel is showing (independent of `enabled` so the
-    /// panel can be closed while chips/taps stay live).
-    pub panel_open: ArcRwSignal<bool>,
     /// Current L1 inspector target, if any.
     pub inspect: ArcRwSignal<Option<InspectTarget>>,
 }
@@ -63,7 +64,6 @@ pub fn state() -> XRayState {
     STATE
         .get_or_init(|| XRayState {
             enabled: ArcRwSignal::new(false),
-            panel_open: ArcRwSignal::new(false),
             inspect: ArcRwSignal::new(None),
         })
         .clone()
@@ -71,16 +71,14 @@ pub fn state() -> XRayState {
 
 impl XRayState {
     /// Flip the master switch. Enabling starts the observation machinery
-    /// (query taps + connection-state log) and opens the panel; disabling
+    /// (query taps + connection-state log) and shows the panel; disabling
     /// tears all of it down. Persists across reloads.
     pub fn set_enabled(&self, on: bool) {
         self.enabled.set(on);
         if on {
             bus::bus().set_tapping(true);
             bus::start_connection_log();
-            self.panel_open.set(true);
         } else {
-            self.panel_open.set(false);
             self.inspect.set(None);
             bus::bus().set_tapping(false);
             bus::stop_connection_log();
@@ -89,12 +87,7 @@ impl XRayState {
         persist_enabled(on);
     }
 
-    /// The header lens / Alt+X master switch: a plain binary on↔off. Enabling
-    /// opens the panel; disabling hides everything (chips, panel, inspector).
-    /// This is deliberately NOT tri-state: the panel's own `×` hides just the
-    /// panel (leaving ambient chips), so the master switch must always be a
-    /// one-press OFF — otherwise closing the panel then toggling would reopen
-    /// it and x-ray could never be switched off in a single action.
+    /// The header lens / Alt+X switch: a plain binary on↔off.
     pub fn toggle(&self) {
         self.set_enabled(!self.enabled.get_untracked());
     }
@@ -162,11 +155,11 @@ pub fn XRayLauncher() -> impl IntoView {
     });
     on_cleanup(move || handle.remove());
 
-    let panel_open = st.panel_open.clone();
+    let enabled = st.enabled.clone();
     let inspect = st.inspect.clone();
 
     view! {
-        <Show when=move || panel_open.get()>
+        <Show when=move || enabled.get()>
             <SystemPanel />
         </Show>
 
