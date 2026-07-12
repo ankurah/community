@@ -13,11 +13,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use leptos::prelude::*;
+use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::spawn_local;
 
 use ankurah::core::property::backend::LWWBackend;
 use ankurah::core::retrieval::{CachedEventGetter, GetEvents};
-use ankurah::proto::{Clock, Event, EventId};
+use ankurah::proto::{Clock, EntityId, Event, EventId};
 use ankurah::View;
 use ankurah_jwt_auth::{parse_claims_unverified, JwtContext};
 use community_model::{MessageView, RoomView, UserView};
@@ -51,6 +52,44 @@ enum Phase {
 }
 
 /// Fetch + assemble one entity's history.
+/// Event ids for one entity, straight off the `events` store's
+/// `by_entity_id` index. Works around `dump_entity_events` in
+/// ankurah-storage-indexeddb-wasm 0.9.0, which builds its IDBKeyRange from
+/// the OWNED `EntityId → JsValue` conversion — a wasm-bindgen class object,
+/// which IndexedDB rejects ("parameter is not a valid key") — while rows
+/// index the base64 STRING form. Querying the index for primary KEYS (base64
+/// event-id strings, exactly as `add_event` wrote them) lets the storage
+/// layer's working `get_events` do all the decoding.
+async fn local_event_ids(entity_id: EntityId) -> Result<Vec<EventId>, String> {
+    use super::system_panel::{await_idb, js_err};
+    let window = web_sys::window().ok_or("no window")?;
+    let factory = window.indexed_db().map_err(js_err)?.ok_or("IndexedDB unavailable")?;
+    let open = factory.open("community_app").map_err(js_err)?;
+    let db: web_sys::IdbDatabase = await_idb(open.into())
+        .await?
+        .dyn_into()
+        .map_err(|_| "open did not yield a database".to_string())?;
+    let result: Result<Vec<EventId>, String> = async {
+        let tx = db.transaction_with_str("events").map_err(js_err)?;
+        let store = tx.object_store("events").map_err(js_err)?;
+        let index = store.index("by_entity_id").map_err(js_err)?;
+        let key = JsValue::from_str(&entity_id.to_base64());
+        let req = index.get_all_keys_with_key(&key).map_err(js_err)?;
+        let keys = await_idb(req).await?;
+        let arr: js_sys::Array =
+            keys.dyn_into().map_err(|_| "getAllKeys did not return an array".to_string())?;
+        let mut ids = Vec::with_capacity(arr.length() as usize);
+        for key in arr.iter() {
+            let s = key.as_string().ok_or("event key was not a string")?;
+            ids.push(EventId::from_base64(&s).map_err(|e| format!("bad event id: {e}"))?);
+        }
+        Ok(ids)
+    }
+    .await;
+    db.close();
+    result
+}
+
 async fn fetch_history(target: InspectTarget, cancelled: Arc<AtomicBool>) -> Phase {
     let InspectTarget { collection, entity_id } = target;
 
@@ -97,8 +136,14 @@ async fn fetch_history(target: InspectTarget, cancelled: Arc<AtomicBool>) -> Pha
         Err(e) => return Phase::Failed(format!("Could not open collection: {}", e)),
     };
 
-    // 1) Everything already local — one indexed IndexedDB read, no network.
-    let dumped = match col.dump_entity_events(entity_id).await {
+    // 1) Everything already local — one indexed IndexedDB read (see
+    //    `local_event_ids` for why this bypasses `dump_entity_events`),
+    //    hydrated through the storage layer's working `get_events` path.
+    let local_ids = match local_event_ids(entity_id).await {
+        Ok(ids) => ids,
+        Err(e) => return Phase::Failed(format!("Local event dump failed: {}", e)),
+    };
+    let dumped = match col.get_events(local_ids).await {
         Ok(events) => events,
         Err(e) => return Phase::Failed(format!("Local event dump failed: {}", e)),
     };

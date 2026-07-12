@@ -355,7 +355,7 @@ fn QueriesCard() -> impl IntoView {
 // with StorageCollection::stats when ask A5 lands upstream).
 // ---------------------------------------------------------------------------
 
-fn js_err(e: JsValue) -> String { format!("{:?}", e) }
+pub(super) fn js_err(e: JsValue) -> String { format!("{:?}", e) }
 
 /// Wrap an IDBRequest's success/error events in a JS Promise. One-shot
 /// closures pass ownership to the JS GC (`once_into_js`), so nothing leaks.
@@ -373,7 +373,7 @@ fn idb_request_promise(req: web_sys::IdbRequest) -> js_sys::Promise {
     })
 }
 
-async fn await_idb(req: web_sys::IdbRequest) -> Result<JsValue, String> {
+pub(super) async fn await_idb(req: web_sys::IdbRequest) -> Result<JsValue, String> {
     wasm_bindgen_futures::JsFuture::from(idb_request_promise(req)).await.map_err(js_err)
 }
 

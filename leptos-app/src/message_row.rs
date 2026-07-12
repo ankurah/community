@@ -126,6 +126,25 @@ pub fn MessageRow(
     let message_for_text = message.clone();
     let message_for_edited = message.clone();
     let message_for_xray = message.clone();
+    // X-ray: the message itself is the inspect target — no per-message id
+    // chrome; a distinct hover treatment (CSS) marks the mode instead.
+    let xray_click_id = message.id();
+    let handle_xray_click = move |e: MouseEvent| {
+        if !crate::xray::state().enabled.get_untracked() {
+            return;
+        }
+        // Inner interactive elements (menu trigger, reactions, links) keep
+        // their own behavior.
+        if let Some(target) = e.target() {
+            if let Ok(el) = target.dyn_into::<web_sys::Element>() {
+                if el.closest("button, a").ok().flatten().is_some() {
+                    return;
+                }
+            }
+        }
+        use ankurah::View as _;
+        crate::xray::state().open_inspector(MessageView::collection(), xray_click_id.clone());
+    };
     let message_for_bar = message.clone();
     // This row's reaction chips, from the shared per-message map (#14).
     let chips = Signal::derive({
@@ -244,11 +263,22 @@ pub fn MessageRow(
                         if is_deleted_for_class() {
                             classes.push("tombstone");
                         }
+                        if crate::xray::state().enabled.get() {
+                            use ankurah::View as _;
+                            classes.push("xrayInspectable");
+                            // Track the entity so head changes re-evaluate the
+                            // concurrency tint (only while x-ray is on).
+                            message_for_xray.track();
+                            if message_for_xray.entity().head().len() > 1 {
+                                classes.push("xrayConcurrent");
+                            }
+                        }
                         classes.join(" ")
                     }
                     data-msg-id=message_id.clone()
                     title=stamp
                     on:contextmenu=handle_context_menu
+                    on:click=handle_xray_click
                 >
                     <Show
                         when={
@@ -258,11 +288,9 @@ pub fn MessageRow(
                         fallback={
                             let message_for_text = message_for_text.clone();
                             let message_for_edited = message_for_edited.clone();
-                            let message_for_xray = message_for_xray.clone();
                             move || {
                                 let message_for_text = message_for_text.clone();
                                 let message_for_edited = message_for_edited.clone();
-                                let message_for_xray = message_for_xray.clone();
                                 view! {
                                     // Reactive read: CRDT text edits (local or remote)
                                     // re-render the bubble; markdown parses only when
@@ -288,49 +316,6 @@ pub fn MessageRow(
                                                         </span>
                                                     }
                                                 })
-                                        }}
-                                        // L0 X-ray chip: this message's head clock;
-                                        // amber when concurrent heads exist. Renders
-                                        // only while X-ray mode is on (zero cost off).
-                                        {move || {
-                                            crate::xray::state().enabled.get().then(|| {
-                                                use ankurah::View as _;
-                                                // Register the entity broadcast with the render
-                                                // effect so head changes re-render the chip.
-                                                // Inside the .then() ⇒ tracked only while x-ray
-                                                // is on (zero cost when off).
-                                                message_for_xray.track();
-                                                let head = message_for_xray.entity().head();
-                                                let concurrent = head.len() > 1;
-                                                let short = head.to_base64_short();
-                                                let msg_id = message_for_xray.id();
-                                                // The identifier lives in the tooltip, not the
-                                                // bubble: a raw short-id on every message is
-                                                // noise even in x-ray mode (product feedback).
-                                                let tip = format!(
-                                                    "Event head {short}{} — click to inspect (X-ray)",
-                                                    if concurrent { " · concurrent heads" } else { "" }
-                                                );
-                                                view! {
-                                                    <button
-                                                        type="button"
-                                                        class=if concurrent {
-                                                            "xrayChip xrayMono xrayHeadConcurrent"
-                                                        } else {
-                                                            "xrayChip xrayMono"
-                                                        }
-                                                        title=tip
-                                                        aria-label="Inspect event history (X-ray)"
-                                                        on:click=move |_| {
-                                                            use ankurah::View as _;
-                                                            crate::xray::state()
-                                                                .open_inspector(MessageView::collection(), msg_id.clone())
-                                                        }
-                                                    >
-                                                        "⌗"
-                                                    </button>
-                                                }
-                                            })
                                         }}
                                     </div>
                                     <button
