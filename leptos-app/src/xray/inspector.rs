@@ -40,6 +40,10 @@ struct History {
     fetched: usize,
     /// Parent ids that could not be retrieved (offline / policy / cap).
     unresolved: usize,
+    /// The entity's current materialized property values (name, value) — the
+    /// present state, distinct from any single event's operations. Empty for
+    /// collections the inspector doesn't have a typed view for.
+    current_state: Vec<(String, String)>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -98,6 +102,9 @@ async fn fetch_history(target: InspectTarget, cancelled: Arc<AtomicBool>) -> Pha
     // (c) the deleted-message gate.
     let mut head: Option<Clock> = None;
     let mut lww_current: HashMap<EventId, Vec<String>> = HashMap::new();
+    let mut current_state: Vec<(String, String)> = Vec::new();
+    // Present a missing/errored optional field as an em dash.
+    let dash = || "—".to_string();
 
     // POLICY POSTURE (pending product ruling, raised in community#39 /
     // alongside ankurah#337): `deleted` is an LWW flag, and members can read
@@ -116,6 +123,15 @@ async fn fetch_history(target: InspectTarget, cancelled: Arc<AtomicBool>) -> Pha
                 }
                 head = Some(message.entity().head());
                 collect_lww_provenance(message.entity(), &["user", "room", "timestamp", "deleted"], &mut lww_current);
+                current_state = vec![
+                    ("text".into(), message.text().unwrap_or_default()),
+                    ("user".into(), message.user().map(|r| r.id().to_base64_short()).unwrap_or_else(|_| dash())),
+                    ("room".into(), message.room().map(|r| r.id().to_base64_short()).unwrap_or_else(|_| dash())),
+                    ("timestamp".into(), message.timestamp().map(|t| t.to_string()).unwrap_or_else(|_| dash())),
+                    ("deleted".into(), message.deleted().map(|b| b.to_string()).unwrap_or_else(|_| dash())),
+                    ("edited_at".into(), message.edited_at().ok().flatten().map(|t| t.to_string()).unwrap_or_else(dash)),
+                    ("collaborative".into(), message.collaborative().ok().flatten().map(|b| b.to_string()).unwrap_or_else(dash)),
+                ];
             }
             Err(e) => return Phase::Failed(format!("Could not load entity: {}", e)),
         }
@@ -124,11 +140,20 @@ async fn fetch_history(target: InspectTarget, cancelled: Arc<AtomicBool>) -> Pha
     {
         head = Some(room.entity().head());
         collect_lww_provenance(room.entity(), &["created_by"], &mut lww_current);
+        current_state = vec![
+            ("name".into(), room.name().unwrap_or_default()),
+            ("topic".into(), room.topic().ok().flatten().unwrap_or_else(dash)),
+            ("created_by".into(), room.created_by().ok().flatten().map(|r| r.id().to_base64_short()).unwrap_or_else(dash)),
+        ];
     } else if collection == UserView::collection()
         && let Ok(user) = ctx().get::<UserView>(entity_id).await
     {
         head = Some(user.entity().head());
         collect_lww_provenance(user.entity(), &["oidc_sub"], &mut lww_current);
+        current_state = vec![
+            ("display_name".into(), user.display_name().unwrap_or_default()),
+            ("oidc_sub".into(), user.oidc_sub().ok().flatten().unwrap_or_else(dash)),
+        ];
     }
 
     let col = match ctx().collection(&collection).await {
@@ -270,7 +295,15 @@ async fn fetch_history(target: InspectTarget, cancelled: Arc<AtomicBool>) -> Pha
         })
         .collect();
 
-    Phase::Ready(History { dag: layout(inputs, &head), head, total, local: local_count, fetched, unresolved })
+    Phase::Ready(History {
+        dag: layout(inputs, &head),
+        head,
+        total,
+        local: local_count,
+        fetched,
+        unresolved,
+        current_state,
+    })
 }
 
 /// Which LWW properties' *current* values each event wrote, via
@@ -315,6 +348,16 @@ pub fn XRayInspector(target: InspectTarget) -> impl IntoView {
         let cancelled = fetch_cancelled.clone();
         spawn_local(async move {
             let result = fetch_history(target, cancelled).await;
+            // On first load, select the newest head tip so the detail pane
+            // opens on the latest change rather than empty. A later refetch
+            // (new events) leaves an existing selection alone.
+            if let Phase::Ready(h) = &result {
+                if selected.get_untracked().is_none() {
+                    if let Some(tip) = h.head.iter().next() {
+                        selected.set(Some(tip.clone()));
+                    }
+                }
+            }
             let _ = phase.try_set(result);
         });
     };
@@ -404,8 +447,20 @@ pub fn XRayInspector(target: InspectTarget) -> impl IntoView {
                         } else {
                             format!("{} events · all local", history.total)
                         };
+                        let current_state = history.current_state.clone();
                         view! {
                             <div class="xrayDrawerBody">
+                                {(!current_state.is_empty()).then(|| view! {
+                                    <section class="xrayCard">
+                                        <h3 class="xrayCardTitle">"Current values"</h3>
+                                        {current_state.into_iter().map(|(k, v)| view! {
+                                            <div class="xrayDetailRow xrayValueRow">
+                                                <span class="xrayMetaLabel">{k}</span>
+                                                <span class="xrayValue">{v}</span>
+                                            </div>
+                                        }).collect_view()}
+                                    </section>
+                                })}
                                 <div class="xrayMetaRow">
                                     <span class="xrayMetaLabel">"head"</span>
                                     <span class="xrayHeadChips" class:xrayHeadConcurrent=concurrent>

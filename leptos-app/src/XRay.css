@@ -101,6 +101,21 @@
   color: var(--text-faint);
 }
 
+.xrayValueRow {
+  align-items: flex-start;
+}
+
+.xrayValue {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
 .xrayStateNote {
   margin: var(--sp-2) 0;
   padding: var(--sp-2) var(--sp-3);
