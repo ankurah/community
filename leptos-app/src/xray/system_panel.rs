@@ -212,7 +212,6 @@ fn NodeCard() -> impl IntoView {
     let node = crate::NODE.get().expect("Node not initialized");
 
     let node_id = node.id;
-    let human = ankurah::proto::human_id::humanize(node_id.to_bytes(), 2);
     let durable = node.durable;
     let policy_ready = crate::AGENT.get().map(JwtAgent::policy_ready).unwrap_or(false);
     let system_ready = node.system.is_system_ready();
@@ -236,7 +235,6 @@ fn NodeCard() -> impl IntoView {
             <div class="xrayDetailRow">
                 <span class="xrayMetaLabel">"node"</span>
                 <span class="xrayMono xraySelectAll" title=node_id.to_base64()>{node_id.to_base64_short()}</span>
-                <span class="xrayHumanName">{format!("“{}”", human)}</span>
             </div>
             <div class="xrayDetailRow">
                 <span class="xrayMetaLabel">"role"</span>
@@ -319,9 +317,6 @@ fn ConnectionCard() -> impl IntoView {
                         list.into_iter()
                             .map(|peer| view! {
                                 <span class="xrayChip xrayMono" title=peer.to_base64()>{peer.to_base64_short()}</span>
-                                <span class="xrayHumanName">
-                                    {format!("“{}”", ankurah::proto::human_id::humanize(peer.to_bytes(), 2))}
-                                </span>
                             })
                             .collect_view()
                             .into_any()

@@ -101,12 +101,6 @@
   color: var(--text-faint);
 }
 
-.xrayHumanName {
-  color: var(--text-2);
-  font-size: var(--fs-sm);
-  font-style: italic;
-}
-
 .xrayStateNote {
   margin: var(--sp-2) 0;
   padding: var(--sp-2) var(--sp-3);
