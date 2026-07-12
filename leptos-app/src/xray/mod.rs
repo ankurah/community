@@ -89,16 +89,14 @@ impl XRayState {
         persist_enabled(on);
     }
 
-    /// Launcher-pill / Alt+X behavior: off → on (panel open); on with panel
-    /// closed → reopen panel; on with panel open → off.
+    /// The header lens / Alt+X master switch: a plain binary on↔off. Enabling
+    /// opens the panel; disabling hides everything (chips, panel, inspector).
+    /// This is deliberately NOT tri-state: the panel's own `×` hides just the
+    /// panel (leaving ambient chips), so the master switch must always be a
+    /// one-press OFF — otherwise closing the panel then toggling would reopen
+    /// it and x-ray could never be switched off in a single action.
     pub fn toggle(&self) {
-        if !self.enabled.get_untracked() {
-            self.set_enabled(true);
-        } else if !self.panel_open.get_untracked() {
-            self.panel_open.set(true);
-        } else {
-            self.set_enabled(false);
-        }
+        self.set_enabled(!self.enabled.get_untracked());
     }
 
     /// Point the L1 drawer at an entity (enables x-ray if it wasn't on).
