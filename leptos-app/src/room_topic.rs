@@ -70,7 +70,12 @@ pub fn RoomTopic(room: RwSignal<Option<RoomView>>) -> impl IntoView {
             ev.prevent_default();
             save();
         }
-        "Escape" => editing.set(false),
+        "Escape" => {
+            // Consumed: cancels the topic edit without also closing an open
+            // header surface (see panels.rs).
+            ev.prevent_default();
+            editing.set(false);
+        }
         _ => {}
     };
 

@@ -60,8 +60,8 @@ pub fn NotificationInbox(
     selected_room: RwSignal<Option<RoomView>>,
     // `Send + Sync` (unlike the other panels' `on_close`) because this one is
     // captured inside `Show`/`For` children, which leptos stores as
-    // thread-safe closures. The header's `move || show_notifications
-    // .set(false)` satisfies it.
+    // thread-safe closures. The header's `move || panels().close()`
+    // satisfies it.
     on_close: impl Fn() + Clone + Send + Sync + 'static,
 ) -> impl IntoView {
     let me = current_user_id();

@@ -389,13 +389,29 @@ pub fn XRayInspector(target: InspectTarget) -> impl IntoView {
     let close_scrim = close;
     let close_button = close;
 
-    // Escape closes the drawer (scrim click and × also work).
-    let esc = window_event_listener(leptos::ev::keydown, move |ev| {
-        if ev.key() == "Escape" {
+    // Escape closes the drawer (scrim click and × also work). Document-level
+    // and CONSUMING (preventDefault): the drawer is the innermost dismissable,
+    // and the header's window-level Escape (panel manager, #58) skips consumed
+    // events — document listeners run before window ones, so one press closes
+    // only the drawer and a second closes an open surface. A window listener
+    // here would run after the header's (registration order: the header mounts
+    // first) and one press would close both layers.
+    let key_closure = wasm_bindgen::closure::Closure::wrap(Box::new(move |e: web_sys::KeyboardEvent| {
+        if e.key() == "Escape" && !e.default_prevented() {
+            e.prevent_default();
             state().inspect.set(None);
         }
+    }) as Box<dyn FnMut(_)>);
+    if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
+        let _ = doc.add_event_listener_with_callback("keydown", key_closure.as_ref().unchecked_ref());
+    }
+    let key_closure = send_wrapper::SendWrapper::new(key_closure);
+    on_cleanup(move || {
+        let key_closure = key_closure.take();
+        if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
+            let _ = doc.remove_event_listener_with_callback("keydown", key_closure.as_ref().unchecked_ref());
+        }
     });
-    on_cleanup(move || esc.remove());
 
     let collection_label = target.collection.to_string();
     let id_full = target.entity_id.to_base64();
