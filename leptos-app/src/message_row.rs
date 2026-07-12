@@ -174,6 +174,7 @@ pub fn MessageRow(
     let avatar_hue = fmt::hue_class(&author_user_id);
     let author_for_avatar = author.clone();
     let author_for_name = author.clone();
+    let author_for_menu = author.clone();
     let message_for_tomb = message.clone();
 
     view! {
@@ -411,6 +412,7 @@ pub fn MessageRow(
                 }>
                     {
                         let message = message.clone();
+                        let author_for_menu = author_for_menu.clone();
                         move || {
                             context_menu.get().map(|(x, y)| {
                                 view! {
@@ -420,6 +422,11 @@ pub fn MessageRow(
                                         message=message.clone()
                                         editing_message=editing_message
                                         is_own=is_own_message
+                                        // Resolved at open time, for the reply quote (#23).
+                                        author_name=author_for_menu()
+                                            .map(|u| u.display_name().unwrap_or_default())
+                                            .filter(|n| !n.is_empty())
+                                            .unwrap_or_else(|| "Unknown".to_string())
                                         on_close=move || {
                                             context_menu.set(None);
                                             // Keyboard path: hand focus back to the trigger.

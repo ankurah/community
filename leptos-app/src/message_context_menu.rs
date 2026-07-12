@@ -8,10 +8,10 @@ use community_model::{MessageView, ModAction};
 
 use crate::ctx;
 
-/// Context menu for message actions: react (everyone), edit (author, or
-/// anyone on a collaborative message — #38), the author's collaborative
-/// toggle, delete (author or moderator). Opens on right-click or the row's
-/// "⋯" trigger, on any non-tombstone message.
+/// Context menu for message actions: react and reply (everyone), edit
+/// (author, or anyone on a collaborative message — #38), the author's
+/// collaborative toggle, delete (author or moderator). Opens on right-click
+/// or the row's "⋯" trigger, on any non-tombstone message.
 #[component]
 pub fn MessageContextMenu(
     x: i32,
@@ -21,6 +21,9 @@ pub fn MessageContextMenu(
     /// Whether the message belongs to the viewer (gates Edit; Delete also
     /// opens to moderators).
     is_own: bool,
+    /// Resolved display name of the message's author, for the reply quote
+    /// (#23). Resolved by the row at open time — the menu has no users query.
+    author_name: String,
     on_close: impl Fn() + Clone + 'static,
 ) -> impl IntoView {
     // UI gating only — the server enforces the write policy.
@@ -187,6 +190,21 @@ pub fn MessageContextMenu(
         }
     };
 
+    // Reply (#23), v1 text convention: prefill the composer with an editable
+    // quoted snippet of this message (see message_input::request_reply_prefill).
+    let handle_reply = {
+        let on_close = on_close.clone();
+        let message = message.clone();
+        move |_: LeptosMouseEvent| {
+            crate::message_input::request_reply_prefill(
+                &author_name,
+                &message.text().unwrap_or_default(),
+                editing_message,
+            );
+            on_close();
+        }
+    };
+
     // Author's co-edit toggle (#38): flips `collaborative` between Some(true)
     // and Some(false). Only the author sees this — the write scope would deny
     // a non-author flipping it off anyway (the post-write state must still
@@ -287,11 +305,9 @@ pub fn MessageContextMenu(
             style:top=move || format!("{}px", position.get().1)
             on:keydown=handle_menu_keydown
         >
-            // Quick reactions (#14): the fixed set, for every viewer.
-            <div
-                class=if can_edit || can_delete { "contextMenuReactions withItems" } else { "contextMenuReactions" }
-                role="none"
-            >
+            // Quick reactions (#14): the fixed set, for every viewer. Always
+            // `withItems`: Reply (#23) is offered on every non-tombstone row.
+            <div class="contextMenuReactions withItems" role="none">
                 {crate::reactions::REACTION_EMOJIS
                     .iter()
                     .map(|emoji| {
@@ -313,6 +329,14 @@ pub fn MessageContextMenu(
                     })
                     .collect_view()}
             </div>
+            <button class="contextMenuItem" role="menuitem" on:click=handle_reply>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                    stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <polyline points="9 14 4 9 9 4" />
+                    <path d="M20 20v-7a4 4 0 0 0-4-4H4" />
+                </svg>
+                "Reply"
+            </button>
             {can_edit
                 .then(|| {
                     view! {

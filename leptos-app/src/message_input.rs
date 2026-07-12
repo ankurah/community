@@ -11,6 +11,43 @@ use crate::{ctx, ws_client};
 /// beyond it the textarea scrolls internally instead of eating the timeline.
 const MAX_COMPOSER_HEIGHT: i32 = 192;
 
+/// Reply quotes are clipped to this many characters (#23).
+const REPLY_SNIPPET_MAX: usize = 140;
+
+/// Pending composer prefill (#23 reply). Plain shared state, deliberately NOT
+/// a lazily-created leptos signal: a signal first created inside a context-menu
+/// event handler would be registered under that menu's reactive Owner and
+/// disposed when the menu closes. The requester instead pokes the composer by
+/// re-setting `editing_message` (an unconditional notify), whose effect
+/// consumes this. A module global (not a prop) because the composer is
+/// instantiated in chat.rs, which wave-2 message work does not touch.
+static COMPOSE_PREFILL: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
+
+fn take_compose_prefill() -> Option<String> {
+    COMPOSE_PREFILL.write().ok().and_then(|mut slot| slot.take())
+}
+
+/// Start a reply to `author`'s message (#23, v1 text convention): prefill the
+/// composer with an editable quoted snippet — Slack-style — rather than a
+/// durable reference. A `re: Ref<Message>` model field is a fast-follow; no
+/// Message field stores the referenced id today.
+///
+/// Cancels any in-progress edit: a reply composes a NEW message, and the
+/// `editing_message` write doubles as the composer's wake-up call.
+pub fn request_reply_prefill(author: &str, text: &str, editing_message: RwSignal<Option<MessageView>>) {
+    // Single-line snippet: newlines and runs of whitespace collapse, so the
+    // quote stays one `>` line even when quoting multiline/code messages.
+    let mut snippet: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if snippet.chars().count() > REPLY_SNIPPET_MAX {
+        snippet = snippet.chars().take(REPLY_SNIPPET_MAX).collect::<String>().trim_end().to_string() + "\u{2026}";
+    }
+    let prefill = format!("> **{author}**: {snippet}\n\n");
+    if let Ok(mut slot) = COMPOSE_PREFILL.write() {
+        *slot = Some(prefill);
+    }
+    editing_message.set(None);
+}
+
 /// Fit the composer textarea to its content, up to [`MAX_COMPOSER_HEIGHT`].
 /// Collapse-to-auto first so shrinking works (scrollHeight never shrinks
 /// below the styled height on its own).
@@ -48,13 +85,31 @@ pub fn MessageInput(
     let is_connected = move || connection_status() == "Connected";
     let can_send = move || !message_input.get().trim().is_empty() && is_connected();
 
-    // Mirror the editing message text into the input.
-    Effect::new(move |_| {
-        if let Some(edit_msg) = editing_message.get() {
-            message_input.set(edit_msg.text().unwrap_or_default());
-        } else {
-            message_input.set(String::new());
+    // One effect owns every externally-driven composer fill — the edit mirror
+    // and the reply prefill (#23) — so the two sources cannot clobber each
+    // other across effect runs. `prev` carries the editing-message id from
+    // the previous run: the mirror only fires on an actual edit transition,
+    // and the prefill branch returns the current id so the transition that
+    // delivered it (reply cancels any edit) is not re-mirrored into a clear.
+    Effect::new(move |prev: Option<Option<String>>| {
+        let editing = editing_message.get();
+        let editing_id = editing.as_ref().map(|m| m.id().to_base64());
+
+        if let Some(text) = take_compose_prefill() {
+            message_input.set(text);
+            if let Some(el) = textarea_ref.get_untracked() {
+                let _ = el.focus();
+            }
+            return editing_id;
         }
+
+        if prev.map(|p| p != editing_id).unwrap_or(true) {
+            match &editing {
+                Some(edit_msg) => message_input.set(edit_msg.text().unwrap_or_default()),
+                None => message_input.set(String::new()),
+            }
+        }
+        editing_id
     });
 
     // Refit the textarea after every programmatic content change (edit-mirror
