@@ -64,10 +64,10 @@ cards:
 - **Live event feed** — a running list of changes as they land, newest first.
   Click any row to open that entity in the inspector.
 
-The panel has its own **×** that tucks it away while leaving the per-message
-markers in place — so you can keep the ambient view without the side panel. To
-switch x-ray off completely, press the lens button (or **Alt + X**) again.
+The panel's **×** switches x-ray off, exactly like the lens button and
+**Alt + X** — x-ray is a single mode, so any of them turns the whole thing
+(panel and markers) on or off together.
 
-The whole app stays fully usable while the panel is open — which makes for a fun
+The whole app stays fully usable while x-ray is on — which makes for a fun
 demonstration: watch the **Connection & peers** card narrate a reconnect after a
 network blip, all while the conversation keeps scrolling along beside it.

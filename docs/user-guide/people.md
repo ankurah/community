@@ -2,7 +2,7 @@
 
 ## The members list
 
-The **people** button in the top bar opens the members panel — the full roster
+The **Members** button in the top bar opens the members panel — the full roster
 of everyone in the community. Each row shows a person's avatar, display name,
 and any role badges. A count at the top tells you how many members there are,
 and the list updates live as people join or change their names.
