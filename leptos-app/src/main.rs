@@ -20,6 +20,7 @@ mod chat_debug_header;
 mod editable_text_field;
 mod fmt;
 mod header;
+mod link_preview;
 mod markdown;
 mod members_panel;
 mod message_context_menu;

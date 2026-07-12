@@ -4,7 +4,7 @@ use leptos::prelude::*;
 
 use ankurah::LiveQuery;
 use ankurah_signals::Get as AnkurahGet;
-use community_model::{MessageView, ReactionView, UserView};
+use community_model::{LinkPreviewView, MessageView, ReactionView, UserView};
 
 use crate::fmt;
 use crate::message_row::MessageRow;
@@ -94,6 +94,14 @@ pub fn MessageList(
         }
     });
 
+    // Link previews (#20): one standing LiveQuery for the whole list, same
+    // shape and rationale as the reactions query below — LinkPreview rows are
+    // keyed by url with no room ref, and per-row queries would churn with the
+    // virtual scroller. `ok = false` rows are excluded: the client renders
+    // failed unfurls as plain links, so it never needs them.
+    let link_previews =
+        crate::ctx().query::<LinkPreviewView>("ok = true").expect("failed to create LinkPreviewView LiveQuery");
+
     // Reactions (#14): one standing LiveQuery over active reactions, grouped
     // into render-ready chips per message id. Reaction has no room ref, so a
     // room-scoped predicate is inexpressible; per-row queries would churn
@@ -169,6 +177,7 @@ pub fn MessageList(
                 children={
                     let users = users.clone();
                     let current_user_id = current_user_id.clone();
+                    let link_previews = link_previews.clone();
                     move |row: RowCtx| {
                         view! {
                             <MessageRow
@@ -181,6 +190,7 @@ pub fn MessageList(
                                 day_label=row.day_label
                                 reaction_chips=reaction_chips
                                 mention_names=mention_names
+                                link_previews=link_previews.clone()
                             />
                         }
                     }

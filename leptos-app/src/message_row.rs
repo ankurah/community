@@ -4,11 +4,12 @@ use wasm_bindgen::JsCast;
 
 use ankurah::LiveQuery;
 use ankurah_signals::Get as AnkurahGet;
-use community_model::{MessageView, UserView};
+use community_model::{LinkPreviewView, MessageView, UserView};
 
 use std::collections::HashMap;
 
 use crate::fmt;
+use crate::link_preview::LinkPreviewCard;
 use crate::message_context_menu::MessageContextMenu;
 use crate::profile_popover::ProfilePopover;
 use crate::reactions::{ReactionBar, ReactionChip};
@@ -33,6 +34,9 @@ pub fn MessageRow(
     reaction_chips: Memo<HashMap<String, Vec<ReactionChip>>>,
     /// Mention id → display name (#18; shared, built once in the list).
     mention_names: Memo<HashMap<String, String>>,
+    /// Successful link-preview rows (#20; one shared LiveQuery, see
+    /// message_list.rs). Each row looks its own URLs up by string equality.
+    link_previews: LiveQuery<LinkPreviewView>,
 ) -> impl IntoView {
     let context_menu = RwSignal::new(None::<(i32, i32)>);
 
@@ -149,6 +153,7 @@ pub fn MessageRow(
         crate::xray::state().open_inspector(MessageView::collection(), xray_click_id.clone());
     };
     let message_for_bar = message.clone();
+    let message_for_preview = message.clone();
     // This row's reaction chips, from the shared per-message map (#14).
     let chips = Signal::derive({
         let msg_id = message.id().to_base64();
@@ -385,6 +390,27 @@ pub fn MessageRow(
                         }
                     </Show>
                 </div>
+                // Link preview card (#20): under the bubble (outside it — the
+                // bubble root and its data-msg-id contract stay untouched),
+                // never on tombstones. The component itself decides whether
+                // any of the message's URLs has a preview worth rendering.
+                <Show when={
+                    let is_deleted = is_deleted.clone();
+                    move || !is_deleted()
+                }>
+                    {
+                        let message_for_preview = message_for_preview.clone();
+                        let link_previews = link_previews.clone();
+                        move || {
+                            view! {
+                                <LinkPreviewCard
+                                    message=message_for_preview.clone()
+                                    previews=link_previews.clone()
+                                />
+                            }
+                        }
+                    }
+                </Show>
                 // Reaction chips (#14): under the bubble, never on tombstones.
                 <Show when={
                     let is_deleted = is_deleted.clone();
