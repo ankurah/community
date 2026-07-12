@@ -1,0 +1,230 @@
+/* Notification inbox + preferences (issues #19, #25). Reuses the members-panel
+   modal shell (.membersOverlay/.membersContent/.membersHeader/...) so the app's
+   modals stay visually identical; only the bell badge, row anatomy, and
+   preference controls are specific to notifications. */
+
+/* The bell button's shell comes from the Header.css icon-button group; this
+   only anchors the corner count badge. */
+.notificationButton {
+  position: relative;
+}
+
+/* Unseen count on the bell — same amber language as the room-list unread
+   badge, sized down to sit on a 32px icon button. Hidden entirely at zero
+   (the component renders nothing). */
+.notifBellBadge {
+  position: absolute;
+  top: 1px;
+  right: 1px;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 4px;
+  font-size: 9.5px;
+  font-weight: 750;
+  line-height: 15px;
+  text-align: center;
+  border-radius: var(--r-full);
+  background: var(--unread-bg);
+  color: var(--unread-text);
+  pointer-events: none;
+}
+
+.notificationContent {
+  max-width: 460px;
+}
+
+/* Gear/sliders toggle in the panel header — same quiet treatment as the
+   close button beside it; pressed state marks the preferences view. */
+.notifPrefsButton {
+  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-3);
+  border-radius: var(--r-sm);
+  transition:
+    color var(--t-fast) var(--ease),
+    background-color var(--t-fast) var(--ease);
+}
+
+.notifPrefsButton svg {
+  width: 16px;
+  height: 16px;
+}
+
+.notifPrefsButton:hover {
+  color: var(--text);
+  background-color: var(--surface-3);
+}
+
+.notifPrefsButton[aria-pressed="true"] {
+  color: var(--link);
+  background-color: var(--surface-3);
+}
+
+/* "Mark all as seen" — quiet text action in the panel header. */
+.notifMarkAll {
+  flex-shrink: 0;
+  align-self: center;
+  padding: 5px 10px;
+  font-size: var(--fs-sm);
+  font-weight: 650;
+  white-space: nowrap;
+  color: var(--link);
+  border-radius: var(--r-sm);
+  transition: background-color var(--t-fast) var(--ease);
+}
+
+.notifMarkAll:hover {
+  background-color: var(--surface-2);
+}
+
+/* ---- Inbox rows ------------------------------------------------------- */
+
+.notifList {
+  gap: var(--sp-1);
+}
+
+.notifRow {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-3);
+  padding: 8px var(--sp-2);
+  border-radius: var(--r-md);
+  cursor: pointer;
+  text-align: left;
+  width: 100%;
+}
+
+.notifRow:hover {
+  background: var(--surface-2);
+}
+
+.notifBody {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.notifLine {
+  font-size: var(--fs-md);
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.notifActor {
+  font-weight: 650;
+}
+
+.notifVerb {
+  color: var(--text-2);
+}
+
+.notifRoomName {
+  color: var(--text-2);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.notifWhen {
+  font-size: var(--fs-xs);
+  color: var(--text-faint);
+}
+
+/* Unseen: amber dot on the right edge (same language as the badge); seen rows
+   dim instead — state reads at a glance without relying on color alone. */
+.notifDot {
+  flex-shrink: 0;
+  width: 8px;
+  height: 8px;
+  margin-top: 6px;
+  border-radius: 50%;
+  background: var(--unread-bg);
+}
+
+.notifRowSeen .notifLine {
+  color: var(--text-3);
+}
+
+.notifRowSeen .notifActor {
+  font-weight: 600;
+}
+
+.notifRowSeen .memberAvatar {
+  opacity: 0.75;
+}
+
+/* ---- Preferences view -------------------------------------------------- */
+
+.notifPrefs {
+  gap: 2px;
+}
+
+.notifPrefRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  padding: 8px var(--sp-2);
+  border-radius: var(--r-md);
+  font-size: var(--fs-md);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.notifPrefRow:hover {
+  background: var(--surface-2);
+}
+
+.notifPrefRow:has(input:disabled) {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.notifPrefLabel {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow-wrap: anywhere;
+}
+
+.notifPrefHint {
+  font-size: var(--fs-sm);
+  color: var(--text-3);
+}
+
+.notifPrefRoomHash {
+  display: inline;
+  color: var(--text-3);
+  font-weight: 650;
+}
+
+/* Native checkbox, tinted to the theme (color-scheme handles the dark form
+   control chrome; accent-color keeps the check evergreen in both). */
+.notifPrefRow input[type="checkbox"] {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--primary);
+  cursor: pointer;
+}
+
+.notifPrefRow input[type="checkbox"]:disabled {
+  cursor: default;
+}
+
+/* Muted-rooms section heading — sidebar-title voice, panel-surface colors. */
+.notifPrefsSection {
+  margin-top: var(--sp-3);
+  padding: 0 var(--sp-2);
+  font-size: var(--fs-xs);
+  font-weight: 750;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--text-3);
+}

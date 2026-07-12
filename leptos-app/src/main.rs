@@ -27,6 +27,7 @@ mod message_input;
 mod message_list;
 mod message_row;
 mod mod_log_panel;
+mod notification_inbox;
 mod notification_manager;
 mod profile_popover;
 mod qr_code_modal;

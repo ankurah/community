@@ -5,18 +5,26 @@ use ankurah_signals::Get as AnkurahGet;
 use community_model::{RoomView, UserView};
 
 use crate::{
-    ctx, editable_text_field::EditableTextField, fmt, members_panel::MembersPanel, mod_log_panel::ModLogPanel,
-    qr_code_modal::QRCodeModal, room_topic::RoomTopic, ws_client,
+    ctx,
+    editable_text_field::EditableTextField,
+    fmt,
+    members_panel::MembersPanel,
+    mod_log_panel::ModLogPanel,
+    notification_inbox::{NotificationBadge, NotificationInbox},
+    qr_code_modal::QRCodeModal,
+    room_topic::RoomTopic,
+    ws_client,
 };
 
 /// Header component displaying app title, the current room's topic, user
-/// info, connection status, and the members / mod log / QR code / sign-out
-/// buttons.
+/// info, connection status, and the members / mod log / notifications / QR
+/// code / sign-out buttons.
 #[component]
 pub fn Header(current_user: RwSignal<Option<UserView>>, selected_room: RwSignal<Option<RoomView>>) -> impl IntoView {
     let show_qr_code = RwSignal::new(false);
     let show_members = RwSignal::new(false);
     let show_mod_log = RwSignal::new(false);
+    let show_notifications = RwSignal::new(false);
 
     // Live connection state from the WebSocket client. Reading the reactive
     // `Read<ConnectionState>` under the ReactiveGraphObserver re-renders on change.
@@ -126,6 +134,19 @@ pub fn Header(current_user: RwSignal<Option<UserView>>, selected_room: RwSignal<
                         </svg>
                     </button>
                     <button
+                        class="notificationButton"
+                        on:click=move |_| show_notifications.set(true)
+                        title="Notifications"
+                    >
+                        // Bell — your inbox of mentions, with an unseen-count badge.
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                            stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                            <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" />
+                            <path d="M13.73 21a2 2 0 0 1-3.46 0" />
+                        </svg>
+                        <NotificationBadge />
+                    </button>
+                    <button
                         class="xrayButton"
                         on:click=move |_| crate::xray::state().toggle()
                         title="X-ray mode"
@@ -187,6 +208,9 @@ pub fn Header(current_user: RwSignal<Option<UserView>>, selected_room: RwSignal<
             </Show>
             <Show when=move || show_mod_log.get()>
                 <ModLogPanel on_close=move || show_mod_log.set(false) />
+            </Show>
+            <Show when=move || show_notifications.get()>
+                <NotificationInbox selected_room on_close=move || show_notifications.set(false) />
             </Show>
         </>
     }
