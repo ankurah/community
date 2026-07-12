@@ -25,8 +25,9 @@ A few sensible rules keep things tidy and safe:
 
 - **Links** open in a new tab. Only ordinary web links (`http` and `https`)
   become clickable; anything else is shown as plain text.
-- **Code blocks** — text fenced in triple backticks (```` ``` ````) — render as
-  a distinct monospaced block, handy for sharing snippets.
+- **Code blocks** — content fenced in triple backticks (```` ``` ````) —
+  render as a distinct monospaced block, alongside the `` `inline code` `` in
+  the table above.
 - **Headings, quotes, and lists** render simply and never swallow your text.
 - **Images aren't loaded** — if a message contains an image link, you see its
   description text instead. This keeps the chat fast and private.

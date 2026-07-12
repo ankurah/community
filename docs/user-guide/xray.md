@@ -15,12 +15,14 @@ screen up to date. X-ray isn't a simulation; it's the actual machinery.
 
 ## Turning it on
 
-- Click the **magnifier** button in the top bar. Click it again to turn it off.
-- Or press **Alt + X** from anywhere.
+The **magnifier** button in the top bar is a simple on/off switch — press it
+once to turn x-ray on, and again to turn it fully off. **Alt + X** does the same
+from anywhere.
 
-Community remembers your choice, so x-ray stays on across reloads until you turn
-it off. A link ending in `?xray=1` opens straight into x-ray, which is handy for
-showing someone.
+Turning x-ray on opens the system panel and adds a marker to every message;
+turning it off clears both. Community remembers your choice, so x-ray stays on
+across reloads until you switch it off, and a link ending in `?xray=1` opens
+straight into it — handy for showing someone.
 
 ## The three layers
 
@@ -61,6 +63,10 @@ cards:
   arrive.
 - **Live event feed** — a running list of changes as they land, newest first.
   Click any row to open that entity in the inspector.
+
+The panel has its own **×** that tucks it away while leaving the per-message
+markers in place — so you can keep the ambient view without the side panel. To
+switch x-ray off completely, press the lens button (or **Alt + X**) again.
 
 The whole app stays fully usable while the panel is open — which makes for a fun
 demonstration: watch the **Connection & peers** card narrate a reconnect after a
