@@ -6,6 +6,8 @@ live over WebSockets with a Rust durable node backed by Postgres.
 
 Deployed at **community.ankurah.org**.
 
+Using the app? See the [user guide](docs/user-guide/) for how to sign in, chat, moderate, and use X-ray mode.
+
 ## Features
 
 - Real-time message sync across all connected clients
