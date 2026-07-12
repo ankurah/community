@@ -180,11 +180,6 @@
   background: var(--surface-2);
 }
 
-.notifPrefRow:has(input:disabled) {
-  cursor: default;
-  opacity: 0.6;
-}
-
 .notifPrefLabel {
   min-width: 0;
   display: flex;
@@ -198,7 +193,6 @@
 }
 
 .notifPrefRoomHash {
-  display: inline;
   color: var(--text-3);
   font-weight: 650;
 }
@@ -212,10 +206,6 @@
   margin: 0;
   accent-color: var(--primary);
   cursor: pointer;
-}
-
-.notifPrefRow input[type="checkbox"]:disabled {
-  cursor: default;
 }
 
 /* Muted-rooms section heading — sidebar-title voice, panel-surface colors. */
