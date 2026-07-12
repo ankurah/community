@@ -31,6 +31,8 @@ pub fn MessageRow(
     /// Render-ready reaction chips per message id (shared, built once in the
     /// list — see message_list.rs).
     reaction_chips: Memo<HashMap<String, Vec<ReactionChip>>>,
+    /// Mention id → display name (#18; shared, built once in the list).
+    mention_names: Memo<HashMap<String, String>>,
 ) -> impl IntoView {
     let context_menu = RwSignal::new(None::<(i32, i32)>);
 
@@ -297,13 +299,16 @@ pub fn MessageRow(
                                 let message_for_collab = message_for_collab.clone();
                                 view! {
                                     // Reactive read: CRDT text edits (local or remote)
-                                    // re-render the bubble; markdown parses only when
-                                    // the text changes.
+                                    // re-render the bubble; markdown parses when the
+                                    // text — or the mention-name map (#18) — changes.
                                     <div class="messageText">
                                         {move || {
-                                            crate::markdown::render_message(
-                                                &message_for_text.text().unwrap_or_default(),
-                                            )
+                                            mention_names.with(|names| {
+                                                crate::markdown::render_message(
+                                                    &message_for_text.text().unwrap_or_default(),
+                                                    names,
+                                                )
+                                            })
                                         }}
                                         {move || {
                                             message_for_edited

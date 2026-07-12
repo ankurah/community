@@ -76,6 +76,24 @@ pub fn MessageList(
 ) -> impl IntoView {
     let rows = Signal::derive(move || group_rows(&messages.get()));
 
+    // Mention rendering (#18): one id → display-name map shared by every row,
+    // rebuilt when the users list (or any display name — View field reads are
+    // tracked) changes. Rows' text closures read it through `.with`, so a
+    // rename re-renders mentions live without per-row user lookups.
+    let mention_names = Memo::new({
+        let users = users.clone();
+        move |_| {
+            users
+                .get()
+                .iter()
+                .filter_map(|u| {
+                    let name = u.display_name().unwrap_or_default();
+                    (!name.is_empty()).then(|| (u.id().to_base64(), name))
+                })
+                .collect::<HashMap<String, String>>()
+        }
+    });
+
     // Reactions (#14): one standing LiveQuery over active reactions, grouped
     // into render-ready chips per message id. Reaction has no room ref, so a
     // room-scoped predicate is inexpressible; per-row queries would churn
@@ -162,6 +180,7 @@ pub fn MessageList(
                                 last_in_group=row.last_in_group
                                 day_label=row.day_label
                                 reaction_chips=reaction_chips
+                                mention_names=mention_names
                             />
                         }
                     }
