@@ -351,6 +351,7 @@ pub fn MessageInput(
                             deleted: false,
                             edited_at: None,
                             collaborative: None,
+                            re: None,
                         })
                         .await?;
                         trx.commit().await?;

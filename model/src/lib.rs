@@ -87,6 +87,14 @@ pub struct Message {
     /// write must satisfy the scope on the post-write state too, and with
     /// `collaborative` no longer `true` it would not).
     pub collaborative: Option<bool>,
+    /// The message this one replies to (#23, nested replies). `None` for
+    /// ordinary messages, and absent on every pre-reply row — only
+    /// `Option<T>` reads an absent property as `None` (bare types surface
+    /// `PropertyError::Missing`). Rows created with `None` never write the
+    /// property, so queries touching this field must stay equality-only —
+    /// see the `ModAction.message` note. Set at creation, never edited.
+    #[active_type(LWW)]
+    pub re: Option<Ref<Message>>,
 }
 
 /// A user's emoji reaction to a message. One row per (message, user, emoji);
