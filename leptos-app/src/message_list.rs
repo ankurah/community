@@ -73,6 +73,8 @@ pub fn MessageList(
     users: LiveQuery<UserView>,
     current_user_id: Option<String>,
     editing_message: RwSignal<Option<MessageView>>,
+    /// The composer's reply state (#23), armed from the rows' context menus.
+    replying_to: RwSignal<Option<MessageView>>,
 ) -> impl IntoView {
     let rows = Signal::derive(move || group_rows(&messages.get()));
 
@@ -189,6 +191,7 @@ pub fn MessageList(
                                 users=users.clone()
                                 current_user_id=current_user_id.clone()
                                 editing_message=editing_message
+                                replying_to=replying_to
                                 first_in_group=row.first_in_group
                                 last_in_group=row.last_in_group
                                 day_label=row.day_label

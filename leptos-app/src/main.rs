@@ -23,6 +23,7 @@ mod header;
 mod link_preview;
 mod markdown;
 mod members_panel;
+mod mentions;
 mod message_context_menu;
 mod message_input;
 mod message_list;

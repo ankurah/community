@@ -1,5 +1,6 @@
 use leptos::html::Textarea;
 use leptos::prelude::*;
+use std::collections::HashMap;
 use web_sys::KeyboardEvent;
 
 use ankurah_signals::Get as AnkurahGet;
@@ -10,59 +11,6 @@ use crate::{ctx, fmt, ws_client};
 /// Cap on the auto-grown composer height (#50) — roughly eight lines of text;
 /// beyond it the textarea scrolls internally instead of eating the timeline.
 const MAX_COMPOSER_HEIGHT: i32 = 192;
-
-/// Reply quotes are clipped to this many characters (#23).
-const REPLY_SNIPPET_MAX: usize = 140;
-
-/// Pending composer prefill (#23 reply). Plain shared state, deliberately NOT
-/// a lazily-created leptos signal: a signal first created inside a context-menu
-/// event handler would be registered under that menu's reactive Owner and
-/// disposed when the menu closes. The requester instead pokes the composer by
-/// re-setting `editing_message` (an unconditional notify), whose effect
-/// consumes this. A module global (not a prop) because the composer is
-/// instantiated in chat.rs, which wave-2 message work does not touch.
-static COMPOSE_PREFILL: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
-
-fn take_compose_prefill() -> Option<String> { COMPOSE_PREFILL.write().ok().and_then(|mut slot| slot.take()) }
-
-/// Replace mention tokens with plain `@DisplayName` text for human-editable
-/// contexts — the reply quote. Raw `<@…>` tokens in a quote would (a) show
-/// base64 gibberish in the composer and (b) re-notify everyone mentioned in
-/// the ORIGINAL message when the reply sends, because the server scans the
-/// new message's text with the same parser. Plain `@name` text does neither.
-pub fn resolve_mention_tokens(text: &str, names: &std::collections::HashMap<String, String>) -> String {
-    let mut out = text.to_string();
-    for id in community_model::parse_mentions(text) {
-        let name = names.get(&id).cloned().filter(|n| !n.is_empty()).unwrap_or_else(|| "unknown".to_string());
-        out = out.replace(&format!("<@{id}>"), &format!("@{name}"));
-    }
-    out
-}
-
-/// Start a reply to `author`'s message (#23, v1 text convention): prefill the
-/// composer with an editable quoted snippet — Slack-style — rather than a
-/// durable reference. A `re: Ref<Message>` model field is a fast-follow; no
-/// Message field stores the referenced id today.
-///
-/// `text` should already have mention tokens resolved to plain names
-/// ([`resolve_mention_tokens`]) — the caller holds the name map, this module
-/// does not.
-///
-/// Cancels any in-progress edit: a reply composes a NEW message, and the
-/// `editing_message` write doubles as the composer's wake-up call.
-pub fn request_reply_prefill(author: &str, text: &str, editing_message: RwSignal<Option<MessageView>>) {
-    // Single-line snippet: newlines and runs of whitespace collapse, so the
-    // quote stays one `>` line even when quoting multiline/code messages.
-    let mut snippet: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if snippet.chars().count() > REPLY_SNIPPET_MAX {
-        snippet = snippet.chars().take(REPLY_SNIPPET_MAX).collect::<String>().trim_end().to_string() + "\u{2026}";
-    }
-    let prefill = format!("> **{author}**: {snippet}\n\n");
-    if let Ok(mut slot) = COMPOSE_PREFILL.write() {
-        *slot = Some(prefill);
-    }
-    editing_message.set(None);
-}
 
 /// Fit the composer textarea to its content, up to [`MAX_COMPOSER_HEIGHT`].
 /// Collapse-to-auto first so shrinking works (scrollHeight never shrinks
@@ -154,14 +102,20 @@ fn mention_candidates(users: &[UserView], query: &str) -> Vec<UserView> {
 
 /// Message input component for sending and editing messages.
 /// The composer is a multiline textarea (#50): Enter sends, Shift+Enter
-/// inserts a newline, Escape cancels an edit, and Cmd/Ctrl+Up/Down navigates
-/// the viewer's own messages for editing. Typing `@` opens the mention
-/// autocomplete (#18).
+/// inserts a newline, Escape cancels an edit (or an armed reply), and
+/// Cmd/Ctrl+Up/Down navigates the viewer's own messages for editing. Typing
+/// `@` opens the mention autocomplete (#18). While a reply is armed (#23) a
+/// "Replying to …" chip sits above the input; sending attaches the referenced
+/// message as `re`.
 #[component]
 pub fn MessageInput(
     room: RoomView,
     current_user: Option<UserView>,
     editing_message: RwSignal<Option<MessageView>>,
+    /// The message the next send replies to (#23), armed by the context
+    /// menu's Reply. Independent of the draft text: arming, canceling, or
+    /// sending a reply never rewrites what the user has typed.
+    replying_to: RwSignal<Option<MessageView>>,
     /// Current visible messages (oldest-first), used for Cmd/Ctrl+Up/Down navigation.
     #[prop(into)] messages: Signal<Vec<MessageView>>,
 ) -> impl IntoView {
@@ -185,6 +139,23 @@ pub fn MessageInput(
         move || match mention_draft.get() {
             Some(draft) => mention_candidates(&mention_users.get(), &draft.query),
             None => Vec::new(),
+        }
+    });
+
+    // id → display-name map for the reply chip (#23): the author line and
+    // token resolution in the snippet. Rebuilt live (renames included) from
+    // the same users query the mention popup holds.
+    let member_names = Memo::new({
+        let users = mention_users.clone();
+        move |_| {
+            users
+                .get()
+                .iter()
+                .filter_map(|u| {
+                    let name = u.display_name().unwrap_or_default();
+                    (!name.is_empty()).then(|| (u.id().to_base64(), name))
+                })
+                .collect::<HashMap<String, String>>()
         }
     });
 
@@ -236,48 +207,36 @@ pub fn MessageInput(
         });
     };
 
-    // One effect owns every externally-driven composer fill — the edit mirror
-    // and the reply prefill (#23) — so the two sources cannot clobber each
-    // other across effect runs. `prev` carries the editing-message id from
-    // the previous run: the mirror only fires on an actual edit transition,
-    // and the prefill branch returns the current id so the transition that
-    // delivered it (reply cancels any edit) is not re-mirrored into a clear.
+    // Mirror the edit target into the composer. `prev` carries the previous
+    // run's editing id, so only actual transitions rewrite the draft (signal
+    // re-notifications must never clobber typing). Entering an edit also
+    // disarms a pending reply (#23): send() would EDIT, not create, so a
+    // lingering chip would promise a `re` that never attaches. The reverse
+    // (Reply canceling an edit) is handled at the Reply action itself.
     Effect::new(move |prev: Option<Option<String>>| {
         let editing = editing_message.get();
         let editing_id = editing.as_ref().map(|m| m.id().to_base64());
-
-        if let Some(text) = take_compose_prefill() {
-            mention_draft.set(None);
-            if prev.flatten().is_some() {
-                // The composer held an edit mirror; the reply cancelled that
-                // edit (documented in request_reply_prefill), so the mirror
-                // must not survive into the new message.
-                message_input.set(text);
-            } else {
-                // The composer holds an unsent draft (possibly empty):
-                // replying must not destroy it — quote on top, draft below.
-                message_input.update(|draft| {
-                    if draft.trim().is_empty() {
-                        *draft = text;
-                    } else {
-                        *draft = format!("{text}{draft}");
-                    }
-                });
-            }
-            if let Some(el) = textarea_ref.get_untracked() {
-                let _ = el.focus();
-            }
-            return editing_id;
-        }
-
         if prev.map(|p| p != editing_id).unwrap_or(true) {
             mention_draft.set(None); // programmatic fill invalidates any draft anchor
             match &editing {
-                Some(edit_msg) => message_input.set(edit_msg.text().unwrap_or_default()),
+                Some(edit_msg) => {
+                    replying_to.set(None);
+                    message_input.set(edit_msg.text().unwrap_or_default());
+                }
                 None => message_input.set(String::new()),
             }
         }
         editing_id
+    });
+
+    // Arming a reply (#23) focuses the composer — the chip itself is chrome,
+    // and the user's next act is typing.
+    Effect::new(move |_| {
+        if replying_to.get().is_some() {
+            if let Some(el) = textarea_ref.get_untracked() {
+                let _ = el.focus();
+            }
+        }
     });
 
     // Refit the textarea after every programmatic content change (edit-mirror
@@ -332,13 +291,18 @@ pub fn MessageInput(
                     }
                 });
             } else {
-                // Create a new message. ankurah stores user/room as typed Refs.
+                // Create a new message. ankurah stores user/room as typed Refs;
+                // an armed reply (#23) rides along as `re`.
                 let user_ref = ankurah::Ref::from(&user);
                 let room_ref = ankurah::Ref::from(&room);
                 let input_text = input_text.trim().to_string();
+                let reply_to = replying_to.get_untracked();
+                let re = reply_to.as_ref().map(ankurah::Ref::from);
                 // Clear synchronously: clearing only in the async completion
                 // left a window where a second Enter re-sent the same text.
+                // The reply chip clears with it — this send owns it now.
                 message_input.set(String::new());
+                replying_to.set(None);
                 wasm_bindgen_futures::spawn_local(async move {
                     let result = async {
                         let trx = ctx().begin();
@@ -351,7 +315,7 @@ pub fn MessageInput(
                             deleted: false,
                             edited_at: None,
                             collaborative: None,
-                            re: None,
+                            re,
                         })
                         .await?;
                         trx.commit().await?;
@@ -361,7 +325,8 @@ pub fn MessageInput(
                     if let Err(e) = result {
                         tracing::error!("Failed to send message: {}", e);
                         // Put the failed text back — above anything typed since,
-                        // never over it.
+                        // never over it — and re-arm the reply unless a new one
+                        // was chosen meanwhile.
                         message_input.update(|current| {
                             if current.trim().is_empty() {
                                 *current = input_text;
@@ -369,6 +334,9 @@ pub fn MessageInput(
                                 *current = format!("{input_text}\n{current}");
                             }
                         });
+                        if replying_to.get_untracked().is_none() {
+                            replying_to.set(reply_to);
+                        }
                     }
                 });
             }
@@ -474,6 +442,12 @@ pub fn MessageInput(
                 e.prevent_default();
                 editing_message.set(None);
                 message_input.set(String::new());
+            } else if e.key() == "Escape" && replying_to.get().is_some() {
+                // Cancel the armed reply (#23); the draft text is untouched.
+                // preventDefault keeps the window-level Escape (panel manager)
+                // from also acting on this press.
+                e.prevent_default();
+                replying_to.set(None);
             } else if e.key() == "ArrowUp" && (e.meta_key() || e.ctrl_key()) {
                 e.prevent_default();
                 navigate_own(true);
@@ -535,6 +509,48 @@ pub fn MessageInput(
                             .collect_view()
                     }}
                 </div>
+            </Show>
+            // Reply chip (#23): compact "Replying to …" state above the input.
+            // Live reads: a rename, edit, or delete of the original while the
+            // chip is up re-renders it (a deleted original still sends — `re`
+            // points at the tombstone, which the preview renders honestly).
+            <Show when=move || replying_to.get().is_some()>
+                {move || {
+                    replying_to
+                        .get()
+                        .map(|orig| {
+                            let author_id = orig.user().map(|r| r.id().to_base64()).unwrap_or_default();
+                            let author = member_names
+                                .with(|names| names.get(&author_id).cloned())
+                                .filter(|n| !n.is_empty())
+                                .unwrap_or_else(|| "Unknown".to_string());
+                            let snippet = if orig.deleted().unwrap_or(false) {
+                                "Removed message".to_string()
+                            } else {
+                                member_names
+                                    .with(|names| crate::mentions::reply_snippet(&orig.text().unwrap_or_default(), names))
+                            };
+                            view! {
+                                <div class="replyingNotice">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                                        stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                        <polyline points="9 14 4 9 9 4" />
+                                        <path d="M20 20v-7a4 4 0 0 0-4-4H4" />
+                                    </svg>
+                                    <span class="replyingNoticeLabel">"Replying to " {author}</span>
+                                    <span class="replyingNoticeSnippet">{snippet}</span>
+                                    <button
+                                        class="replyingNoticeCancel"
+                                        aria-label="Cancel reply"
+                                        title="Cancel reply"
+                                        on:click=move |_| replying_to.set(None)
+                                    >
+                                        "×"
+                                    </button>
+                                </div>
+                            }
+                        })
+                }}
             </Show>
             <Show when=move || editing_message.get().is_some()>
                 <div class="editingNotice">

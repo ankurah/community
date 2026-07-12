@@ -204,6 +204,90 @@
   cursor: text;
 }
 
+/* Reply preview (#23): compact embed of the original, above the reply body,
+   inside the bubble. A button — clicking jumps to the original when it is
+   rendered in the timeline. */
+
+.replyPreview {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  max-width: 100%;
+  min-width: 0;
+  margin: 0 0 6px;
+  padding: 3px 9px;
+  font-size: var(--fs-sm);
+  text-align: left;
+  color: var(--text-2);
+  background: var(--surface-3);
+  border-left: 3px solid var(--link);
+  border-radius: 7px;
+  cursor: pointer;
+}
+
+.replyPreview:hover {
+  background: var(--surface-2);
+}
+
+.replyPreviewAuthor {
+  flex-shrink: 0;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.replyPreviewSnippet {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.replyPreviewGone {
+  font-style: italic;
+  color: var(--text-3);
+}
+
+/* On the evergreen own-bubble the embed flips to a translucent light chip
+   (the coEditBadge treatment). */
+.messageBubble.ownMessage .replyPreview {
+  color: rgb(242 250 246 / 82%);
+  background: rgb(255 255 255 / 12%);
+  border-left-color: var(--accent);
+}
+
+.messageBubble.ownMessage .replyPreview:hover {
+  background: rgb(255 255 255 / 18%);
+}
+
+.messageBubble.ownMessage .replyPreviewAuthor {
+  color: var(--bubble-own-text);
+}
+
+.messageBubble.ownMessage .replyPreviewGone {
+  color: rgb(242 250 246 / 62%);
+}
+
+/* Jump-to-original wash (#23): plays once; the class is removed afterwards
+   (message_row.rs) so a repeat jump re-triggers it. */
+.messageBubble.replyJumpFlash {
+  animation: replyJumpFlash 1.4s var(--ease) 1;
+}
+
+@keyframes replyJumpFlash {
+  0%,
+  55% {
+    outline: 2px solid var(--unread-bg);
+    outline-offset: 1px;
+    box-shadow: 0 0 0 4px rgb(240 179 87 / 25%);
+  }
+
+  100% {
+    outline: 2px solid transparent;
+    outline-offset: 1px;
+    box-shadow: 0 0 0 4px rgb(240 179 87 / 0%);
+  }
+}
+
 /* Tombstones (#10): deleted rows stay in the timeline, muted, content gone.
    Applies over .ownMessage too — a removed message sheds its bubble color. */
 

@@ -18,16 +18,11 @@ pub fn MessageContextMenu(
     y: i32,
     message: MessageView,
     editing_message: RwSignal<Option<MessageView>>,
+    /// The composer's reply state (#23); Reply arms it with this message.
+    replying_to: RwSignal<Option<MessageView>>,
     /// Whether the message belongs to the viewer (gates Edit; Delete also
     /// opens to moderators).
     is_own: bool,
-    /// Resolved display name of the message's author, for the reply quote
-    /// (#23). Resolved by the row at open time — the menu has no users query.
-    author_name: String,
-    /// Message text with mention tokens already resolved to plain `@names`
-    /// (also by the row at open time — the menu has no name map). Quoting raw
-    /// tokens would re-notify the original mentionees when the reply sends.
-    reply_source: String,
     on_close: impl Fn() + Clone + 'static,
 ) -> impl IntoView {
     // UI gating only — the server enforces the write policy.
@@ -197,12 +192,16 @@ pub fn MessageContextMenu(
         }
     };
 
-    // Reply (#23), v1 text convention: prefill the composer with an editable
-    // quoted snippet of this message (see message_input::request_reply_prefill).
+    // Reply (#23): arm the composer's reply chip with this message. Cancels
+    // any in-progress edit — a reply composes a NEW message — while the
+    // draft text itself survives (the chip is state beside the text, not
+    // text injected into it).
     let handle_reply = {
         let on_close = on_close.clone();
+        let message = message.clone();
         move |_: LeptosMouseEvent| {
-            crate::message_input::request_reply_prefill(&author_name, &reply_source, editing_message);
+            replying_to.set(Some(message.clone()));
+            editing_message.set(None);
             on_close();
         }
     };
