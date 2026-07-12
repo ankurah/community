@@ -160,10 +160,11 @@
   border-color: var(--accent);
 }
 
-/* Icon buttons (members, QR code, mod log, x-ray, account settings) */
+/* Icon buttons (members, QR code, mod log, notifications, x-ray, account settings) */
 .qrButton,
 .membersButton,
 .modLogButton,
+.notificationButton,
 .xrayButton,
 .accountSettingsButton {
   display: flex;
@@ -186,6 +187,7 @@
 .qrButton svg,
 .membersButton svg,
 .modLogButton svg,
+.notificationButton svg,
 .xrayButton svg,
 .accountSettingsButton svg {
   width: 18px;
@@ -195,6 +197,7 @@
 .qrButton:hover,
 .membersButton:hover,
 .modLogButton:hover,
+.notificationButton:hover,
 .xrayButton:hover,
 .accountSettingsButton:hover {
   background: var(--chrome-hover);
@@ -204,6 +207,7 @@
 .qrButton:active,
 .membersButton:active,
 .modLogButton:active,
+.notificationButton:active,
 .xrayButton:active,
 .accountSettingsButton:active {
   background: var(--chrome-active);
