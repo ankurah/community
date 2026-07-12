@@ -54,6 +54,24 @@
     "modaction": {
       "read": "view",
       "write": "moderate"
+    },
+    "notification": {
+      "read": "view",
+      "write": "post",
+      "scope": [
+        { "filter": "recipient = $jwt.sub" }
+      ]
+    },
+    "linkpreview": {
+      "read": "view",
+      "write": "system"
+    },
+    "notificationpref": {
+      "read": "view",
+      "write": "post",
+      "scope": [
+        { "filter": "user = $jwt.sub" }
+      ]
     }
   }
 }

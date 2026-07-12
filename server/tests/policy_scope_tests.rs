@@ -242,7 +242,119 @@ fn model_collection_names_match_policy_keys() {
         community_model::ReadState::collection(),
         community_model::ModAction::collection(),
         community_model::Ban::collection(),
+        community_model::Notification::collection(),
+        community_model::LinkPreview::collection(),
+        community_model::NotificationPref::collection(),
     ] {
         assert!(config.collections.contains_key(collection.as_str()), "policy.json has no entry for collection '{}'", collection.as_str());
     }
+}
+
+/// Build a collection's single self-scope predicate the way the agent does
+/// (same `?` placeholder discipline as [`message_write_predicate`]). The
+/// wave-2 private collections (notification, notificationpref) each carry
+/// exactly one such rule.
+fn self_scope_predicate(collection: &str, caller: EntityId) -> ankurah::ankql::ast::Predicate {
+    let config = policy();
+    let rule = &config.collections[collection].scope[0];
+    let query = rule.filter.replace("$jwt.sub", "?");
+    parse_selection(&query).expect("scope filter parses").predicate.populate([Expr::from(&caller)]).expect("one placeholder, one value")
+}
+
+/// A notification row as the scope evaluator sees it. `recipient` is set at
+/// creation by the fan-out worker, so there is no absent-property path.
+struct FakeNotification {
+    recipient: EntityId,
+}
+
+impl Filterable for FakeNotification {
+    fn collection(&self) -> &str {
+        "notification"
+    }
+    fn value(&self, name: &str) -> Option<Value> {
+        match name {
+            "recipient" => Some(Value::EntityId(self.recipient)),
+            _ => None,
+        }
+    }
+}
+
+/// The inbox is private: a recipient's own rows pass the scope (their inbox
+/// LiveQuery receives them, and their `seen` flip satisfies the write path),
+/// while anyone else's rows fail it.
+#[test]
+fn recipient_passes_notification_scope_others_fail_it() {
+    let me = EntityId::new();
+    let them = EntityId::new();
+    let predicate = self_scope_predicate("notification", me);
+    assert_eq!(evaluate_predicate(&FakeNotification { recipient: me }, &predicate), Ok(true));
+    assert_eq!(evaluate_predicate(&FakeNotification { recipient: them }, &predicate), Ok(false));
+}
+
+/// Pin the shape the fan-out design depends on. Deliberate decision recorded
+/// here: `write` is "post" + self-scope, NOT "system". can_write_collection is
+/// checked BEFORE scope evaluation (ankurah-jwt-auth 0.9.0 check_event), so a
+/// system-only write gate would also block the recipient flipping `seen` on
+/// their own row. The server worker creates rows under Root (is_privileged
+/// bypasses both the gate and the scope); the scoped write means the worst a
+/// client can do is fabricate a notification addressed to ITSELF (the
+/// after-state must satisfy `recipient = $jwt.sub`) — accepted self-spam
+/// trade-off, never cross-user spoofing.
+#[test]
+fn notification_scope_rule_shape_unchanged() {
+    let config = policy();
+    let rules = &config.collections["notification"];
+    assert_eq!(rules.read.as_deref(), Some("view"));
+    assert_eq!(rules.write.as_deref(), Some("post"), "members must hold the write privilege or they cannot flip `seen`");
+    assert!(
+        config.can_write_collection(&["member".to_string()], &"notification".into()),
+        "the member role must pass the notification collection write gate (the seen flip depends on it)"
+    );
+    assert_eq!(rules.scope.len(), 1, "exactly the self-visibility rule — a second rule would AND in and narrow it");
+    let rule = &rules.scope[0];
+    assert_eq!(rule.filter, "recipient = $jwt.sub");
+    assert!(rule.unless_privilege.is_none(), "not even moderators read others' inboxes");
+    assert!(
+        rule.applies_to.applies_to_reads() && rule.applies_to.applies_to_writes(),
+        "notification scope must constrain both reads and writes"
+    );
+}
+
+/// Link previews are a world-readable cache that only the server may write:
+/// `write` is the "system" privilege, which no role holds — a client that
+/// could write linkpreview rows could attach a forged title/image to any URL
+/// it posts (phishing). The unfurl worker writes under Root, which bypasses
+/// the gate entirely.
+#[test]
+fn linkpreview_world_readable_but_no_role_can_write_it() {
+    let config = policy();
+    let rules = &config.collections["linkpreview"];
+    assert_eq!(rules.read.as_deref(), Some("view"), "previews render for every member");
+    assert_eq!(rules.write.as_deref(), Some("system"));
+    assert!(rules.scope.is_empty(), "no row filtering — the cache is public");
+    for role in config.roles.keys() {
+        assert!(
+            !config.can_write_collection(&[role.clone()], &"linkpreview".into()),
+            "role '{role}' can write linkpreview — 'system' must remain a privilege no role holds"
+        );
+    }
+}
+
+/// Notification prefs are fully private, the readstate idiom: both reads and
+/// writes scoped to the owner, no moderator bypass. The fan-out worker reads
+/// them under Root (bypasses scopes) to honor mutes.
+#[test]
+fn notificationpref_rows_are_private_to_their_owner_on_reads_and_writes() {
+    let config = policy();
+    let rules = &config.collections["notificationpref"];
+    assert_eq!(rules.read.as_deref(), Some("view"));
+    assert_eq!(rules.write.as_deref(), Some("post"));
+    assert_eq!(rules.scope.len(), 1);
+    let rule = &rules.scope[0];
+    assert_eq!(rule.filter, "user = $jwt.sub");
+    assert!(rule.unless_privilege.is_none(), "not even moderators read others' notification prefs");
+    assert!(
+        rule.applies_to.applies_to_reads() && rule.applies_to.applies_to_writes(),
+        "notificationpref scope must constrain both reads and writes"
+    );
 }
