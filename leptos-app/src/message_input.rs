@@ -1,3 +1,4 @@
+use leptos::html::Textarea;
 use leptos::prelude::*;
 use web_sys::KeyboardEvent;
 
@@ -6,8 +7,31 @@ use community_model::{Message, MessageView, RoomView, UserView};
 
 use crate::{ctx, ws_client};
 
+/// Cap on the auto-grown composer height (#50) — roughly eight lines of text;
+/// beyond it the textarea scrolls internally instead of eating the timeline.
+const MAX_COMPOSER_HEIGHT: i32 = 192;
+
+/// Fit the composer textarea to its content, up to [`MAX_COMPOSER_HEIGHT`].
+/// Collapse-to-auto first so shrinking works (scrollHeight never shrinks
+/// below the styled height on its own).
+fn autosize(el: &web_sys::HtmlTextAreaElement) {
+    // Fully qualified: leptos' `ElementExt::style` extension shadows the
+    // web_sys inherent getter in this scope.
+    let style = web_sys::HtmlElement::style(el);
+    let _ = style.set_property("height", "auto");
+    // scrollHeight covers content + padding; the element is border-box, so
+    // add the border (offset − client) to avoid a 2px internal scroll.
+    let border = el.offset_height() - el.client_height();
+    let content = el.scroll_height() + border;
+    let clamped = content.min(MAX_COMPOSER_HEIGHT);
+    let _ = style.set_property("height", &format!("{clamped}px"));
+    let _ = style.set_property("overflow-y", if content > MAX_COMPOSER_HEIGHT { "auto" } else { "hidden" });
+}
+
 /// Message input component for sending and editing messages.
-/// Handles Enter to send, Escape to cancel edit, Cmd/Ctrl+Up/Down to navigate own messages.
+/// The composer is a multiline textarea (#50): Enter sends, Shift+Enter
+/// inserts a newline, Escape cancels an edit, and Cmd/Ctrl+Up/Down navigates
+/// the viewer's own messages for editing.
 #[component]
 pub fn MessageInput(
     room: RoomView,
@@ -17,6 +41,7 @@ pub fn MessageInput(
     #[prop(into)] messages: Signal<Vec<MessageView>>,
 ) -> impl IntoView {
     let message_input = RwSignal::new(String::new());
+    let textarea_ref = NodeRef::<Textarea>::new();
 
     // Live connection state from the WebSocket client (reactive via the observer bridge).
     let connection_status = move || ws_client().connection_state().get().to_string();
@@ -29,6 +54,17 @@ pub fn MessageInput(
             message_input.set(edit_msg.text().unwrap_or_default());
         } else {
             message_input.set(String::new());
+        }
+    });
+
+    // Refit the textarea after every programmatic content change (edit-mirror
+    // fill, clear-after-send). Effects run after the render effect has pushed
+    // the new value into the DOM, so scrollHeight is current. Typing is
+    // covered separately by the on:input handler for zero-lag growth.
+    Effect::new(move |_| {
+        let _ = message_input.get();
+        if let Some(el) = textarea_ref.get_untracked() {
+            autosize(&el);
         }
     });
 
@@ -153,7 +189,10 @@ pub fn MessageInput(
     let handle_key_down = {
         let send = send.clone();
         move |e: KeyboardEvent| {
-            if e.key() == "Enter" && !e.shift_key() {
+            // Enter sends; Shift+Enter falls through to the textarea's native
+            // newline (#50). An Enter that confirms an IME composition
+            // (isComposing) must not send the message.
+            if e.key() == "Enter" && !e.shift_key() && !e.is_composing() {
                 e.prevent_default();
                 send();
             } else if e.key() == "Escape" && editing_message.get().is_some() {
@@ -187,15 +226,24 @@ pub fn MessageInput(
                 </div>
             </Show>
             <div class="inputRow">
-                <input
-                    type="text"
+                // Multiline composer (#50). Keeps class="input" + the same
+                // placeholder: e2e locates it by `.input[placeholder=...]`.
+                <textarea
+                    node_ref=textarea_ref
                     class="input"
                     placeholder="Type a message..."
+                    rows="1"
+                    aria-label="Message"
                     prop:value=move || message_input.get()
-                    on:input=move |ev| message_input.set(event_target_value(&ev))
+                    on:input=move |ev| {
+                        message_input.set(event_target_value(&ev));
+                        if let Some(el) = textarea_ref.get_untracked() {
+                            autosize(&el);
+                        }
+                    }
                     on:keydown=handle_key_down
                     prop:disabled=move || !is_connected()
-                />
+                ></textarea>
                 <Show when=move || editing_message.get().is_some()>
                     <button
                         class="button buttonGhost"

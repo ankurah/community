@@ -48,20 +48,28 @@
 .inputRow {
   display: flex;
   gap: var(--sp-2);
-  align-items: center;
+  /* The composer grows upward (#50); buttons stay pinned to its bottom line. */
+  align-items: flex-end;
 }
 
+/* The composer textarea (#50): collapsed it reads as the original pill;
+   grown it becomes a rounded rect. Height is driven by the autosize JS
+   (message_input.rs); max-height here is defense in depth. */
 .input {
   flex: 1;
   min-width: 0;
-  padding: 11px 18px;
+  padding: 10px 18px;
   font-size: var(--fs-base);
+  line-height: 21px;
   font-family: inherit;
   color: var(--text);
   background-color: var(--surface-2);
   border: 1px solid var(--border);
-  border-radius: var(--r-full);
+  border-radius: 21px;
   outline: none;
+  resize: none;
+  overflow-y: hidden;
+  max-height: 192px; /* keep in sync with MAX_COMPOSER_HEIGHT */
   transition:
     border-color var(--t-fast) var(--ease),
     box-shadow var(--t-fast) var(--ease),
@@ -142,6 +150,7 @@
   .input {
     padding: 10px 14px;
     font-size: 14px;
+    line-height: 20px;
   }
 
   .button {
