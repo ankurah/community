@@ -125,6 +125,7 @@ pub fn MessageRow(
     let message_id = message.id().to_base64();
     let message_for_text = message.clone();
     let message_for_edited = message.clone();
+    let message_for_collab = message.clone();
     let message_for_xray = message.clone();
     // X-ray: the message itself is the inspect target — no per-message id
     // chrome; a distinct hover treatment (CSS) marks the mode instead.
@@ -288,9 +289,11 @@ pub fn MessageRow(
                         fallback={
                             let message_for_text = message_for_text.clone();
                             let message_for_edited = message_for_edited.clone();
+                            let message_for_collab = message_for_collab.clone();
                             move || {
                                 let message_for_text = message_for_text.clone();
                                 let message_for_edited = message_for_edited.clone();
+                                let message_for_collab = message_for_collab.clone();
                                 view! {
                                     // Reactive read: CRDT text edits (local or remote)
                                     // re-render the bubble; markdown parses only when
@@ -313,6 +316,32 @@ pub fn MessageRow(
                                                             title=format!("Edited {}", fmt::full_stamp(ts))
                                                         >
                                                             "(edited)"
+                                                        </span>
+                                                    }
+                                                })
+                                        }}
+                                        // Co-edit indicator (#38): persistent, subtle, and
+                                        // reactive — a remote toggle flips it live. It is
+                                        // the discoverability surface for the "Edit" item
+                                        // other members get on this message.
+                                        {move || {
+                                            message_for_collab
+                                                .collaborative()
+                                                .ok()
+                                                .flatten()
+                                                .unwrap_or(false)
+                                                .then(|| {
+                                                    view! {
+                                                        <span
+                                                            class="coEditBadge"
+                                                            title="Collaborative message — anyone can edit it (right-click for Edit)"
+                                                        >
+                                                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                                                stroke-width="2.4" stroke-linecap="round"
+                                                                stroke-linejoin="round" aria-hidden="true">
+                                                                <path d="M17 3a2.8 2.8 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5z" />
+                                                            </svg>
+                                                            "co-edit"
                                                         </span>
                                                     }
                                                 })
