@@ -40,9 +40,71 @@ pub fn SystemPanel() -> impl IntoView {
     // residue of chips (the dismiss-panel-only half-state read as "stuck on").
     let close = move |_| state().set_enabled(false);
 
+    // Drag-to-move: grab the header to reposition the panel so it's not stuck
+    // over the thing you want to inspect. `pos` None = the default top/right
+    // anchor; Some = a viewport-clamped top-left the drag sets. `grab` holds
+    // the pointer's offset within the panel while a drag is live.
+    let header_ref = NodeRef::<leptos::html::Div>::new();
+    let pos = RwSignal::new(None::<(f64, f64)>);
+    let grab = RwSignal::new(None::<(f64, f64)>);
+
+    let panel_rect = move || {
+        header_ref
+            .get_untracked()
+            .and_then(|h| h.parent_element())
+            .map(|p| p.get_bounding_client_rect())
+    };
+
+    let on_pointer_down = move |ev: web_sys::PointerEvent| {
+        if ev.button() != 0 {
+            return;
+        }
+        // Don't start a drag from the close button.
+        if let Some(t) = ev.target().and_then(|t| t.dyn_into::<web_sys::Element>().ok()) {
+            if t.closest("button").ok().flatten().is_some() {
+                return;
+            }
+        }
+        if let Some(rect) = panel_rect() {
+            grab.set(Some((ev.client_x() as f64 - rect.left(), ev.client_y() as f64 - rect.top())));
+            pos.set(Some((rect.left(), rect.top())));
+            if let Some(h) = header_ref.get_untracked() {
+                let _ = h.set_pointer_capture(ev.pointer_id());
+            }
+        }
+    };
+    let on_pointer_move = move |ev: web_sys::PointerEvent| {
+        let Some((gx, gy)) = grab.get_untracked() else { return };
+        let Some(rect) = panel_rect() else { return };
+        let win = web_sys::window().unwrap();
+        let iw = win.inner_width().ok().and_then(|v| v.as_f64()).unwrap_or(rect.width());
+        let ih = win.inner_height().ok().and_then(|v| v.as_f64()).unwrap_or(rect.height());
+        let x = (ev.client_x() as f64 - gx).clamp(0.0, (iw - rect.width()).max(0.0));
+        let y = (ev.client_y() as f64 - gy).clamp(0.0, (ih - rect.height()).max(0.0));
+        pos.set(Some((x, y)));
+    };
+    let on_pointer_up = move |_ev: web_sys::PointerEvent| grab.set(None);
+    let reset_pos = move |_ev: web_sys::MouseEvent| pos.set(None);
+
+    let panel_style = move || match pos.get() {
+        Some((x, y)) => {
+            format!("left:{x}px;top:{y}px;right:auto;bottom:auto;height:calc(100dvh - 128px);")
+        }
+        None => String::new(),
+    };
+
     view! {
-        <aside class="xrayPanel" role="complementary" aria-label="X-ray system panel">
-            <div class="xrayPanelHeader">
+        <aside class="xrayPanel" role="complementary" aria-label="X-ray system panel" style=panel_style>
+            <div
+                node_ref=header_ref
+                class="xrayPanelHeader"
+                class:xrayPanelHeaderDragging=move || grab.get().is_some()
+                on:pointerdown=on_pointer_down
+                on:pointermove=on_pointer_move
+                on:pointerup=on_pointer_up
+                on:dblclick=reset_pos
+                title="Drag to move · double-click to reset"
+            >
                 <div>
                     <h2 class="xrayTitle">"X-ray"</h2>
                     <p class="xrayPanelSub">"live node internals · Alt+X"</p>

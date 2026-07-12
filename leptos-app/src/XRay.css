@@ -177,6 +177,14 @@
   justify-content: space-between;
   padding: var(--sp-4) var(--sp-4) var(--sp-2);
   border-bottom: 1px solid var(--border);
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.xrayPanelHeaderDragging {
+  cursor: grabbing;
 }
 
 .xrayPanelSub {
