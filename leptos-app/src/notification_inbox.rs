@@ -1,7 +1,9 @@
 //! Notification inbox (issue #19) and notification preferences (issue #25).
 //!
 //! The bell in the header carries a live unseen count; clicking it opens this
-//! panel — the members-panel modal shell — listing the signed-in user's own
+//! panel — an anchored popover hanging from the bell on wide viewports, the
+//! members-panel modal shell on narrow ones (#55; one DOM tree, the split is
+//! pure CSS via `.popoverSurface`) — listing the signed-in user's own
 //! `Notification` rows newest-first (the notification policy scopes reads to
 //! `recipient = $jwt.sub`, so the resultset is self-scoped server-side; the
 //! client filters on recipient too, belt-and-braces). Clicking a row marks it
@@ -52,9 +54,11 @@ pub fn NotificationBadge() -> impl IntoView {
     }
 }
 
-/// The inbox modal. `selected_room` is the app's room selection signal
-/// (threaded from ChatApp through Header) so clicking a room-bearing
-/// notification can navigate the chat behind the overlay.
+/// The inbox surface: an anchored popover under the header bell on wide
+/// viewports, the full-screen overlay on narrow ones (#55). `selected_room`
+/// is the app's room selection signal (threaded from ChatApp through Header)
+/// so clicking a room-bearing notification can navigate the chat behind the
+/// surface.
 #[component]
 pub fn NotificationInbox(
     selected_room: RwSignal<Option<RoomView>>,
@@ -146,8 +150,19 @@ pub fn NotificationInbox(
     let on_close_rows = on_close.clone();
 
     view! {
-        <div class="membersOverlay" on:click=move |_| on_close_overlay()>
-            <div class="membersContent notificationContent" on:click=|e| e.stop_propagation()>
+        // .popoverSurface (#55) re-presents the modal shell as a popover
+        // anchored to the bell on wide viewports — one DOM tree, the split is
+        // entirely in CSS (MembersPanel.css). The backdrop click below only
+        // exists on narrow viewports, where the overlay still covers the
+        // screen; in popover mode this element shrink-wraps the panel and
+        // outside-mousedown dismissal lives with the bell anchor (header.rs).
+        <div class="membersOverlay popoverSurface" on:click=move |_| on_close_overlay()>
+            <div
+                class="membersContent notificationContent"
+                role="dialog"
+                aria-label="Notifications"
+                on:click=|e| e.stop_propagation()
+            >
                 <div class="membersHeader">
                     <div class="membersTitles">
                         <h2>"Notifications"</h2>

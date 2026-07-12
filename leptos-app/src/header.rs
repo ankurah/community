@@ -1,4 +1,5 @@
 use leptos::prelude::*;
+use wasm_bindgen::JsCast;
 use web_sys::window;
 
 use ankurah_signals::Get as AnkurahGet;
@@ -30,6 +31,30 @@ pub fn Header(current_user: RwSignal<Option<UserView>>, selected_room: RwSignal<
         }
     });
     on_cleanup(move || esc_handle.remove());
+
+    // Outside-interaction dismiss for the inbox popover (#55). The anchor
+    // wrapper below contains both the bell and the mounted popover, so the
+    // contains() check exempts them together: a bell mousedown never reaches
+    // the close path, which is what lets the bell keep its plain toggle —
+    // message_row's ⋯ trigger needs a mousedown-snapshot precisely because
+    // its dismiss listener DOES fire for its own trigger; this one
+    // structurally can't. On narrow viewports the inbox presents as a
+    // full-screen overlay that is a DOM descendant of the anchor, so every
+    // mousedown lands "inside" and dismissal stays with the overlay's own
+    // backdrop click, exactly like the modal surfaces.
+    let bell_anchor = NodeRef::<leptos::html::Div>::new();
+    let dismiss_handle = window_event_listener(leptos::ev::mousedown, move |ev| {
+        if panels().current_untracked() != Some(Surface::Inbox) {
+            return;
+        }
+        let Some(anchor) = bell_anchor.get_untracked() else { return };
+        if let Some(node) = ev.target().and_then(|t| t.dyn_into::<web_sys::Node>().ok()) {
+            if !anchor.contains(Some(&node)) {
+                panels().close();
+            }
+        }
+    });
+    on_cleanup(move || dismiss_handle.remove());
 
     // Live connection state from the WebSocket client. Reading the reactive
     // `Read<ConnectionState>` under the ReactiveGraphObserver re-renders on change.
@@ -140,24 +165,36 @@ pub fn Header(current_user: RwSignal<Option<UserView>>, selected_room: RwSignal<
                             <path d="m21 11-8-8" />
                         </svg>
                     </button>
-                    <button
-                        class="notificationButton"
-                        on:click=move |_| panels().toggle(Surface::Inbox)
-                        title="Notifications"
-                        aria-pressed=move || panels().is_open(&Surface::Inbox).to_string()
-                        // Without this, a nonzero badge becomes the button's
-                        // accessible name ("3, button") — the SVG is
-                        // aria-hidden and name-from-content falls to the badge.
-                        aria-label="Notifications"
-                    >
-                        // Bell — your inbox of mentions, with an unseen-count badge.
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-                            stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                            <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" />
-                            <path d="M13.73 21a2 2 0 0 1-3.46 0" />
-                        </svg>
-                        <NotificationBadge />
-                    </button>
+                    // The bell and its inbox popover share this anchor (#55):
+                    // .popoverSurface hangs from the wrapper on wide viewports
+                    // with pure CSS — no rect math — so the inbox mounts HERE,
+                    // not in the surface match below, and the outside-mousedown
+                    // dismiss above checks containment against the wrapper.
+                    <div class="headerPopoverAnchor" node_ref=bell_anchor>
+                        <button
+                            class="notificationButton"
+                            on:click=move |_| panels().toggle(Surface::Inbox)
+                            title="Notifications"
+                            aria-pressed=move || panels().is_open(&Surface::Inbox).to_string()
+                            // Without this, a nonzero badge becomes the button's
+                            // accessible name ("3, button") — the SVG is
+                            // aria-hidden and name-from-content falls to the badge.
+                            aria-label="Notifications"
+                        >
+                            // Bell — your inbox of mentions, with an unseen-count badge.
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                                stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" />
+                                <path d="M13.73 21a2 2 0 0 1-3.46 0" />
+                            </svg>
+                            <NotificationBadge />
+                        </button>
+                        {move || {
+                            (panels().current() == Some(Surface::Inbox)).then(|| {
+                                view! { <NotificationInbox selected_room on_close=move || panels().close() /> }
+                            })
+                        }}
+                    </div>
                     <button
                         class="xrayButton"
                         on:click=move |_| crate::xray::state().toggle()
@@ -222,9 +259,10 @@ pub fn Header(current_user: RwSignal<Option<UserView>>, selected_room: RwSignal<
                 }
                 Some(Surface::Members) => view! { <MembersPanel on_close=move || panels().close() /> }.into_any(),
                 Some(Surface::ModLog) => view! { <ModLogPanel on_close=move || panels().close() /> }.into_any(),
-                Some(Surface::Inbox) => {
-                    view! { <NotificationInbox selected_room on_close=move || panels().close() /> }.into_any()
-                }
+                // The inbox opens and closes through this same manager, but
+                // mounts at its bell anchor up in the header so its popover
+                // presentation can anchor with pure CSS (#55).
+                Some(Surface::Inbox) => ().into_any(),
                 Some(Surface::UserDetail(user_id)) => {
                     view! { <UserDetailPanel user_id on_close=move || panels().close() /> }.into_any()
                 }

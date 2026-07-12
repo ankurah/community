@@ -11,7 +11,12 @@
   background-color: var(--chrome-bg);
   color: var(--chrome-text);
   border-bottom: 1px solid var(--chrome-border);
-  overflow: hidden;
+
+  /* Deliberately no overflow: hidden — the notification popover (#55) hangs
+     out of the bar from its .headerPopoverAnchor. Truncation was never this
+     rule's job (title/topic/userInfo each clip themselves), and .container
+     clips at the same viewport edge it used to. min-width: 0 already opts
+     out of flex min-content sizing, so layout is unchanged. */
   min-width: 0;
   width: 100%;
 }
@@ -58,6 +63,19 @@
   align-items: center;
   flex-shrink: 0;
   min-width: 0;
+}
+
+/* Anchor for a header button's popover surface (#55): wraps the button and
+   hosts its mounted .popoverSurface (see MembersPanel.css), which positions
+   against this box — pure CSS, no rect math. The flex settings make the
+   wrapper transparent to the cluster's layout (it shrink-wraps the 32px
+   button exactly). Only the bell uses it today; converting another surface
+   to a popover starts by wrapping its button the same way. */
+.headerPopoverAnchor {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
 }
 
 /* Connection pill — dot + label */
