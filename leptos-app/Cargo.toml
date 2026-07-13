@@ -28,7 +28,9 @@ web-sys = { version = "=0.3.82", features = [
     # Tail pinning through async row growth (chat.rs auto-scroll).
     "ResizeObserver",
     # Reply preview jump-to-original (#23): smooth scroll + highlight class.
-    "ScrollIntoViewOptions", "ScrollBehavior", "ScrollLogicalPosition", "DomTokenList"
+    "ScrollIntoViewOptions", "ScrollBehavior", "ScrollLogicalPosition", "DomTokenList",
+    # Emoji shortcodes (#54): isComposing guard on inline `:name:` completion.
+    "InputEvent"
 ] }
 js-sys = "=0.3.82"
 tracing-wasm = "0.2.1"

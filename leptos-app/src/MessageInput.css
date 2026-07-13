@@ -74,6 +74,17 @@
   user-select: none;
 }
 
+/* Emoji autocomplete (#54): shares the mention popup shell; the glyph sits
+   where the avatar would. */
+.emojiGlyph {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 22px;
+  font-size: 16px;
+  user-select: none;
+}
+
 .mentionAvatar.hue-0 { background: var(--hue-0); }
 .mentionAvatar.hue-1 { background: var(--hue-1); }
 .mentionAvatar.hue-2 { background: var(--hue-2); }

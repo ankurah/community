@@ -73,6 +73,80 @@ fn current_mention_draft(el: &web_sys::HtmlTextAreaElement) -> Option<MentionDra
     None
 }
 
+/// At most this many candidates in the emoji popup (#54).
+const EMOJI_POPUP_MAX: usize = 8;
+
+/// How far back from the caret we scan for the `:` of a shortcode draft —
+/// generous headroom over the longest table name.
+const EMOJI_SCAN_MAX: usize = 32;
+
+/// An in-progress `:shortcode` being typed (#54): the utf16 index of the
+/// opening `:` and the query text between it and the caret.
+#[derive(Clone, PartialEq)]
+struct EmojiDraft {
+    start_utf16: usize,
+    query: String,
+}
+
+/// Characters a shortcode run may contain. Uppercase is tolerated while
+/// typing (matching lowercases); `+`/`-` serve `:+1:`/`:-1:`.
+fn is_shortcode_char(c: char) -> bool { c.is_ascii_alphanumeric() || matches!(c, '_' | '+' | '-') }
+
+/// Find the emoji shortcode being typed at the caret, if any: a `:` at a
+/// word start (start-of-text or after whitespace — so clock times like
+/// "12:30" and pasted URLs stay quiet) with 2+ shortcode chars between it
+/// and the caret (so a lone `:` or a `:)` smiley stays quiet too). Indices
+/// are utf16 code units, like the mention draft.
+fn current_emoji_draft(el: &web_sys::HtmlTextAreaElement) -> Option<EmojiDraft> {
+    let caret = el.selection_start().ok().flatten()? as usize;
+    let units: Vec<u16> = el.value().encode_utf16().collect();
+    let caret = caret.min(units.len());
+    let mut i = caret;
+    while i > 0 && caret - i < EMOJI_SCAN_MAX {
+        // Lone surrogate halves (pieces of emoji) fail the shortcode-char
+        // test below, exactly as they should.
+        let c = char::from_u32(units[i - 1] as u32)?;
+        if c == ':' {
+            let at_word_start = i == 1 || char::from_u32(units[i - 2] as u32).map(|p| p.is_whitespace()).unwrap_or(false);
+            if !at_word_start {
+                return None;
+            }
+            let query = String::from_utf16_lossy(&units[i..caret]);
+            return (query.len() >= 2).then_some(EmojiDraft { start_utf16: i - 1, query });
+        }
+        if !is_shortcode_char(c) {
+            return None;
+        }
+        i -= 1;
+    }
+    None
+}
+
+/// A completed `:name:` run ending exactly at `caret`: returns the utf16
+/// index of the opening `:` and the name between the colons. Same word-start
+/// rule as the draft scanner; an empty name (`::`) never matches.
+fn completed_shortcode(units: &[u16], caret: usize) -> Option<(usize, String)> {
+    if caret < 3 || caret > units.len() || units[caret - 1] != u16::from(b':') {
+        return None;
+    }
+    let mut i = caret - 1;
+    while i > 0 && caret - i < EMOJI_SCAN_MAX {
+        let c = char::from_u32(units[i - 1] as u32)?;
+        if c == ':' {
+            let at_word_start = i == 1 || char::from_u32(units[i - 2] as u32).map(|p| p.is_whitespace()).unwrap_or(false);
+            if i == caret - 1 || !at_word_start {
+                return None;
+            }
+            return Some((i - 1, String::from_utf16_lossy(&units[i..caret - 1])));
+        }
+        if !is_shortcode_char(c) {
+            return None;
+        }
+        i -= 1;
+    }
+    None
+}
+
 /// Rank users for the mention popup: display-name prefix matches first, then
 /// substring matches, alphabetically within each tier; at most
 /// [`MENTION_POPUP_MAX`]. An empty query (bare `@`) lists everyone.
@@ -142,6 +216,15 @@ pub fn MessageInput(
         }
     });
 
+    // Emoji autocomplete (#54): the same draft/selection/matches trio as
+    // mentions, over the static shortcode table.
+    let emoji_draft = RwSignal::new(None::<EmojiDraft>);
+    let emoji_selected = RwSignal::new(0usize);
+    let emoji_matches = Signal::derive(move || match emoji_draft.get() {
+        Some(draft) => crate::emoji::candidates(&draft.query, EMOJI_POPUP_MAX),
+        None => Vec::new(),
+    });
+
     // id → display-name map for the reply chip (#23): the author line and
     // token resolution in the snippet. Rebuilt live (renames included) from
     // the same users query the mention popup holds.
@@ -159,52 +242,101 @@ pub fn MessageInput(
         }
     });
 
-    // Re-derive the draft from the caret. Cheap; called on input and on
-    // caret-moving keys/clicks so the anchor can never go stale silently.
-    let refresh_mention_draft = move || {
+    // Re-derive both drafts from the caret. Cheap; called on input and on
+    // caret-moving keys/clicks so an anchor can never go stale silently.
+    // The two can never be Some at once: a mention draft tolerates no
+    // whitespace back to its `@`, an emoji draft no non-shortcode char back
+    // to its `:`, and each trigger disqualifies the other's scan.
+    let refresh_drafts = move || {
         let Some(el) = textarea_ref.get_untracked() else { return };
         let next = current_mention_draft(&el);
         if next != mention_draft.get_untracked() {
             mention_draft.set(next);
             mention_selected.set(0);
         }
+        let next = current_emoji_draft(&el);
+        if next != emoji_draft.get_untracked() {
+            emoji_draft.set(next);
+            emoji_selected.set(0);
+        }
     };
 
-    // Replace the draft (`@que`) with the canonical token `<@BASE64_ID> ` —
-    // the exact format community_model::parse_mentions (and the server's
-    // notification fan-out) recognizes. Splicing is done in utf16 space.
-    let insert_mention = move |user: &UserView| {
-        let Some(el) = textarea_ref.get_untracked() else { return };
-        let Some(draft) = mention_draft.get_untracked() else { return };
+    // Splice `replacement` over utf16 units [start, end) of the textarea and
+    // pin the caret after it. Write the DOM first (value + caret), then the
+    // signal: the render effect re-assigns .value with the identical string,
+    // and some engines reset the caret to the end on any assignment, so it
+    // is re-pinned a frame later for mid-text insertions.
+    let splice_units = move |el: &web_sys::HtmlTextAreaElement, start: usize, end: usize, replacement: &str| {
         let units: Vec<u16> = el.value().encode_utf16().collect();
-        let caret = el.selection_start().ok().flatten().map(|c| c as usize).unwrap_or(units.len()).min(units.len());
-        let start = draft.start_utf16;
-        if start >= caret || units.get(start) != Some(&(b'@' as u16)) {
-            mention_draft.set(None); // stale anchor: the text changed under us
-            return;
-        }
-        let token: Vec<u16> = format!("<@{}> ", user.id().to_base64()).encode_utf16().collect();
-        let mut next: Vec<u16> = Vec::with_capacity(units.len() - (caret - start) + token.len());
+        let end = end.min(units.len());
+        let rep: Vec<u16> = replacement.encode_utf16().collect();
+        let mut next: Vec<u16> = Vec::with_capacity(units.len() - (end - start) + rep.len());
         next.extend_from_slice(&units[..start]);
-        next.extend_from_slice(&token);
-        next.extend_from_slice(&units[caret..]);
-        let new_caret = (start + token.len()) as u32;
+        next.extend_from_slice(&rep);
+        next.extend_from_slice(&units[end..]);
+        let new_caret = (start + rep.len()) as u32;
         let new_value = String::from_utf16_lossy(&next);
-        // Write the DOM first (value + caret), then the signal. The render
-        // effect re-assigns .value with the identical string; some engines
-        // reset the caret to the end on any assignment, so re-pin it a
-        // frame later for mid-text insertions.
         el.set_value(&new_value);
         let _ = el.set_selection_range(new_caret, new_caret);
         message_input.set(new_value);
-        autosize(&el);
-        mention_draft.set(None);
+        autosize(el);
         let _ = el.focus();
         request_animation_frame(move || {
             if let Some(el) = textarea_ref.get_untracked() {
                 let _ = el.set_selection_range(new_caret, new_caret);
             }
         });
+    };
+
+    // Replace the draft (`@que`) with the canonical token `<@BASE64_ID> ` —
+    // the exact format community_model::parse_mentions (and the server's
+    // notification fan-out) recognizes.
+    let insert_mention = move |user: &UserView| {
+        let Some(el) = textarea_ref.get_untracked() else { return };
+        let Some(draft) = mention_draft.get_untracked() else { return };
+        let units: Vec<u16> = el.value().encode_utf16().collect();
+        let caret = el.selection_start().ok().flatten().map(|c| c as usize).unwrap_or(units.len()).min(units.len());
+        let start = draft.start_utf16;
+        if start >= caret || units.get(start) != Some(&u16::from(b'@')) {
+            mention_draft.set(None); // stale anchor: the text changed under us
+            return;
+        }
+        splice_units(&el, start, caret, &format!("<@{}> ", user.id().to_base64()));
+        mention_draft.set(None);
+    };
+
+    // Replace the draft (`:que`) with the chosen unicode glyph — input-time
+    // replacement only; what is stored is the plain emoji (#54 contract).
+    let insert_emoji = move |glyph: &str| {
+        let Some(el) = textarea_ref.get_untracked() else { return };
+        let Some(draft) = emoji_draft.get_untracked() else { return };
+        let units: Vec<u16> = el.value().encode_utf16().collect();
+        let caret = el.selection_start().ok().flatten().map(|c| c as usize).unwrap_or(units.len()).min(units.len());
+        let start = draft.start_utf16;
+        if start >= caret || units.get(start) != Some(&u16::from(b':')) {
+            emoji_draft.set(None); // stale anchor: the text changed under us
+            return;
+        }
+        splice_units(&el, start, caret, glyph);
+        emoji_draft.set(None);
+    };
+
+    // Inline completion (#54): a fully typed `:name:` becomes its glyph the
+    // moment the closing colon lands — no popup interaction required. IME
+    // composition updates are exempt (composing text must never be spliced
+    // mid-flight); names outside the table stay as typed, per the contract.
+    let complete_typed_shortcode = move |ev: &leptos::ev::Event| {
+        use wasm_bindgen::JsCast;
+        if ev.dyn_ref::<web_sys::InputEvent>().map(|e| e.is_composing()).unwrap_or(false) {
+            return;
+        }
+        let Some(el) = textarea_ref.get_untracked() else { return };
+        let Some(caret) = el.selection_start().ok().flatten().map(|c| c as usize) else { return };
+        let units: Vec<u16> = el.value().encode_utf16().collect();
+        let Some((start, name)) = completed_shortcode(&units, caret.min(units.len())) else { return };
+        let Some(glyph) = crate::emoji::lookup(&name) else { return };
+        splice_units(&el, start, caret, glyph);
+        emoji_draft.set(None);
     };
 
     // Mirror the edit target into the composer. `prev` carries the previous
@@ -217,7 +349,9 @@ pub fn MessageInput(
         let editing = editing_message.get();
         let editing_id = editing.as_ref().map(|m| m.id().to_base64());
         if prev.map(|p| p != editing_id).unwrap_or(true) {
-            mention_draft.set(None); // programmatic fill invalidates any draft anchor
+            // Programmatic fill invalidates any draft anchor.
+            mention_draft.set(None);
+            emoji_draft.set(None);
             match &editing {
                 Some(edit_msg) => {
                     replying_to.set(None);
@@ -255,6 +389,7 @@ pub fn MessageInput(
         let room = room.clone();
         move || {
             mention_draft.set(None);
+            emoji_draft.set(None);
             let input_text = message_input.get();
             if input_text.trim().is_empty() {
                 return;
@@ -429,6 +564,44 @@ pub fn MessageInput(
                     _ => {}
                 }
             }
+            // The emoji popup (#54) captures the same keys while open, with
+            // the same IME guards. Never open at the same time as the mention
+            // popup (the drafts are mutually exclusive by construction).
+            let ematches = emoji_matches.get_untracked();
+            if !ematches.is_empty() && !e.meta_key() && !e.ctrl_key() && !e.alt_key() {
+                match e.key().as_str() {
+                    "ArrowDown" => {
+                        e.prevent_default();
+                        emoji_selected.update(|i| *i = (*i + 1) % ematches.len());
+                        return;
+                    }
+                    "ArrowUp" => {
+                        e.prevent_default();
+                        emoji_selected.update(|i| *i = (*i + ematches.len() - 1) % ematches.len());
+                        return;
+                    }
+                    "Enter" | "Tab" if !e.shift_key() => {
+                        // Same WebKit guard as the mention popup: the
+                        // composition-commit keydown (keyCode 229) must not
+                        // read as popup confirmation.
+                        if !e.is_composing() && e.key_code() != 229 {
+                            e.prevent_default();
+                            let idx = emoji_selected.get_untracked().min(ematches.len() - 1);
+                            insert_emoji(ematches[idx].1);
+                        }
+                        return;
+                    }
+                    "Escape" => {
+                        // Consumed: the window-level Escape (panel manager)
+                        // skips defaultPrevented events, so only the popup
+                        // closes.
+                        e.prevent_default();
+                        emoji_draft.set(None);
+                        return;
+                    }
+                    _ => {}
+                }
+            }
             // Enter sends; Shift+Enter falls through to the textarea's native
             // newline (#50). An Enter that confirms an IME composition must
             // not send: isComposing covers Chrome/Firefox, and keyCode 229
@@ -510,6 +683,47 @@ pub fn MessageInput(
                     }}
                 </div>
             </Show>
+            // Emoji autocomplete popup (#54): same shell and interaction
+            // contract as the mention popup, over the shortcode table.
+            <Show when=move || !emoji_matches.get().is_empty()>
+                <div
+                    class="mentionPopup"
+                    role="listbox"
+                    aria-label="Insert an emoji"
+                    on:mousedown=|e: leptos::ev::MouseEvent| e.prevent_default()
+                >
+                    {move || {
+                        emoji_matches
+                            .get()
+                            .into_iter()
+                            .enumerate()
+                            .map(|(i, (name, glyph))| {
+                                view! {
+                                    <button
+                                        type="button"
+                                        class=move || {
+                                            if emoji_selected.get() == i {
+                                                "mentionItem active"
+                                            } else {
+                                                "mentionItem"
+                                            }
+                                        }
+                                        role="option"
+                                        aria-selected=move || {
+                                            if emoji_selected.get() == i { "true" } else { "false" }
+                                        }
+                                        on:mouseenter=move |_| emoji_selected.set(i)
+                                        on:click=move |_| insert_emoji(glyph)
+                                    >
+                                        <span class="emojiGlyph" aria-hidden="true">{glyph}</span>
+                                        <span class="mentionName">{format!(":{name}:")}</span>
+                                    </button>
+                                }
+                            })
+                            .collect_view()
+                    }}
+                </div>
+            </Show>
             // Reply chip (#23): compact "Replying to …" state above the input.
             // Live reads: a rename, edit, or delete of the original while the
             // chip is up re-renders it (a deleted original still sends — `re`
@@ -580,21 +794,27 @@ pub fn MessageInput(
                         if let Some(el) = textarea_ref.get_untracked() {
                             autosize(&el);
                         }
-                        refresh_mention_draft();
+                        // Order matters: a just-completed `:name:` splices
+                        // first (#54); the drafts re-derive from the result.
+                        complete_typed_shortcode(&ev);
+                        refresh_drafts();
                     }
                     on:keydown=handle_key_down
                     // Caret moves without input events (#18): arrows/Home/End
-                    // keyup and mouse clicks re-derive the mention draft.
+                    // keyup and mouse clicks re-derive the drafts.
                     on:keyup=move |e: KeyboardEvent| {
                         if matches!(
                             e.key().as_str(),
                             "ArrowLeft" | "ArrowRight" | "ArrowUp" | "ArrowDown" | "Home" | "End"
                         ) {
-                            refresh_mention_draft();
+                            refresh_drafts();
                         }
                     }
-                    on:click=move |_| refresh_mention_draft()
-                    on:blur=move |_| mention_draft.set(None)
+                    on:click=move |_| refresh_drafts()
+                    on:blur=move |_| {
+                        mention_draft.set(None);
+                        emoji_draft.set(None);
+                    }
                     prop:disabled=move || !is_connected()
                 ></textarea>
                 <Show when=move || editing_message.get().is_some()>

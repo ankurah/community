@@ -18,6 +18,7 @@ mod ban_lock;
 mod chat;
 mod chat_debug_header;
 mod editable_text_field;
+mod emoji;
 mod fmt;
 mod header;
 mod link_preview;
