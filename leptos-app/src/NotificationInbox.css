@@ -1,7 +1,10 @@
 /* Notification inbox + preferences (issues #19, #25). Reuses the members-panel
    modal shell (.membersOverlay/.membersContent/.membersHeader/...) so the app's
    modals stay visually identical; only the bell badge, row anatomy, and
-   preference controls are specific to notifications. */
+   preference controls are specific to notifications. Since #55 the inbox root
+   also carries .popoverSurface (MembersPanel.css), which re-presents that
+   shell as a popover anchored to the bell on wide viewports — nothing in this
+   file is presentation-mode-specific. */
 
 /* The bell button's shell comes from the Header.css icon-button group; this
    only anchors the corner count badge. */

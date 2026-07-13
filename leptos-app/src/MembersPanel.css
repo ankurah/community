@@ -50,6 +50,60 @@
   }
 }
 
+/* ---- Anchored-popover presentation (#55) --------------------------------
+   Add .popoverSurface to a surface's .membersOverlay root and mount it inside
+   the header's .headerPopoverAnchor (Header.css) wrapping the surface's own
+   button: on wide viewports the modal becomes a popover hanging from that
+   button, right-edge-aligned to it, with no backdrop — the app stays live
+   behind it (outside-mousedown dismissal lives with the anchor in header.rs).
+   Narrow viewports take nothing from this block, so the full-surface overlay
+   above applies unchanged — a popover anchored to a header icon degrades
+   badly on a phone. Only the notification inbox opts in today; converting
+   another surface is this class plus the anchor wrapper. */
+
+/* Exact complement of the app's 768px mobile breakpoint; browsers too old
+   for range syntax fall back to the modal, which is just the old behavior. */
+@media (width > 768px) {
+  .popoverSurface {
+    position: absolute;
+    inset: auto;
+
+    /* The 32px bell sits centered in the 56px bar, so +20px from its bottom
+       reads as an 8px gap under the bar itself. */
+    top: calc(100% + 20px);
+    right: 0;
+    padding: 0;
+    background: none;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    animation: none;
+  }
+
+  .popoverSurface .membersContent {
+    /* Popover voice (ProfilePopover / context-menu family): fixed width,
+       tighter radius and padding than the modal, drop-in from the bar.
+       Height arithmetic: the top edge sits 64px down (56px bar + 8px gap);
+       16px bottom margin. The interior .membersList scrolls, as ever. */
+    width: 400px;
+    max-height: min(560px, calc(100dvh - 80px));
+    padding: var(--sp-5);
+    border-radius: var(--r-lg);
+    animation: popoverSurfaceIn 120ms var(--ease) both;
+  }
+}
+
+@keyframes popoverSurfaceIn {
+  from {
+    opacity: 0;
+    transform: translateY(-4px) scale(0.98);
+  }
+
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
 .membersHeader {
   display: flex;
   justify-content: space-between;
