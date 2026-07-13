@@ -14,7 +14,7 @@ const REPLY_SNIPPET_MAX: usize = 80;
 /// Replace mention tokens with plain `@DisplayName` text. Unknown ids (the
 /// member isn't loaded, or a foreign id) become `@unknown` — the same
 /// fallback the markdown renderer uses.
-pub fn resolve_tokens(text: &str, names: &HashMap<String, String>) -> String {
+fn resolve_tokens(text: &str, names: &HashMap<String, String>) -> String {
     let mut out = text.to_string();
     for id in community_model::parse_mentions(text) {
         let name = names.get(&id).cloned().filter(|n| !n.is_empty()).unwrap_or_else(|| "unknown".to_string());
