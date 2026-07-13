@@ -1,6 +1,7 @@
 use ankurah::{property::Json, Model, Ref};
 use serde::{Deserialize, Serialize};
 
+pub mod mention_display;
 pub mod text;
 pub use text::{extract_urls, parse_mentions};
 
@@ -87,6 +88,17 @@ pub struct Message {
     /// write must satisfy the scope on the post-write state too, and with
     /// `collaborative` no longer `true` it would not).
     pub collaborative: Option<bool>,
+    /// The message this one replies to (#23, nested replies). `None` for
+    /// ordinary messages, and absent on every pre-reply row — only
+    /// `Option<T>` reads an absent property as `None` (bare types surface
+    /// `PropertyError::Missing`). Two storage shapes collapse to that `None`:
+    /// a fresh row created with `None` carries the property with a null
+    /// value (the derive initializes every field), a legacy row lacks the
+    /// key entirely. Same read, different bytes — so queries touching this
+    /// field must stay equality-only, per the `ModAction.message` note. Set
+    /// at creation, never edited.
+    #[active_type(LWW)]
+    pub re: Option<Ref<Message>>,
 }
 
 /// A user's emoji reaction to a message. One row per (message, user, emoji);

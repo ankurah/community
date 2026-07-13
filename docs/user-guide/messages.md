@@ -3,11 +3,24 @@
 ## Writing a message
 
 Type in the box at the bottom and press **Enter** to send. That's it — your
-message appears for everyone instantly.
+message appears for everyone instantly. **Shift+Enter** adds a line break, so
+multi-line messages (and code blocks) are just typing.
 
 The box is available whenever you're connected. If the connection drops, it's
 disabled until you're back online, so nothing is lost to a bad moment of
 network.
+
+## Mentions and emoji
+
+Type **@** and keep typing a name — a picker appears; **Enter** or **Tab**
+inserts the mention. The box shows a plain **@Name** while you compose (no
+codes, no clutter); when you send, it becomes a real mention — highlighted in
+the message and delivered to that person's notification bell.
+
+Emoji work the same way with colons: type **:** and two or more letters for a
+picker (`:tada:` 🎉, `:thumbsup:` 👍, `:fire:` 🔥 …), or type the full
+`:shortcode:` and it converts on the closing colon. Messages store the emoji
+itself, so they look right everywhere.
 
 ## Formatting with Markdown
 
@@ -31,13 +44,22 @@ A few sensible rules keep things tidy and safe:
 - **No raw HTML.** Any HTML in a message is ignored rather than rendered, which
   keeps everyone safe from dodgy markup.
 
-The compose box is a single line, so the formatting you can type is the inline
-kind above — **bold**, *italic*, `` `inline code` ``, and links. (Multi-line
-**code blocks** fenced in triple backticks do render when a message contains
-them, but you can't type them in the box yet — richer composing is on the way.)
+Multi-line **code blocks** work too: type ` ``` ` on its own line
+(**Shift+Enter** for the line breaks), paste or write your code, close with
+` ``` `, and send.
 
 If a message has no special characters, it's shown exactly as typed — so a
 message that just mentions `*` or `#` in passing stays plain.
+
+## Replying
+
+Choose **Reply** from a message's **⋯** / right-click menu. A small
+"Replying to…" chip appears above the compose box — your draft, if you had
+one, stays put — and the **×** on the chip (or **Esc**) cancels. Send, and
+your message carries a compact preview of the original above your words.
+Clicking that preview jumps back to the original message when it's on screen,
+with a brief highlight so your eye lands on it. If the original was removed,
+the preview says so honestly.
 
 ## Editing a message
 
@@ -53,8 +75,9 @@ Make your change and press **Enter** to save, or **Esc** to cancel. An edited
 message carries a small **(edited)** marker — hover it to see when it was last
 changed. Saving without actually changing anything doesn't mark the message.
 
-Only the author can edit a message; there's no way for someone else to change
-your words.
+Only the author can edit a message — unless the author has deliberately opened
+it up with **"Allow others to edit"** (such messages carry a small **co-edit**
+badge). Nobody else can change your words otherwise.
 
 ## Deleting a message
 

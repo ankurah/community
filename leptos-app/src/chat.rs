@@ -37,6 +37,10 @@ pub fn Chat(
 ) -> impl IntoView {
     let show_debug = RwSignal::new(false);
     let editing_message = RwSignal::new(None::<MessageView>);
+    // Reply state (#23): the message the next send attaches as `re`. Owned
+    // here, like editing_message, because both the rows' context menus and
+    // the composer read/write it.
+    let replying_to = RwSignal::new(None::<MessageView>);
     let manager = RwSignal::new(None::<Manager>);
     let messages_container_ref = NodeRef::<Div>::new();
     let last_scroll_top = StoredValue::new(0);
@@ -161,6 +165,19 @@ pub fn Chat(
         Some(SendWrapper::new(ContentResizeGuard { observer, _callback: callback }))
     });
 
+    // A reply armed in one room must not attach to a message sent from
+    // another (#23): an actual room CHANGE disarms it. `prev` carries the
+    // previous room id so re-selecting the same room keeps the chip.
+    Effect::new(move |prev: Option<Option<String>>| {
+        let id = room.get().map(|r| r.id().to_base64());
+        if let Some(prev) = prev {
+            if prev != id {
+                replying_to.set(None);
+            }
+        }
+        id
+    });
+
     // Advance the persistent read cursor (#13) whenever the user is looking at
     // the live tail of a room: on room switch, and again as new messages
     // arrive while live (this effect tracks `messages`). Scrolled-up readers
@@ -281,6 +298,7 @@ pub fn Chat(
                                         users=users.clone()
                                         current_user_id=current_user_id.clone()
                                         editing_message=editing_message
+                                        replying_to=replying_to
                                     />
                                 </div>
                             </div>
@@ -300,6 +318,7 @@ pub fn Chat(
                                 room=current_room.clone()
                                 current_user=current_user.get()
                                 editing_message=editing_message
+                                replying_to=replying_to
                                 messages=messages
                             />
                         </div>

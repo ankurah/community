@@ -252,7 +252,7 @@ mod tests {
         let text = format!("hey <@{}> (ignore <@{}>) see {url}", recipient.to_base64(), author.to_base64());
         let trx = ctx.begin();
         let message =
-            trx.create(&Message { user: author.into(), room: room.into(), text, timestamp: 1, deleted: false, edited_at: None, collaborative: None })
+            trx.create(&Message { user: author.into(), room: room.into(), text, timestamp: 1, deleted: false, edited_at: None, collaborative: None, re: None })
                 .await
                 .unwrap()
                 .id();

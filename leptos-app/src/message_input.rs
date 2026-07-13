@@ -1,8 +1,9 @@
 use leptos::html::Textarea;
 use leptos::prelude::*;
+use std::collections::HashMap;
 use web_sys::KeyboardEvent;
 
-use ankurah_signals::Get as AnkurahGet;
+use ankurah_signals::{Get as AnkurahGet, Peek as AnkurahPeek};
 use community_model::{Message, MessageView, RoomView, UserView};
 
 use crate::{ctx, fmt, ws_client};
@@ -10,59 +11,6 @@ use crate::{ctx, fmt, ws_client};
 /// Cap on the auto-grown composer height (#50) — roughly eight lines of text;
 /// beyond it the textarea scrolls internally instead of eating the timeline.
 const MAX_COMPOSER_HEIGHT: i32 = 192;
-
-/// Reply quotes are clipped to this many characters (#23).
-const REPLY_SNIPPET_MAX: usize = 140;
-
-/// Pending composer prefill (#23 reply). Plain shared state, deliberately NOT
-/// a lazily-created leptos signal: a signal first created inside a context-menu
-/// event handler would be registered under that menu's reactive Owner and
-/// disposed when the menu closes. The requester instead pokes the composer by
-/// re-setting `editing_message` (an unconditional notify), whose effect
-/// consumes this. A module global (not a prop) because the composer is
-/// instantiated in chat.rs, which wave-2 message work does not touch.
-static COMPOSE_PREFILL: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
-
-fn take_compose_prefill() -> Option<String> { COMPOSE_PREFILL.write().ok().and_then(|mut slot| slot.take()) }
-
-/// Replace mention tokens with plain `@DisplayName` text for human-editable
-/// contexts — the reply quote. Raw `<@…>` tokens in a quote would (a) show
-/// base64 gibberish in the composer and (b) re-notify everyone mentioned in
-/// the ORIGINAL message when the reply sends, because the server scans the
-/// new message's text with the same parser. Plain `@name` text does neither.
-pub fn resolve_mention_tokens(text: &str, names: &std::collections::HashMap<String, String>) -> String {
-    let mut out = text.to_string();
-    for id in community_model::parse_mentions(text) {
-        let name = names.get(&id).cloned().filter(|n| !n.is_empty()).unwrap_or_else(|| "unknown".to_string());
-        out = out.replace(&format!("<@{id}>"), &format!("@{name}"));
-    }
-    out
-}
-
-/// Start a reply to `author`'s message (#23, v1 text convention): prefill the
-/// composer with an editable quoted snippet — Slack-style — rather than a
-/// durable reference. A `re: Ref<Message>` model field is a fast-follow; no
-/// Message field stores the referenced id today.
-///
-/// `text` should already have mention tokens resolved to plain names
-/// ([`resolve_mention_tokens`]) — the caller holds the name map, this module
-/// does not.
-///
-/// Cancels any in-progress edit: a reply composes a NEW message, and the
-/// `editing_message` write doubles as the composer's wake-up call.
-pub fn request_reply_prefill(author: &str, text: &str, editing_message: RwSignal<Option<MessageView>>) {
-    // Single-line snippet: newlines and runs of whitespace collapse, so the
-    // quote stays one `>` line even when quoting multiline/code messages.
-    let mut snippet: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if snippet.chars().count() > REPLY_SNIPPET_MAX {
-        snippet = snippet.chars().take(REPLY_SNIPPET_MAX).collect::<String>().trim_end().to_string() + "\u{2026}";
-    }
-    let prefill = format!("> **{author}**: {snippet}\n\n");
-    if let Ok(mut slot) = COMPOSE_PREFILL.write() {
-        *slot = Some(prefill);
-    }
-    editing_message.set(None);
-}
 
 /// Fit the composer textarea to its content, up to [`MAX_COMPOSER_HEIGHT`].
 /// Collapse-to-auto first so shrinking works (scrollHeight never shrinks
@@ -125,6 +73,80 @@ fn current_mention_draft(el: &web_sys::HtmlTextAreaElement) -> Option<MentionDra
     None
 }
 
+/// At most this many candidates in the emoji popup (#54).
+const EMOJI_POPUP_MAX: usize = 8;
+
+/// How far back from the caret we scan for the `:` of a shortcode draft —
+/// generous headroom over the longest table name.
+const EMOJI_SCAN_MAX: usize = 32;
+
+/// An in-progress `:shortcode` being typed (#54): the utf16 index of the
+/// opening `:` and the query text between it and the caret.
+#[derive(Clone, PartialEq)]
+struct EmojiDraft {
+    start_utf16: usize,
+    query: String,
+}
+
+/// Characters a shortcode run may contain. Uppercase is tolerated while
+/// typing (matching lowercases); `+`/`-` serve `:+1:`/`:-1:`.
+fn is_shortcode_char(c: char) -> bool { c.is_ascii_alphanumeric() || matches!(c, '_' | '+' | '-') }
+
+/// Find the emoji shortcode being typed at the caret, if any: a `:` at a
+/// word start (start-of-text or after whitespace — so clock times like
+/// "12:30" and pasted URLs stay quiet) with 2+ shortcode chars between it
+/// and the caret (so a lone `:` or a `:)` smiley stays quiet too). Indices
+/// are utf16 code units, like the mention draft.
+fn current_emoji_draft(el: &web_sys::HtmlTextAreaElement) -> Option<EmojiDraft> {
+    let caret = el.selection_start().ok().flatten()? as usize;
+    let units: Vec<u16> = el.value().encode_utf16().collect();
+    let caret = caret.min(units.len());
+    let mut i = caret;
+    while i > 0 && caret - i < EMOJI_SCAN_MAX {
+        // Lone surrogate halves (pieces of emoji) fail the shortcode-char
+        // test below, exactly as they should.
+        let c = char::from_u32(units[i - 1] as u32)?;
+        if c == ':' {
+            let at_word_start = i == 1 || char::from_u32(units[i - 2] as u32).map(|p| p.is_whitespace()).unwrap_or(false);
+            if !at_word_start {
+                return None;
+            }
+            let query = String::from_utf16_lossy(&units[i..caret]);
+            return (query.len() >= 2).then_some(EmojiDraft { start_utf16: i - 1, query });
+        }
+        if !is_shortcode_char(c) {
+            return None;
+        }
+        i -= 1;
+    }
+    None
+}
+
+/// A completed `:name:` run ending exactly at `caret`: returns the utf16
+/// index of the opening `:` and the name between the colons. Same word-start
+/// rule as the draft scanner; an empty name (`::`) never matches.
+fn completed_shortcode(units: &[u16], caret: usize) -> Option<(usize, String)> {
+    if caret < 3 || caret > units.len() || units[caret - 1] != u16::from(b':') {
+        return None;
+    }
+    let mut i = caret - 1;
+    while i > 0 && caret - i < EMOJI_SCAN_MAX {
+        let c = char::from_u32(units[i - 1] as u32)?;
+        if c == ':' {
+            let at_word_start = i == 1 || char::from_u32(units[i - 2] as u32).map(|p| p.is_whitespace()).unwrap_or(false);
+            if i == caret - 1 || !at_word_start {
+                return None;
+            }
+            return Some((i - 1, String::from_utf16_lossy(&units[i..caret - 1])));
+        }
+        if !is_shortcode_char(c) {
+            return None;
+        }
+        i -= 1;
+    }
+    None
+}
+
 /// Rank users for the mention popup: display-name prefix matches first, then
 /// substring matches, alphabetically within each tier; at most
 /// [`MENTION_POPUP_MAX`]. An empty query (bare `@`) lists everyone.
@@ -154,14 +176,26 @@ fn mention_candidates(users: &[UserView], query: &str) -> Vec<UserView> {
 
 /// Message input component for sending and editing messages.
 /// The composer is a multiline textarea (#50): Enter sends, Shift+Enter
-/// inserts a newline, Escape cancels an edit, and Cmd/Ctrl+Up/Down navigates
-/// the viewer's own messages for editing. Typing `@` opens the mention
-/// autocomplete (#18).
+/// inserts a newline, Escape cancels an edit (or an armed reply), and
+/// Cmd/Ctrl+Up/Down navigates the viewer's own messages for editing. Typing
+/// `@` opens the mention autocomplete (#18). While a reply is armed (#23) a
+/// "Replying to …" chip sits above the input; sending attaches the referenced
+/// message as `re`.
+///
+/// The draft holds plain `@DisplayName` text, never raw tokens (#56): the
+/// autocomplete inserts the name, send re-encodes matching `@Name` runs to
+/// canonical `<@id>` tokens (mention_display::MemberDirectory), and the edit
+/// mirror decodes stored tokens back for the textarea. The wire format is
+/// untouched — the server scanner sees exactly what it always saw.
 #[component]
 pub fn MessageInput(
     room: RoomView,
     current_user: Option<UserView>,
     editing_message: RwSignal<Option<MessageView>>,
+    /// The message the next send replies to (#23), armed by the context
+    /// menu's Reply. Independent of the draft text: arming, canceling, or
+    /// sending a reply never rewrites what the user has typed.
+    replying_to: RwSignal<Option<MessageView>>,
     /// Current visible messages (oldest-first), used for Cmd/Ctrl+Up/Down navigation.
     #[prop(into)] messages: Signal<Vec<MessageView>>,
 ) -> impl IntoView {
@@ -188,46 +222,88 @@ pub fn MessageInput(
         }
     });
 
-    // Re-derive the draft from the caret. Cheap; called on input and on
-    // caret-moving keys/clicks so the anchor can never go stale silently.
-    let refresh_mention_draft = move || {
+    // Emoji autocomplete (#54): the same draft/selection/matches trio as
+    // mentions, over the static shortcode table.
+    let emoji_draft = RwSignal::new(None::<EmojiDraft>);
+    let emoji_selected = RwSignal::new(0usize);
+    let emoji_matches = Signal::derive(move || match emoji_draft.get() {
+        Some(draft) => crate::emoji::candidates(&draft.query, EMOJI_POPUP_MAX),
+        None => Vec::new(),
+    });
+
+    // Which member an autocompleted name meant (#56): name → id, recorded at
+    // pick time so an ambiguous display name re-encodes to the member the
+    // user actually chose. Session-scoped; a name never picked falls back to
+    // the directory's deterministic choice.
+    let mention_picks = StoredValue::new(HashMap::<String, String>::new());
+
+    // Snapshot of the member list for coding (#56). Untracked on purpose:
+    // send/mirror moments want the list as of NOW, and must not re-run when
+    // users change.
+    let directory = {
+        let users = mention_users.clone();
+        move || {
+            community_model::mention_display::MemberDirectory::new(
+                users.peek().iter().map(|u| (u.id().to_base64(), u.display_name().unwrap_or_default())),
+            )
+        }
+    };
+
+    // id → display-name map for the reply chip (#23): the author line and
+    // token resolution in the snippet. Rebuilt live (renames included) from
+    // the same users query the mention popup holds.
+    let member_names = Memo::new({
+        let users = mention_users.clone();
+        move |_| {
+            users
+                .get()
+                .iter()
+                .filter_map(|u| {
+                    let name = u.display_name().unwrap_or_default();
+                    (!name.is_empty()).then(|| (u.id().to_base64(), name))
+                })
+                .collect::<HashMap<String, String>>()
+        }
+    });
+
+    // Re-derive both drafts from the caret. Cheap; called on input and on
+    // caret-moving keys/clicks so an anchor can never go stale silently.
+    // The two can never be Some at once: a mention draft tolerates no
+    // whitespace back to its `@`, an emoji draft no non-shortcode char back
+    // to its `:`, and each trigger disqualifies the other's scan.
+    let refresh_drafts = move || {
         let Some(el) = textarea_ref.get_untracked() else { return };
         let next = current_mention_draft(&el);
         if next != mention_draft.get_untracked() {
             mention_draft.set(next);
             mention_selected.set(0);
         }
+        let next = current_emoji_draft(&el);
+        if next != emoji_draft.get_untracked() {
+            emoji_draft.set(next);
+            emoji_selected.set(0);
+        }
     };
 
-    // Replace the draft (`@que`) with the canonical token `<@BASE64_ID> ` —
-    // the exact format community_model::parse_mentions (and the server's
-    // notification fan-out) recognizes. Splicing is done in utf16 space.
-    let insert_mention = move |user: &UserView| {
-        let Some(el) = textarea_ref.get_untracked() else { return };
-        let Some(draft) = mention_draft.get_untracked() else { return };
+    // Splice `replacement` over utf16 units [start, end) of the textarea and
+    // pin the caret after it. Write the DOM first (value + caret), then the
+    // signal: the render effect re-assigns .value with the identical string,
+    // and some engines reset the caret to the end on any assignment, so it
+    // is re-pinned a frame later for mid-text insertions.
+    let splice_units = move |el: &web_sys::HtmlTextAreaElement, start: usize, end: usize, replacement: &str| {
         let units: Vec<u16> = el.value().encode_utf16().collect();
-        let caret = el.selection_start().ok().flatten().map(|c| c as usize).unwrap_or(units.len()).min(units.len());
-        let start = draft.start_utf16;
-        if start >= caret || units.get(start) != Some(&(b'@' as u16)) {
-            mention_draft.set(None); // stale anchor: the text changed under us
-            return;
-        }
-        let token: Vec<u16> = format!("<@{}> ", user.id().to_base64()).encode_utf16().collect();
-        let mut next: Vec<u16> = Vec::with_capacity(units.len() - (caret - start) + token.len());
+        let end = end.min(units.len());
+        let rep: Vec<u16> = replacement.encode_utf16().collect();
+        let mut next: Vec<u16> = Vec::with_capacity(units.len() - (end - start) + rep.len());
         next.extend_from_slice(&units[..start]);
-        next.extend_from_slice(&token);
-        next.extend_from_slice(&units[caret..]);
-        let new_caret = (start + token.len()) as u32;
+        next.extend_from_slice(&rep);
+        next.extend_from_slice(&units[end..]);
+        let new_caret = (start + rep.len()) as u32;
         let new_value = String::from_utf16_lossy(&next);
-        // Write the DOM first (value + caret), then the signal. The render
-        // effect re-assigns .value with the identical string; some engines
-        // reset the caret to the end on any assignment, so re-pin it a
-        // frame later for mid-text insertions.
         el.set_value(&new_value);
         let _ = el.set_selection_range(new_caret, new_caret);
         message_input.set(new_value);
-        autosize(&el);
-        mention_draft.set(None);
+        autosize(el);
         let _ = el.focus();
         request_animation_frame(move || {
             if let Some(el) = textarea_ref.get_untracked() {
@@ -236,48 +312,122 @@ pub fn MessageInput(
         });
     };
 
-    // One effect owns every externally-driven composer fill — the edit mirror
-    // and the reply prefill (#23) — so the two sources cannot clobber each
-    // other across effect runs. `prev` carries the editing-message id from
-    // the previous run: the mirror only fires on an actual edit transition,
-    // and the prefill branch returns the current id so the transition that
-    // delivered it (reply cancels any edit) is not re-mirrored into a clear.
-    Effect::new(move |prev: Option<Option<String>>| {
-        let editing = editing_message.get();
-        let editing_id = editing.as_ref().map(|m| m.id().to_base64());
+    // Replace the draft (`@que`) with plain `@DisplayName ` — the draft
+    // shows names, never tokens (#56); send re-encodes to the canonical
+    // `<@BASE64_ID>` wire format. The pick is recorded so a shared display
+    // name still re-encodes to the member chosen here.
+    let insert_mention = move |user: &UserView| {
+        let Some(el) = textarea_ref.get_untracked() else { return };
+        let Some(draft) = mention_draft.get_untracked() else { return };
+        let units: Vec<u16> = el.value().encode_utf16().collect();
+        let caret = el.selection_start().ok().flatten().map(|c| c as usize).unwrap_or(units.len()).min(units.len());
+        let start = draft.start_utf16;
+        if start >= caret || units.get(start) != Some(&u16::from(b'@')) {
+            mention_draft.set(None); // stale anchor: the text changed under us
+            return;
+        }
+        let name = user.display_name().unwrap_or_default();
+        if name.is_empty() {
+            return; // candidates are name-filtered; belt for a race
+        }
+        mention_picks.update_value(|picks| {
+            picks.insert(name.clone(), user.id().to_base64());
+        });
+        splice_units(&el, start, caret, &format!("@{name} "));
+        mention_draft.set(None);
+    };
 
-        if let Some(text) = take_compose_prefill() {
-            mention_draft.set(None);
-            if prev.flatten().is_some() {
-                // The composer held an edit mirror; the reply cancelled that
-                // edit (documented in request_reply_prefill), so the mirror
-                // must not survive into the new message.
-                message_input.set(text);
-            } else {
-                // The composer holds an unsent draft (possibly empty):
-                // replying must not destroy it — quote on top, draft below.
-                message_input.update(|draft| {
-                    if draft.trim().is_empty() {
-                        *draft = text;
-                    } else {
-                        *draft = format!("{text}{draft}");
+    // Replace the draft (`:que`) with the chosen unicode glyph — input-time
+    // replacement only; what is stored is the plain emoji (#54 contract).
+    let insert_emoji = move |glyph: &str| {
+        let Some(el) = textarea_ref.get_untracked() else { return };
+        let Some(draft) = emoji_draft.get_untracked() else { return };
+        let units: Vec<u16> = el.value().encode_utf16().collect();
+        let caret = el.selection_start().ok().flatten().map(|c| c as usize).unwrap_or(units.len()).min(units.len());
+        let start = draft.start_utf16;
+        if start >= caret || units.get(start) != Some(&u16::from(b':')) {
+            emoji_draft.set(None); // stale anchor: the text changed under us
+            return;
+        }
+        splice_units(&el, start, caret, glyph);
+        emoji_draft.set(None);
+    };
+
+    // Inline completion (#54): a fully typed `:name:` becomes its glyph the
+    // moment the closing colon lands — no popup interaction required. IME
+    // composition updates are exempt (composing text must never be spliced
+    // mid-flight); names outside the table stay as typed, per the contract.
+    let complete_typed_shortcode = move |ev: &leptos::ev::Event| {
+        use wasm_bindgen::JsCast;
+        if ev.dyn_ref::<web_sys::InputEvent>().map(|e| e.is_composing()).unwrap_or(false) {
+            return;
+        }
+        let Some(el) = textarea_ref.get_untracked() else { return };
+        let Some(caret) = el.selection_start().ok().flatten().map(|c| c as usize) else { return };
+        let units: Vec<u16> = el.value().encode_utf16().collect();
+        let Some((start, name)) = completed_shortcode(&units, caret.min(units.len())) else { return };
+        let Some(glyph) = crate::emoji::lookup(&name) else { return };
+        splice_units(&el, start, caret, glyph);
+        emoji_draft.set(None);
+    };
+
+    // Edit-session snapshot (#56): the decoded editor text and the member set
+    // the decode ran against, captured when an edit enters the composer. The
+    // save's no-op check and re-encode use THIS snapshot — decode's lossless
+    // guard (encode(decode(x)) == x) only holds within one directory, so a
+    // member joining, leaving, or renaming while the editor is open could
+    // otherwise retarget or destroy a mention on a save the user never
+    // touched.
+    let edit_snapshot = StoredValue::new(None::<(String, Vec<(String, String)>)>);
+
+    // Mirror the edit target into the composer. `prev` carries the previous
+    // run's editing id, so only actual transitions rewrite the draft (signal
+    // re-notifications must never clobber typing). Entering an edit also
+    // disarms a pending reply (#23): send() would EDIT, not create, so a
+    // lingering chip would promise a `re` that never attaches. The reverse
+    // (Reply canceling an edit) is handled at the Reply action itself.
+    Effect::new({
+        let users = mention_users.clone();
+        move |prev: Option<Option<String>>| {
+            let editing = editing_message.get();
+            let editing_id = editing.as_ref().map(|m| m.id().to_base64());
+            if prev.map(|p| p != editing_id).unwrap_or(true) {
+                // Programmatic fill invalidates any draft anchor.
+                mention_draft.set(None);
+                emoji_draft.set(None);
+                match &editing {
+                    Some(edit_msg) => {
+                        replying_to.set(None);
+                        // Stored tokens decode to `@names` for the textarea
+                        // (#56); tokens that can't decode safely stay raw
+                        // (see MemberDirectory::decode). Snapshot the result
+                        // and the members it was computed against for the
+                        // save side (see `edit_snapshot`).
+                        let members: Vec<(String, String)> =
+                            users.peek().iter().map(|u| (u.id().to_base64(), u.display_name().unwrap_or_default())).collect();
+                        let dir = community_model::mention_display::MemberDirectory::new(members.iter().cloned());
+                        let decoded = dir.decode(&edit_msg.text().unwrap_or_default());
+                        message_input.set(decoded.clone());
+                        edit_snapshot.set_value(Some((decoded, members)));
                     }
-                });
+                    None => {
+                        edit_snapshot.set_value(None);
+                        message_input.set(String::new());
+                    }
+                }
             }
+            editing_id
+        }
+    });
+
+    // Arming a reply (#23) focuses the composer — the chip itself is chrome,
+    // and the user's next act is typing.
+    Effect::new(move |_| {
+        if replying_to.get().is_some() {
             if let Some(el) = textarea_ref.get_untracked() {
                 let _ = el.focus();
             }
-            return editing_id;
         }
-
-        if prev.map(|p| p != editing_id).unwrap_or(true) {
-            mention_draft.set(None); // programmatic fill invalidates any draft anchor
-            match &editing {
-                Some(edit_msg) => message_input.set(edit_msg.text().unwrap_or_default()),
-                None => message_input.set(String::new()),
-            }
-        }
-        editing_id
     });
 
     // Refit the textarea after every programmatic content change (edit-mirror
@@ -294,8 +444,10 @@ pub fn MessageInput(
     let send = {
         let current_user = current_user.clone();
         let room = room.clone();
+        let mention_users = mention_users.clone();
         move || {
             mention_draft.set(None);
+            emoji_draft.set(None);
             let input_text = message_input.get();
             if input_text.trim().is_empty() {
                 return;
@@ -306,17 +458,43 @@ pub fn MessageInput(
             };
 
             if let Some(edit_msg) = editing_message.get() {
-                // Edit existing message via a CRDT text replace.
+                // Edit existing message via a CRDT text replace. The editor
+                // held display text; the wire gets the re-encoded form (#56),
+                // built against the EDIT-ENTRY snapshot — the same directory
+                // that produced the editor text (see `edit_snapshot`), so a
+                // membership change mid-edit can't shift what a save means.
                 let input_text = input_text.trim().to_string();
+                let (entry_decoded, members) = edit_snapshot.get_value().unwrap_or_else(|| {
+                    // Defensive only: the snapshot is written by the same
+                    // effect that filled the editor. Absent, the current
+                    // members are the best approximation of what it shows.
+                    let members: Vec<(String, String)> =
+                        mention_users.peek().iter().map(|u| (u.id().to_base64(), u.display_name().unwrap_or_default())).collect();
+                    let dir = community_model::mention_display::MemberDirectory::new(members.iter().cloned());
+                    (dir.decode(&edit_msg.text().unwrap_or_default()), members)
+                });
+                let picks = mention_picks.get_value();
                 wasm_bindgen_futures::spawn_local(async move {
                     let result = async {
-                        // No-op edits commit nothing (and earn no "(edited)" marker).
-                        if edit_msg.text().unwrap_or_default() == input_text {
+                        let stored = edit_msg.text().unwrap_or_default();
+                        // No-op edits commit nothing (and earn no "(edited)"
+                        // marker). "Unchanged" means the editor still shows
+                        // exactly what the edit-entry decode produced —
+                        // comparing wire forms would stamp a phantom edit
+                        // whenever decode had fallen back to raw tokens, and
+                        // a fresh decode would judge against a directory the
+                        // user never saw.
+                        if entry_decoded == input_text {
                             return Ok(());
+                        }
+                        let dir = community_model::mention_display::MemberDirectory::new(members.into_iter());
+                        let wire_text = dir.encode(&input_text, &picks);
+                        if wire_text == stored {
+                            return Ok(()); // byte-identical outcome (e.g. a re-typed mention)
                         }
                         let trx = ctx().begin();
                         let mutable = edit_msg.edit(&trx)?;
-                        mutable.text().replace(&input_text)?;
+                        mutable.text().replace(&wire_text)?;
                         // Stamp the edit for the "(edited)" indicator (#11).
                         mutable.edited_at().set(&Some(js_sys::Date::now() as i64))?;
                         trx.commit().await?;
@@ -332,13 +510,21 @@ pub fn MessageInput(
                     }
                 });
             } else {
-                // Create a new message. ankurah stores user/room as typed Refs.
+                // Create a new message. ankurah stores user/room as typed Refs;
+                // an armed reply (#23) rides along as `re`. The wire text is
+                // the display draft with `@Name` runs re-encoded to canonical
+                // tokens (#56) — what the server's mention scanner fans out.
                 let user_ref = ankurah::Ref::from(&user);
                 let room_ref = ankurah::Ref::from(&room);
                 let input_text = input_text.trim().to_string();
+                let wire_text = directory().encode(&input_text, &mention_picks.get_value());
+                let reply_to = replying_to.get_untracked();
+                let re = reply_to.as_ref().map(ankurah::Ref::from);
                 // Clear synchronously: clearing only in the async completion
                 // left a window where a second Enter re-sent the same text.
+                // The reply chip clears with it — this send owns it now.
                 message_input.set(String::new());
+                replying_to.set(None);
                 wasm_bindgen_futures::spawn_local(async move {
                     let result = async {
                         let trx = ctx().begin();
@@ -346,11 +532,12 @@ pub fn MessageInput(
                         trx.create(&Message {
                             user: user_ref,
                             room: room_ref,
-                            text: input_text.clone(),
+                            text: wire_text,
                             timestamp,
                             deleted: false,
                             edited_at: None,
                             collaborative: None,
+                            re,
                         })
                         .await?;
                         trx.commit().await?;
@@ -360,7 +547,11 @@ pub fn MessageInput(
                     if let Err(e) = result {
                         tracing::error!("Failed to send message: {}", e);
                         // Put the failed text back — above anything typed since,
-                        // never over it.
+                        // never over it — and re-arm the reply unless a new one
+                        // was chosen meanwhile, or an edit began (the chip and
+                        // an edit are mutually exclusive; resurrecting it under
+                        // an open editor would promise a `re` on the NEXT new
+                        // message instead).
                         message_input.update(|current| {
                             if current.trim().is_empty() {
                                 *current = input_text;
@@ -368,6 +559,9 @@ pub fn MessageInput(
                                 *current = format!("{input_text}\n{current}");
                             }
                         });
+                        if replying_to.get_untracked().is_none() && editing_message.get_untracked().is_none() {
+                            replying_to.set(reply_to);
+                        }
                     }
                 });
             }
@@ -460,6 +654,44 @@ pub fn MessageInput(
                     _ => {}
                 }
             }
+            // The emoji popup (#54) captures the same keys while open, with
+            // the same IME guards. Never open at the same time as the mention
+            // popup (the drafts are mutually exclusive by construction).
+            let ematches = emoji_matches.get_untracked();
+            if !ematches.is_empty() && !e.meta_key() && !e.ctrl_key() && !e.alt_key() {
+                match e.key().as_str() {
+                    "ArrowDown" => {
+                        e.prevent_default();
+                        emoji_selected.update(|i| *i = (*i + 1) % ematches.len());
+                        return;
+                    }
+                    "ArrowUp" => {
+                        e.prevent_default();
+                        emoji_selected.update(|i| *i = (*i + ematches.len() - 1) % ematches.len());
+                        return;
+                    }
+                    "Enter" | "Tab" if !e.shift_key() => {
+                        // Same WebKit guard as the mention popup: the
+                        // composition-commit keydown (keyCode 229) must not
+                        // read as popup confirmation.
+                        if !e.is_composing() && e.key_code() != 229 {
+                            e.prevent_default();
+                            let idx = emoji_selected.get_untracked().min(ematches.len() - 1);
+                            insert_emoji(ematches[idx].1);
+                        }
+                        return;
+                    }
+                    "Escape" => {
+                        // Consumed: the window-level Escape (panel manager)
+                        // skips defaultPrevented events, so only the popup
+                        // closes.
+                        e.prevent_default();
+                        emoji_draft.set(None);
+                        return;
+                    }
+                    _ => {}
+                }
+            }
             // Enter sends; Shift+Enter falls through to the textarea's native
             // newline (#50). An Enter that confirms an IME composition must
             // not send: isComposing covers Chrome/Firefox, and keyCode 229
@@ -473,6 +705,12 @@ pub fn MessageInput(
                 e.prevent_default();
                 editing_message.set(None);
                 message_input.set(String::new());
+            } else if e.key() == "Escape" && replying_to.get().is_some() {
+                // Cancel the armed reply (#23); the draft text is untouched.
+                // preventDefault keeps the window-level Escape (panel manager)
+                // from also acting on this press.
+                e.prevent_default();
+                replying_to.set(None);
             } else if e.key() == "ArrowUp" && (e.meta_key() || e.ctrl_key()) {
                 e.prevent_default();
                 navigate_own(true);
@@ -535,6 +773,89 @@ pub fn MessageInput(
                     }}
                 </div>
             </Show>
+            // Emoji autocomplete popup (#54): same shell and interaction
+            // contract as the mention popup, over the shortcode table.
+            <Show when=move || !emoji_matches.get().is_empty()>
+                <div
+                    class="mentionPopup"
+                    role="listbox"
+                    aria-label="Insert an emoji"
+                    on:mousedown=|e: leptos::ev::MouseEvent| e.prevent_default()
+                >
+                    {move || {
+                        emoji_matches
+                            .get()
+                            .into_iter()
+                            .enumerate()
+                            .map(|(i, (name, glyph))| {
+                                view! {
+                                    <button
+                                        type="button"
+                                        class=move || {
+                                            if emoji_selected.get() == i {
+                                                "mentionItem active"
+                                            } else {
+                                                "mentionItem"
+                                            }
+                                        }
+                                        role="option"
+                                        aria-selected=move || {
+                                            if emoji_selected.get() == i { "true" } else { "false" }
+                                        }
+                                        on:mouseenter=move |_| emoji_selected.set(i)
+                                        on:click=move |_| insert_emoji(glyph)
+                                    >
+                                        <span class="emojiGlyph" aria-hidden="true">{glyph}</span>
+                                        <span class="mentionName">{format!(":{name}:")}</span>
+                                    </button>
+                                }
+                            })
+                            .collect_view()
+                    }}
+                </div>
+            </Show>
+            // Reply chip (#23): compact "Replying to …" state above the input.
+            // Live reads: a rename, edit, or delete of the original while the
+            // chip is up re-renders it (a deleted original still sends — `re`
+            // points at the tombstone, which the preview renders honestly).
+            <Show when=move || replying_to.get().is_some()>
+                {move || {
+                    replying_to
+                        .get()
+                        .map(|orig| {
+                            let author_id = orig.user().map(|r| r.id().to_base64()).unwrap_or_default();
+                            let author = member_names
+                                .with(|names| names.get(&author_id).cloned())
+                                .filter(|n| !n.is_empty())
+                                .unwrap_or_else(|| "Unknown".to_string());
+                            let snippet = if orig.deleted().unwrap_or(false) {
+                                "Removed message".to_string()
+                            } else {
+                                member_names
+                                    .with(|names| crate::mentions::reply_snippet(&orig.text().unwrap_or_default(), names))
+                            };
+                            view! {
+                                <div class="replyingNotice">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                                        stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                        <polyline points="9 14 4 9 9 4" />
+                                        <path d="M20 20v-7a4 4 0 0 0-4-4H4" />
+                                    </svg>
+                                    <span class="replyingNoticeLabel">"Replying to " {author}</span>
+                                    <span class="replyingNoticeSnippet">{snippet}</span>
+                                    <button
+                                        class="replyingNoticeCancel"
+                                        aria-label="Cancel reply"
+                                        title="Cancel reply"
+                                        on:click=move |_| replying_to.set(None)
+                                    >
+                                        "×"
+                                    </button>
+                                </div>
+                            }
+                        })
+                }}
+            </Show>
             <Show when=move || editing_message.get().is_some()>
                 <div class="editingNotice">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
@@ -563,21 +884,27 @@ pub fn MessageInput(
                         if let Some(el) = textarea_ref.get_untracked() {
                             autosize(&el);
                         }
-                        refresh_mention_draft();
+                        // Order matters: a just-completed `:name:` splices
+                        // first (#54); the drafts re-derive from the result.
+                        complete_typed_shortcode(&ev);
+                        refresh_drafts();
                     }
                     on:keydown=handle_key_down
                     // Caret moves without input events (#18): arrows/Home/End
-                    // keyup and mouse clicks re-derive the mention draft.
+                    // keyup and mouse clicks re-derive the drafts.
                     on:keyup=move |e: KeyboardEvent| {
                         if matches!(
                             e.key().as_str(),
                             "ArrowLeft" | "ArrowRight" | "ArrowUp" | "ArrowDown" | "Home" | "End"
                         ) {
-                            refresh_mention_draft();
+                            refresh_drafts();
                         }
                     }
-                    on:click=move |_| refresh_mention_draft()
-                    on:blur=move |_| mention_draft.set(None)
+                    on:click=move |_| refresh_drafts()
+                    on:blur=move |_| {
+                        mention_draft.set(None);
+                        emoji_draft.set(None);
+                    }
                     prop:disabled=move || !is_connected()
                 ></textarea>
                 <Show when=move || editing_message.get().is_some()>

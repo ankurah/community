@@ -2,7 +2,7 @@ use leptos::ev::MouseEvent;
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 
-use ankurah::LiveQuery;
+use ankurah::{EntityId, LiveQuery};
 use ankurah_signals::Get as AnkurahGet;
 use community_model::{LinkPreviewView, MessageView, UserView};
 
@@ -26,6 +26,8 @@ pub fn MessageRow(
     users: LiveQuery<UserView>,
     current_user_id: Option<String>,
     editing_message: RwSignal<Option<MessageView>>,
+    /// The composer's reply state (#23), armed by this row's context menu.
+    replying_to: RwSignal<Option<MessageView>>,
     first_in_group: bool,
     last_in_group: bool,
     day_label: Option<String>,
@@ -191,8 +193,11 @@ pub fn MessageRow(
     let avatar_hue = fmt::hue_class(&author_user_id);
     let author_for_avatar = author.clone();
     let author_for_name = author.clone();
-    let author_for_menu = author.clone();
     let message_for_tomb = message.clone();
+
+    // Reply context (#23): the referenced original's id, if any. `re` is set
+    // at creation and never edited, so a non-reactive read is correct.
+    let reply_target = message.re().ok().flatten().map(|r| r.id());
 
     view! {
         {day_label.map(|label| {
@@ -308,11 +313,17 @@ pub fn MessageRow(
                             let message_for_text = message_for_text.clone();
                             let message_for_edited = message_for_edited.clone();
                             let message_for_collab = message_for_collab.clone();
+                            let reply_target = reply_target.clone();
                             move || {
                                 let message_for_text = message_for_text.clone();
                                 let message_for_edited = message_for_edited.clone();
                                 let message_for_collab = message_for_collab.clone();
                                 view! {
+                                    // Embedded reply preview (#23): the referenced
+                                    // original, above the body, inside the bubble.
+                                    {reply_target
+                                        .clone()
+                                        .map(|target| view! { <ReplyPreview target mention_names /> })}
                                     // Reactive read: CRDT text edits (local or remote)
                                     // re-render the bubble; markdown parses when the
                                     // text — or the mention-name map (#18) — changes.
@@ -452,7 +463,6 @@ pub fn MessageRow(
                 }>
                     {
                         let message = message.clone();
-                        let author_for_menu = author_for_menu.clone();
                         move || {
                             context_menu.get().map(|(x, y)| {
                                 view! {
@@ -461,16 +471,8 @@ pub fn MessageRow(
                                         y=y
                                         message=message.clone()
                                         editing_message=editing_message
+                                        replying_to=replying_to
                                         is_own=is_own_message
-                                        // Resolved at open time, for the reply quote (#23).
-                                        author_name=author_for_menu()
-                                            .map(|u| u.display_name().unwrap_or_default())
-                                            .filter(|n| !n.is_empty())
-                                            .unwrap_or_else(|| "Unknown".to_string())
-                                        reply_source=crate::message_input::resolve_mention_tokens(
-                                            &message.text().unwrap_or_default(),
-                                            &mention_names.get_untracked(),
-                                        )
                                         on_close=move || {
                                             context_menu.set(None);
                                             // Keyboard path: hand focus back to the trigger.
@@ -488,6 +490,110 @@ pub fn MessageRow(
                 </Show>
             </div>
         </div>
+    }
+}
+
+/// Embedded preview of the replied-to message (#23): author + one-line
+/// snippet inside the reply's bubble. The ref resolves once via `ctx().get`
+/// (local-first, then the peer — the TombstoneNotice per-row idiom: cost
+/// confined to rows that actually carry `re`); the resolved view is live
+/// afterwards, so an edit or delete of the original re-renders the preview
+/// (tombstones render "Removed message"). Clicking jumps to the original
+/// when it is rendered in the current timeline; a target outside the loaded
+/// window does nothing — deliberately no pagination gymnastics here
+/// (first-class jump APIs are the ankurah#357 item 4 ask).
+#[component]
+fn ReplyPreview(target: EntityId, mention_names: Memo<HashMap<String, String>>) -> impl IntoView {
+    let original = RwSignal::new(None::<MessageView>);
+    let unresolvable = RwSignal::new(false);
+    {
+        let target = target.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            match crate::ctx().get::<MessageView>(target.clone()).await {
+                // try_set: the row may have been unmounted (virtual scroll)
+                // before the fetch resolved.
+                Ok(m) => {
+                    let _ = original.try_set(Some(m));
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to resolve reply target {}: {}", target.to_base64(), e);
+                    let _ = unresolvable.try_set(true);
+                }
+            }
+        });
+    }
+
+    let target_b64 = target.to_base64();
+    let jump = move |e: MouseEvent| {
+        // Keep the click off the bubble's own handlers (x-ray exempts
+        // buttons, but be explicit).
+        e.stop_propagation();
+        jump_to_message(&target_b64);
+    };
+
+    view! {
+        <button type="button" class="replyPreview" title="Jump to the original message" on:click=jump>
+            {move || match (original.get(), unresolvable.get()) {
+                (Some(orig), _) => {
+                    if orig.deleted().unwrap_or(false) {
+                        view! { <span class="replyPreviewGone">"Removed message"</span> }.into_any()
+                    } else {
+                        let author_id = orig.user().map(|r| r.id().to_base64()).unwrap_or_default();
+                        let (author, snippet) = mention_names
+                            .with(|names| {
+                                (
+                                    names
+                                        .get(&author_id)
+                                        .cloned()
+                                        .filter(|n| !n.is_empty())
+                                        .unwrap_or_else(|| "Unknown".to_string()),
+                                    crate::mentions::reply_snippet(
+                                        &orig.text().unwrap_or_default(),
+                                        names,
+                                    ),
+                                )
+                            });
+                        view! {
+                            <span class="replyPreviewAuthor">{author}</span>
+                            <span class="replyPreviewSnippet">{snippet}</span>
+                        }
+                            .into_any()
+                    }
+                }
+                (None, true) => {
+                    view! { <span class="replyPreviewGone">"Unavailable message"</span> }.into_any()
+                }
+                // Resolving (usually a single local read) — keep the frame so
+                // the row's height settles in one step, not two.
+                (None, false) => view! { <span class="replyPreviewGone">"\u{2026}"</span> }.into_any(),
+            }}
+        </button>
+    }
+}
+
+/// Scroll a message's bubble into view with a brief highlight wash — only if
+/// it is currently rendered (the virtual scroller keeps a bounded window; a
+/// target outside it has no DOM node and the click quietly does nothing).
+fn jump_to_message(msg_id_b64: &str) {
+    let Some(doc) = web_sys::window().and_then(|w| w.document()) else { return };
+    // Base64url ids ([A-Za-z0-9_-]) are inert inside a quoted attribute selector.
+    let selector = format!(".messageBubble[data-msg-id=\"{msg_id_b64}\"]");
+    let Ok(Some(el)) = doc.query_selector(&selector) else { return };
+    let options = web_sys::ScrollIntoViewOptions::new();
+    options.set_behavior(web_sys::ScrollBehavior::Smooth);
+    options.set_block(web_sys::ScrollLogicalPosition::Center);
+    el.scroll_into_view_with_scroll_into_view_options(&options);
+    // The wash animation plays once; removing the class afterwards lets a
+    // repeat click re-trigger it. Timeout outlives the animation (1.4s).
+    let _ = el.class_list().add_1("replyJumpFlash");
+    let closure = wasm_bindgen::closure::Closure::once_into_js({
+        let el = el.clone();
+        move || {
+            let _ = el.class_list().remove_1("replyJumpFlash");
+        }
+    });
+    if let Some(win) = web_sys::window() {
+        let _ = win.set_timeout_with_callback_and_timeout_and_arguments_0(closure.unchecked_ref(), 1600);
     }
 }
 
