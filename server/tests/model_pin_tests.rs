@@ -31,9 +31,13 @@ fn message(user: ankurah::EntityId, room: ankurah::EntityId, text: &str, re: Opt
 }
 
 /// `Message.re` (#23): a `Ref` written at creation reads back with the same
-/// id, and a row created with `None` — which never writes the property, the
-/// same storage shape as every pre-reply legacy row — reads `Ok(None)`
-/// through `Option<Ref<_>>` instead of erroring.
+/// id, and a row created with `None` reads `Ok(None)` through
+/// `Option<Ref<_>>` instead of erroring. Shape caveat: a fresh `None` row
+/// stores the property WITH a null value (the derive initializes every
+/// field); a true pre-reply legacy row lacks the key entirely. Both collapse
+/// to `Option<Value>::None` at the LWW read — that read behavior is what
+/// this pins. A regression specific to absent-key handling would need a
+/// field-less stand-in model on this collection to catch.
 #[tokio::test(flavor = "multi_thread")]
 async fn reply_ref_round_trips_and_absent_property_reads_none() {
     let ctx = test_context().await;
@@ -45,7 +49,8 @@ async fn reply_ref_round_trips_and_absent_property_reads_none() {
     let reply = trx.create(&message(author, room, "the reply", Some(original.into()))).await.unwrap().id();
     trx.commit().await.unwrap();
 
-    // Legacy-row shape: the property was never written; Option reads None.
+    // Null-valued property (fresh `re: None` row) reads None — the same
+    // Option collapse an absent-key legacy row takes (see the doc comment).
     let original_view = ctx.get::<MessageView>(original).await.unwrap();
     assert_eq!(original_view.re().unwrap().map(|r| r.id()), None);
 

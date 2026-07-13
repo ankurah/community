@@ -186,39 +186,76 @@ fn token_at(text: &str, i: usize) -> Option<(Range<usize>, &str)> {
     ((1..=MAX_MENTION_ID_LEN).contains(&len) && end < bytes.len() && bytes[end] == b'>').then(|| (i..end + 1, &text[start..end]))
 }
 
-/// Byte ranges covered by code — fenced blocks and inline backtick spans —
-/// where mention coding must not look. Minimal CommonMark approximation:
+/// Byte ranges covered by code — fenced blocks, indented code blocks, and
+/// inline backtick spans — where mention coding must not look. Minimal
+/// CommonMark approximation:
 /// - A line whose first non-space (≤3) run is 3+ backticks/tildes opens a
-///   fence; a later line that is just an equal-or-longer run of the same
+///   fence; a later line that is just an equal-or-longer run of the SAME
 ///   char (plus whitespace) closes it. Unclosed runs to the end.
-/// - Outside fences, a run of N backticks opens an inline span closed by
+/// - A 4+-space (or tab) indented line following a blank line, the document
+///   start, or a fence close opens an indented code block, which runs
+///   through further indented or blank lines. This deliberately
+///   over-approximates the renderer (which also demands the block not
+///   interrupt a paragraph in a few lazy-continuation shapes we don't
+///   track): over-protection leaves a mention as literal text — the safe
+///   direction — while under-protection would rewrite renderer-code.
+/// - Outside code, a run of N backticks opens an inline span closed by
 ///   the next run of exactly N backticks; an unmatched opener is literal.
 fn code_ranges(text: &str) -> Vec<Range<usize>> {
     let mut ranges: Vec<Range<usize>> = Vec::new();
     let mut fence: Option<(u8, usize, usize)> = None; // (char, run len, block start)
+    let mut indented_start: Option<usize> = None;
+    let mut prev_blank = true; // doc start opens blocks like a blank line does
     let mut plain_start = 0;
     let mut pos = 0;
     for line in text.split_inclusive('\n') {
-        match (fence, fence_run(line)) {
-            (None, Some((ch, len))) => {
+        let blank = line.trim().is_empty();
+        if let Some((ch, len, start)) = fence {
+            if let Some((c, l)) = fence_run(line) {
+                if c == ch && l >= len && closes_fence(line, ch) {
+                    ranges.push(start..pos + line.len());
+                    fence = None;
+                    plain_start = pos + line.len();
+                    // An indented line straight after a closed fence is code
+                    // to the renderer too — treat the boundary like a blank.
+                    prev_blank = true;
+                    pos += line.len();
+                    continue;
+                }
+            }
+        } else {
+            if let Some(start) = indented_start {
+                if blank || indented_line(line) {
+                    prev_blank = blank;
+                    pos += line.len();
+                    continue;
+                }
+                // First non-blank, non-indented line ends the block; it is
+                // then examined normally below (it may open a fence).
+                ranges.push(start..pos);
+                indented_start = None;
+                plain_start = pos;
+            }
+            if let Some((ch, len)) = fence_run(line) {
                 inline_code_spans(&text[plain_start..pos], plain_start, &mut ranges);
                 fence = Some((ch, len, pos));
+            } else if prev_blank && !blank && indented_line(line) {
+                inline_code_spans(&text[plain_start..pos], plain_start, &mut ranges);
+                indented_start = Some(pos);
             }
-            (Some((ch, len, start)), Some((c, l))) if c == ch && l >= len && closes_fence(line) => {
-                ranges.push(start..pos + line.len());
-                fence = None;
-                plain_start = pos + line.len();
-            }
-            _ => {}
         }
+        prev_blank = blank;
         pos += line.len();
     }
-    match fence {
-        Some((_, _, start)) => ranges.push(start..text.len()),
-        None => inline_code_spans(&text[plain_start..], plain_start, &mut ranges),
+    match (fence, indented_start) {
+        (Some((_, _, start)), _) | (None, Some(start)) => ranges.push(start..text.len()),
+        (None, None) => inline_code_spans(&text[plain_start..], plain_start, &mut ranges),
     }
     ranges
 }
+
+/// 4+ spaces (or a tab) of leading indent — an indented-code chunk line.
+fn indented_line(line: &str) -> bool { line.starts_with("    ") || line.starts_with('\t') }
 
 /// The fence run opening `line`, if any: (fence char, run length).
 fn fence_run(line: &str) -> Option<(u8, usize)> {
@@ -234,10 +271,12 @@ fn fence_run(line: &str) -> Option<(u8, usize)> {
     (len >= 3).then_some((ch, len))
 }
 
-/// Whether a fence-run line qualifies as a CLOSER: nothing but the run and
-/// whitespace (an info string re-opens, it doesn't close).
-fn closes_fence(line: &str) -> bool {
-    line.trim().bytes().all(|b| b == b'`' || b == b'~')
+/// Whether a fence-run line qualifies as a CLOSER for a fence of char `ch`:
+/// nothing but that char's run and whitespace (an info string re-opens, it
+/// doesn't close; a mixed run like "```~~~" closes nothing — the renderer
+/// keeps the block open, so we must too).
+fn closes_fence(line: &str, ch: u8) -> bool {
+    line.trim().bytes().all(|b| b == ch)
 }
 
 /// Inline backtick spans within `segment` (at byte offset `base` of the full
@@ -391,5 +430,31 @@ mod tests {
         // A shorter run does not close; the fence runs on.
         let nested = "````\n@Ann\n```\n@Ann";
         assert_eq!(d.encode(nested, &none()), nested);
+        // A mixed run closes nothing (the renderer keeps the block open):
+        // everything after the opener stays verbatim.
+        let mixed = "```\ncode\n```~~~\n@Ann\n```";
+        assert_eq!(d.encode(mixed, &none()), mixed);
+    }
+
+    #[test]
+    fn indented_code_is_verbatim() {
+        let d = dir(&[(ANN, "Dan")]);
+        // The renderer parses a 4-space line after a blank as an indented
+        // code block — encode must not rewrite inside it.
+        let indented = "note:\n\n    reviewed by @Dan\n\nthanks *all*";
+        assert_eq!(d.encode(indented, &none()), indented);
+        // …and decode must leave tokens in it raw.
+        let stored = format!("note:\n\n    reviewed by <@{ANN}>\n\nthanks");
+        assert_eq!(d.decode(&stored), stored);
+        // Tab indent counts; the block extends over blank + indented lines.
+        let tabbed = "a:\n\n\t@Dan\n\n    @Dan\nplain @Dan";
+        assert_eq!(d.encode(tabbed, &none()), format!("a:\n\n\t@Dan\n\n    @Dan\nplain <@{ANN}>"));
+        // 4-space indent WITHOUT a preceding blank is paragraph continuation
+        // to the renderer — encoding there is correct, not a rewrite.
+        let lazy = "para\n    @Dan";
+        assert_eq!(d.encode(lazy, &none()), format!("para\n    <@{ANN}>"));
+        // Indented line straight after a closed fence is code to both sides.
+        let after_fence = "```\nx\n```\n    @Dan";
+        assert_eq!(d.encode(after_fence, &none()), after_fence);
     }
 }

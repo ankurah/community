@@ -371,6 +371,15 @@ pub fn MessageInput(
         emoji_draft.set(None);
     };
 
+    // Edit-session snapshot (#56): the decoded editor text and the member set
+    // the decode ran against, captured when an edit enters the composer. The
+    // save's no-op check and re-encode use THIS snapshot — decode's lossless
+    // guard (encode(decode(x)) == x) only holds within one directory, so a
+    // member joining, leaving, or renaming while the editor is open could
+    // otherwise retarget or destroy a mention on a save the user never
+    // touched.
+    let edit_snapshot = StoredValue::new(None::<(String, Vec<(String, String)>)>);
+
     // Mirror the edit target into the composer. `prev` carries the previous
     // run's editing id, so only actual transitions rewrite the draft (signal
     // re-notifications must never clobber typing). Entering an edit also
@@ -378,7 +387,7 @@ pub fn MessageInput(
     // lingering chip would promise a `re` that never attaches. The reverse
     // (Reply canceling an edit) is handled at the Reply action itself.
     Effect::new({
-        let directory = directory.clone();
+        let users = mention_users.clone();
         move |prev: Option<Option<String>>| {
             let editing = editing_message.get();
             let editing_id = editing.as_ref().map(|m| m.id().to_base64());
@@ -391,10 +400,20 @@ pub fn MessageInput(
                         replying_to.set(None);
                         // Stored tokens decode to `@names` for the textarea
                         // (#56); tokens that can't decode safely stay raw
-                        // (see MemberDirectory::decode).
-                        message_input.set(directory().decode(&edit_msg.text().unwrap_or_default()));
+                        // (see MemberDirectory::decode). Snapshot the result
+                        // and the members it was computed against for the
+                        // save side (see `edit_snapshot`).
+                        let members: Vec<(String, String)> =
+                            users.peek().iter().map(|u| (u.id().to_base64(), u.display_name().unwrap_or_default())).collect();
+                        let dir = community_model::mention_display::MemberDirectory::new(members.iter().cloned());
+                        let decoded = dir.decode(&edit_msg.text().unwrap_or_default());
+                        message_input.set(decoded.clone());
+                        edit_snapshot.set_value(Some((decoded, members)));
                     }
-                    None => message_input.set(String::new()),
+                    None => {
+                        edit_snapshot.set_value(None);
+                        message_input.set(String::new());
+                    }
                 }
             }
             editing_id
@@ -425,6 +444,7 @@ pub fn MessageInput(
     let send = {
         let current_user = current_user.clone();
         let room = room.clone();
+        let mention_users = mention_users.clone();
         move || {
             mention_draft.set(None);
             emoji_draft.set(None);
@@ -439,21 +459,35 @@ pub fn MessageInput(
 
             if let Some(edit_msg) = editing_message.get() {
                 // Edit existing message via a CRDT text replace. The editor
-                // held display text; the wire gets the re-encoded form (#56).
+                // held display text; the wire gets the re-encoded form (#56),
+                // built against the EDIT-ENTRY snapshot — the same directory
+                // that produced the editor text (see `edit_snapshot`), so a
+                // membership change mid-edit can't shift what a save means.
                 let input_text = input_text.trim().to_string();
-                let dir = directory();
+                let (entry_decoded, members) = edit_snapshot.get_value().unwrap_or_else(|| {
+                    // Defensive only: the snapshot is written by the same
+                    // effect that filled the editor. Absent, the current
+                    // members are the best approximation of what it shows.
+                    let members: Vec<(String, String)> =
+                        mention_users.peek().iter().map(|u| (u.id().to_base64(), u.display_name().unwrap_or_default())).collect();
+                    let dir = community_model::mention_display::MemberDirectory::new(members.iter().cloned());
+                    (dir.decode(&edit_msg.text().unwrap_or_default()), members)
+                });
                 let picks = mention_picks.get_value();
                 wasm_bindgen_futures::spawn_local(async move {
                     let result = async {
                         let stored = edit_msg.text().unwrap_or_default();
                         // No-op edits commit nothing (and earn no "(edited)"
                         // marker). "Unchanged" means the editor still shows
-                        // what the stored text decodes to — comparing wire
-                        // forms would stamp a phantom edit whenever decode
-                        // had fallen back to raw tokens.
-                        if dir.decode(&stored) == input_text {
+                        // exactly what the edit-entry decode produced —
+                        // comparing wire forms would stamp a phantom edit
+                        // whenever decode had fallen back to raw tokens, and
+                        // a fresh decode would judge against a directory the
+                        // user never saw.
+                        if entry_decoded == input_text {
                             return Ok(());
                         }
+                        let dir = community_model::mention_display::MemberDirectory::new(members.into_iter());
                         let wire_text = dir.encode(&input_text, &picks);
                         if wire_text == stored {
                             return Ok(()); // byte-identical outcome (e.g. a re-typed mention)
@@ -514,7 +548,10 @@ pub fn MessageInput(
                         tracing::error!("Failed to send message: {}", e);
                         // Put the failed text back — above anything typed since,
                         // never over it — and re-arm the reply unless a new one
-                        // was chosen meanwhile.
+                        // was chosen meanwhile, or an edit began (the chip and
+                        // an edit are mutually exclusive; resurrecting it under
+                        // an open editor would promise a `re` on the NEXT new
+                        // message instead).
                         message_input.update(|current| {
                             if current.trim().is_empty() {
                                 *current = input_text;
@@ -522,7 +559,7 @@ pub fn MessageInput(
                                 *current = format!("{input_text}\n{current}");
                             }
                         });
-                        if replying_to.get_untracked().is_none() {
+                        if replying_to.get_untracked().is_none() && editing_message.get_untracked().is_none() {
                             replying_to.set(reply_to);
                         }
                     }

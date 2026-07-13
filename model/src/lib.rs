@@ -91,9 +91,12 @@ pub struct Message {
     /// The message this one replies to (#23, nested replies). `None` for
     /// ordinary messages, and absent on every pre-reply row — only
     /// `Option<T>` reads an absent property as `None` (bare types surface
-    /// `PropertyError::Missing`). Rows created with `None` never write the
-    /// property, so queries touching this field must stay equality-only —
-    /// see the `ModAction.message` note. Set at creation, never edited.
+    /// `PropertyError::Missing`). Two storage shapes collapse to that `None`:
+    /// a fresh row created with `None` carries the property with a null
+    /// value (the derive initializes every field), a legacy row lacks the
+    /// key entirely. Same read, different bytes — so queries touching this
+    /// field must stay equality-only, per the `ModAction.message` note. Set
+    /// at creation, never edited.
     #[active_type(LWW)]
     pub re: Option<Ref<Message>>,
 }
