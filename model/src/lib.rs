@@ -1,6 +1,7 @@
 use ankurah::{property::Json, Model, Ref};
 use serde::{Deserialize, Serialize};
 
+pub mod mention_display;
 pub mod text;
 pub use text::{extract_urls, parse_mentions};
 

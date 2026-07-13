@@ -3,7 +3,7 @@ use leptos::prelude::*;
 use std::collections::HashMap;
 use web_sys::KeyboardEvent;
 
-use ankurah_signals::Get as AnkurahGet;
+use ankurah_signals::{Get as AnkurahGet, Peek as AnkurahPeek};
 use community_model::{Message, MessageView, RoomView, UserView};
 
 use crate::{ctx, fmt, ws_client};
@@ -181,6 +181,12 @@ fn mention_candidates(users: &[UserView], query: &str) -> Vec<UserView> {
 /// `@` opens the mention autocomplete (#18). While a reply is armed (#23) a
 /// "Replying to …" chip sits above the input; sending attaches the referenced
 /// message as `re`.
+///
+/// The draft holds plain `@DisplayName` text, never raw tokens (#56): the
+/// autocomplete inserts the name, send re-encodes matching `@Name` runs to
+/// canonical `<@id>` tokens (mention_display::MemberDirectory), and the edit
+/// mirror decodes stored tokens back for the textarea. The wire format is
+/// untouched — the server scanner sees exactly what it always saw.
 #[component]
 pub fn MessageInput(
     room: RoomView,
@@ -224,6 +230,24 @@ pub fn MessageInput(
         Some(draft) => crate::emoji::candidates(&draft.query, EMOJI_POPUP_MAX),
         None => Vec::new(),
     });
+
+    // Which member an autocompleted name meant (#56): name → id, recorded at
+    // pick time so an ambiguous display name re-encodes to the member the
+    // user actually chose. Session-scoped; a name never picked falls back to
+    // the directory's deterministic choice.
+    let mention_picks = StoredValue::new(HashMap::<String, String>::new());
+
+    // Snapshot of the member list for coding (#56). Untracked on purpose:
+    // send/mirror moments want the list as of NOW, and must not re-run when
+    // users change.
+    let directory = {
+        let users = mention_users.clone();
+        move || {
+            community_model::mention_display::MemberDirectory::new(
+                users.peek().iter().map(|u| (u.id().to_base64(), u.display_name().unwrap_or_default())),
+            )
+        }
+    };
 
     // id → display-name map for the reply chip (#23): the author line and
     // token resolution in the snippet. Rebuilt live (renames included) from
@@ -288,9 +312,10 @@ pub fn MessageInput(
         });
     };
 
-    // Replace the draft (`@que`) with the canonical token `<@BASE64_ID> ` —
-    // the exact format community_model::parse_mentions (and the server's
-    // notification fan-out) recognizes.
+    // Replace the draft (`@que`) with plain `@DisplayName ` — the draft
+    // shows names, never tokens (#56); send re-encodes to the canonical
+    // `<@BASE64_ID>` wire format. The pick is recorded so a shared display
+    // name still re-encodes to the member chosen here.
     let insert_mention = move |user: &UserView| {
         let Some(el) = textarea_ref.get_untracked() else { return };
         let Some(draft) = mention_draft.get_untracked() else { return };
@@ -301,7 +326,14 @@ pub fn MessageInput(
             mention_draft.set(None); // stale anchor: the text changed under us
             return;
         }
-        splice_units(&el, start, caret, &format!("<@{}> ", user.id().to_base64()));
+        let name = user.display_name().unwrap_or_default();
+        if name.is_empty() {
+            return; // candidates are name-filtered; belt for a race
+        }
+        mention_picks.update_value(|picks| {
+            picks.insert(name.clone(), user.id().to_base64());
+        });
+        splice_units(&el, start, caret, &format!("@{name} "));
         mention_draft.set(None);
     };
 
@@ -345,22 +377,28 @@ pub fn MessageInput(
     // disarms a pending reply (#23): send() would EDIT, not create, so a
     // lingering chip would promise a `re` that never attaches. The reverse
     // (Reply canceling an edit) is handled at the Reply action itself.
-    Effect::new(move |prev: Option<Option<String>>| {
-        let editing = editing_message.get();
-        let editing_id = editing.as_ref().map(|m| m.id().to_base64());
-        if prev.map(|p| p != editing_id).unwrap_or(true) {
-            // Programmatic fill invalidates any draft anchor.
-            mention_draft.set(None);
-            emoji_draft.set(None);
-            match &editing {
-                Some(edit_msg) => {
-                    replying_to.set(None);
-                    message_input.set(edit_msg.text().unwrap_or_default());
+    Effect::new({
+        let directory = directory.clone();
+        move |prev: Option<Option<String>>| {
+            let editing = editing_message.get();
+            let editing_id = editing.as_ref().map(|m| m.id().to_base64());
+            if prev.map(|p| p != editing_id).unwrap_or(true) {
+                // Programmatic fill invalidates any draft anchor.
+                mention_draft.set(None);
+                emoji_draft.set(None);
+                match &editing {
+                    Some(edit_msg) => {
+                        replying_to.set(None);
+                        // Stored tokens decode to `@names` for the textarea
+                        // (#56); tokens that can't decode safely stay raw
+                        // (see MemberDirectory::decode).
+                        message_input.set(directory().decode(&edit_msg.text().unwrap_or_default()));
+                    }
+                    None => message_input.set(String::new()),
                 }
-                None => message_input.set(String::new()),
             }
+            editing_id
         }
-        editing_id
     });
 
     // Arming a reply (#23) focuses the composer — the chip itself is chrome,
@@ -400,17 +438,29 @@ pub fn MessageInput(
             };
 
             if let Some(edit_msg) = editing_message.get() {
-                // Edit existing message via a CRDT text replace.
+                // Edit existing message via a CRDT text replace. The editor
+                // held display text; the wire gets the re-encoded form (#56).
                 let input_text = input_text.trim().to_string();
+                let dir = directory();
+                let picks = mention_picks.get_value();
                 wasm_bindgen_futures::spawn_local(async move {
                     let result = async {
-                        // No-op edits commit nothing (and earn no "(edited)" marker).
-                        if edit_msg.text().unwrap_or_default() == input_text {
+                        let stored = edit_msg.text().unwrap_or_default();
+                        // No-op edits commit nothing (and earn no "(edited)"
+                        // marker). "Unchanged" means the editor still shows
+                        // what the stored text decodes to — comparing wire
+                        // forms would stamp a phantom edit whenever decode
+                        // had fallen back to raw tokens.
+                        if dir.decode(&stored) == input_text {
                             return Ok(());
+                        }
+                        let wire_text = dir.encode(&input_text, &picks);
+                        if wire_text == stored {
+                            return Ok(()); // byte-identical outcome (e.g. a re-typed mention)
                         }
                         let trx = ctx().begin();
                         let mutable = edit_msg.edit(&trx)?;
-                        mutable.text().replace(&input_text)?;
+                        mutable.text().replace(&wire_text)?;
                         // Stamp the edit for the "(edited)" indicator (#11).
                         mutable.edited_at().set(&Some(js_sys::Date::now() as i64))?;
                         trx.commit().await?;
@@ -427,10 +477,13 @@ pub fn MessageInput(
                 });
             } else {
                 // Create a new message. ankurah stores user/room as typed Refs;
-                // an armed reply (#23) rides along as `re`.
+                // an armed reply (#23) rides along as `re`. The wire text is
+                // the display draft with `@Name` runs re-encoded to canonical
+                // tokens (#56) — what the server's mention scanner fans out.
                 let user_ref = ankurah::Ref::from(&user);
                 let room_ref = ankurah::Ref::from(&room);
                 let input_text = input_text.trim().to_string();
+                let wire_text = directory().encode(&input_text, &mention_picks.get_value());
                 let reply_to = replying_to.get_untracked();
                 let re = reply_to.as_ref().map(ankurah::Ref::from);
                 // Clear synchronously: clearing only in the async completion
@@ -445,7 +498,7 @@ pub fn MessageInput(
                         trx.create(&Message {
                             user: user_ref,
                             room: room_ref,
-                            text: input_text.clone(),
+                            text: wire_text,
                             timestamp,
                             deleted: false,
                             edited_at: None,

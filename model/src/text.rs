@@ -12,7 +12,9 @@
 /// future id-size changes without silently truncating, while still bounding
 /// pathological `<@aaaa…>` runs. Consumers validate the payload with
 /// `EntityId::from_base64` anyway — this is a scanner, not a validator.
-const MAX_MENTION_ID_LEN: usize = 64;
+/// `pub(crate)` so `mention_display`'s positional token parser mirrors the
+/// same bound; the scanner's semantics are unchanged.
+pub(crate) const MAX_MENTION_ID_LEN: usize = 64;
 
 /// Longest URL we will extract. Anything longer is far more likely to be an
 /// abuse payload than a shareable link, and downstream consumers (the unfurl
