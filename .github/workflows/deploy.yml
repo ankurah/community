@@ -122,7 +122,12 @@ jobs:
           fi
 
           # Durable node: a single instance keeps in-memory state coherent
-          # (--max-instances 1); it still scales to zero when idle.
+          # (--max-instances 1), and one instance is always warm
+          # (--min-instances 1). The floor is what keeps the first visitor after
+          # an idle stretch from paying for the whole boot — loading the sled/
+          # postgres node, seeding rooms, starting the workers — which is a
+          # multi-second wait landing on exactly the arrival that matters most.
+          # It costs an always-on instance's CPU/memory allocation.
           args=(
             run deploy "${CLOUD_RUN_SERVICE}"
             --project "${GCP_PROJECT_ID}"
@@ -133,7 +138,7 @@ jobs:
             --cpu 1
             --memory 512Mi
             --concurrency 40
-            --min-instances 0
+            --min-instances 1
             --max-instances 1
             --timeout 900
             --no-invoker-iam-check

@@ -59,6 +59,15 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
 ##### wasm: force the "js" RNG backend for getrandom 0.2 (pulled transitively via
-##### ankurah's rand 0.8). getrandom 0.3+ is handled by .cargo/config.toml rustflags.
+##### ankurah's rand 0.8).
+#####
+##### The 0.3 line is here for the same reason, plus one of its own. It is in
+##### the wasm graph regardless (the ankurah wasm crates, community-model, and
+##### yrs's fastrand all pull it), and .cargo/config.toml sets
+##### `getrandom_backend="wasm_js"` for it — a cfg that getrandom 0.3 turns into
+##### a hard compile_error unless the `wasm_js` FEATURE is on too. Today four
+##### dependencies happen to enable that feature; declaring it here means the
+##### build no longer rests on their continuing to.
 getrandom = { version = "0.2", features = ["js"] }
+getrandom_03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
 #####

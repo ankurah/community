@@ -1,5 +1,9 @@
-# wasm RNG backend for getrandom 0.3+ (used transitively via ankurah on
-# wasm32-unknown-unknown). The getrandom 0.2 line in Cargo.toml handles the
-# older 0.2 backend via its "js" feature.
+# wasm RNG backend for getrandom 0.3, which reaches wasm32-unknown-unknown
+# transitively (the ankurah wasm crates, community-model, yrs's fastrand). This
+# cfg names the browser backend; the matching `wasm_js` FEATURE is declared
+# alongside it in Cargo.toml, because getrandom 0.3 raises a compile_error when
+# this cfg is set and that feature is not. getrandom 0.2 uses its own "js"
+# feature instead, also declared there; getrandom 0.4 ignores this cfg and
+# selects the backend from the feature alone.
 [build]
 rustflags = ["--cfg", "getrandom_backend=\"wasm_js\""]
