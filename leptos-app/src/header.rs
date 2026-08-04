@@ -91,7 +91,14 @@ pub fn Header(
                     </div>
                     <h1 class="title">"Ankurah Community"</h1>
                 </div>
-                <RoomTopic room=selected_room />
+                // The room topic belongs to the room you are LOOKING at. While
+                // a DM thread is open the room is still selected underneath
+                // (so closing the DM returns you to it), and leaving its topic
+                // in the header would caption a private conversation with an
+                // unrelated room's description.
+                <Show when=move || selected_dm.get().is_none()>
+                    <RoomTopic room=selected_room />
+                </Show>
                 <div class="headerRight">
                     <div class=move || {
                         let status = connection_status();

@@ -397,29 +397,72 @@ mod tests {
         }
     }
 
-    /// Monologuing into unanswered threads is capped. The initiation limit is
-    /// avoided here by having the PARTNER open each thread, so what is being
-    /// tested is the second limit rather than the first.
+    /// Monologuing is capped even inside the conversations the sender was
+    /// allowed to start: three threads, nobody answering, and the sender keeps
+    /// typing. The initiation limit is deliberately not in play here (three is
+    /// under it), so what trips is the second limit and the verdict is a
+    /// message tombstone rather than a thread one.
     #[test]
-    fn unanswered_messages_are_capped_across_threads() {
+    fn unanswered_messages_are_capped_within_the_threads_a_sender_may_start() {
         let mut limiter = Limiter::default();
         let sender = EntityId::new();
         let now = 1_000_000_000;
+        let threads = ids(3);
 
-        let mut verdicts = Vec::new();
-        for i in 0..(MAX_UNANSWERED_PER_WINDOW + 1) {
-            // A fresh thread each time, started by the sender — but only one
-            // initiation counts per thread and we stay under that limit by
-            // reusing a small set of threads.
-            let thread = EntityId::new();
-            let _ = limiter.observe(EntityId::new(), thread, sender, now, now);
-            verdicts.push(limiter.observe(EntityId::new(), thread, sender, now + 1, now + 1));
-            let _ = i;
+        let mut sent = 0usize;
+        let mut tombstoned = None;
+        // Round-robin across the three threads until the cap bites.
+        for i in 0..(MAX_UNANSWERED_PER_WINDOW * 2) {
+            let thread = threads[i % threads.len()];
+            let ts = now + i as i64;
+            match limiter.observe(EntityId::new(), thread, sender, ts, ts) {
+                Verdict::Allow => sent += 1,
+                Verdict::TombstoneMessage { unanswered } => {
+                    tombstoned = Some((i, unanswered));
+                    break;
+                }
+                Verdict::TombstoneThread { initiations } => {
+                    panic!("three threads must not trip the initiation limit, got {initiations}")
+                }
+            }
         }
-        assert!(
-            verdicts.iter().any(|v| matches!(v, Verdict::TombstoneThread { .. } | Verdict::TombstoneMessage { .. })),
-            "a sender monologuing into many unanswered threads must be limited, got {verdicts:?}"
-        );
+
+        let (index, unanswered) = tombstoned.expect("a sender monologuing past the cap must be tombstoned");
+        assert_eq!(sent, MAX_UNANSWERED_PER_WINDOW, "everything up to the cap is allowed through");
+        assert_eq!(index, MAX_UNANSWERED_PER_WINDOW, "the FIRST message past the cap is the one tombstoned");
+        assert_eq!(unanswered, MAX_UNANSWERED_PER_WINDOW + 1);
+    }
+
+    /// The same monologue, but the correspondent replies partway through: the
+    /// answered thread stops counting, so the sender's budget lasts longer.
+    /// This is the exemption that keeps a real conversation out of the
+    /// limiter's way.
+    #[test]
+    fn a_reply_partway_through_frees_that_threads_messages_from_the_cap() {
+        let mut limiter = Limiter::default();
+        let sender = EntityId::new();
+        let partner = EntityId::new();
+        let thread = EntityId::new();
+        let now = 1_000_000_000;
+
+        // The sender opens it and monologues right up to the cap.
+        for i in 0..MAX_UNANSWERED_PER_WINDOW {
+            let ts = now + i as i64;
+            assert_eq!(limiter.observe(EntityId::new(), thread, sender, ts, ts), Verdict::Allow);
+        }
+        // The partner answers. From here the thread is a conversation.
+        let reply_ts = now + MAX_UNANSWERED_PER_WINDOW as i64;
+        assert_eq!(limiter.observe(EntityId::new(), thread, partner, reply_ts, reply_ts), Verdict::Allow);
+
+        // The sender can now keep talking without limit in this thread.
+        for i in 0..(MAX_UNANSWERED_PER_WINDOW * 2) {
+            let ts = reply_ts + 1 + i as i64;
+            assert_eq!(
+                limiter.observe(EntityId::new(), thread, sender, ts, ts),
+                Verdict::Allow,
+                "message {i} after a reply must not be limited"
+            );
+        }
     }
 
     /// A future-dated message cannot buy itself a fresh window: the timestamp

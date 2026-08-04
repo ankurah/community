@@ -85,8 +85,22 @@ async fn process_dm(ctx: &Context, msg: &DmMessageView, delivered: &mut HashSet<
     if delivered.contains(&(recipient, msg.id())) {
         return Ok(());
     }
-    // No room, so the room-mute leg of the pref policy cannot apply; the
-    // `mentions_only` leg does, and suppresses this kind.
+    // PRODUCT DECISION, MARKED BECAUSE IT IS ONE. A recipient with
+    // `mentions_only` set gets NO DM notifications at all: the pref's stated
+    // contract is "suppress every kind EXCEPT mentions" (see the
+    // `NotificationPref` model doc and `mentions::pref_allows`), and `dm` is a
+    // kind. That is the literal reading, and it is the quiet-by-default one —
+    // but a user who checked "only notify me when I'm mentioned" plausibly
+    // meant "when someone is actually talking to me", which is precisely what
+    // a DM is. Nothing here bypasses the pref; if the ruling goes the other
+    // way the change is to exempt DM_KIND in `pref_allows`, alongside the
+    // preferences copy, which today still reads "Skip everything except direct
+    // @mentions" and says nothing about DMs (deliberate: DMs ship dark behind
+    // community#68, and the prefs panel is not the place to announce them).
+    //
+    // The room-mute leg cannot apply — a DM happens in no room — so the empty
+    // room id below is inert rather than a placeholder standing in for
+    // something.
     if !pref_allows_delivery(ctx, recipient, DM_KIND, "").await? {
         debug!(message = %msg.id(), "DM notification suppressed by recipient's notification prefs");
         return Ok(());
