@@ -58,3 +58,132 @@ async fn reply_ref_round_trips_and_absent_property_reads_none() {
     let reply_view = ctx.get::<MessageView>(reply).await.unwrap();
     assert_eq!(reply_view.re().unwrap().map(|r| r.id()), Some(original));
 }
+
+// ---------------------------------------------------------------------------
+// Direct messages (#30)
+// ---------------------------------------------------------------------------
+
+/// One unordered pair of users maps to exactly one `(a, b)` tuple, whichever
+/// side asks. This is what makes find-or-create converge: both participants
+/// build the same `a = ? AND b = ?` query, so neither can miss a thread the
+/// other created and open a second one.
+///
+/// The order is `EntityId`'s own (the ULID's bytes), NOT the base64 text form —
+/// those disagree, because the base64url alphabet is not in ASCII order. This
+/// test would pass under either convention for most pairs; the base64 leg below
+/// is what would catch a helper quietly switching to string comparison.
+#[test]
+fn canonical_pair_is_symmetric_total_and_byte_ordered() {
+    use community_model::canonical_pair;
+
+    for _ in 0..256 {
+        let x = ankurah::EntityId::new();
+        let y = ankurah::EntityId::new();
+        assert_eq!(canonical_pair(x, y), canonical_pair(y, x), "the pair must not depend on who asks");
+        let (a, b) = canonical_pair(x, y);
+        assert!(a <= b, "canonical order is ascending by entity id");
+        assert_eq!(canonical_pair(a, b), (a, b), "already-canonical input is a fixed point");
+    }
+
+    // A self-pair is total, not an error: the helper never has to be unwrapped.
+    let me = ankurah::EntityId::new();
+    assert_eq!(canonical_pair(me, me), (me, me));
+
+    // Byte order vs base64 order really do differ, so the choice is load-bearing
+    // rather than cosmetic. Find a pair where they disagree and pin that the
+    // helper follows the bytes.
+    let disagreeing = (0..4096)
+        .map(|_| (ankurah::EntityId::new(), ankurah::EntityId::new()))
+        .find(|(x, y)| (x < y) != (x.to_base64() < y.to_base64()));
+    if let Some((x, y)) = disagreeing {
+        let (a, _) = community_model::canonical_pair(x, y);
+        assert_eq!(a, std::cmp::min(x, y), "canonical order follows entity-id bytes, not base64 text");
+    }
+}
+
+/// The viewer's correspondent, from either arm; `None` for the degenerate
+/// self-thread and for a non-participant (unreachable through a scoped context,
+/// but the helper must not name a stranger as "the other person" if it happens).
+#[test]
+fn dm_partner_resolves_from_either_arm() {
+    use community_model::dm_partner;
+    let me = ankurah::EntityId::new();
+    let them = ankurah::EntityId::new();
+    let stranger = ankurah::EntityId::new();
+
+    assert_eq!(dm_partner(me, them, me), Some(them));
+    assert_eq!(dm_partner(them, me, me), Some(them));
+    assert_eq!(dm_partner(me, me, me), None, "a self-thread has no other participant");
+    assert_eq!(dm_partner(me, them, stranger), None, "a non-participant has no partner in this thread");
+}
+
+/// The create-path pin the model's "born with both participants" rule needs.
+///
+/// There is no way to construct a `DmThread`/`DmMessage` without both
+/// participant fields — the struct literal would not compile — so what is worth
+/// pinning at runtime is that a row created through the normal path really does
+/// carry both properties, readable through the bare (non-`Option`) accessors.
+/// A participant field that ever became optional, or was added to the
+/// collection later, would read back as an error here — and in production it
+/// would silently hide the row from BOTH participants (see the model docs and
+/// `or_scope_live_tests.rs`).
+#[tokio::test(flavor = "multi_thread")]
+async fn dm_rows_are_born_with_both_participants_and_refs_round_trip() {
+    use community_model::{canonical_pair, DmMessage, DmMessageView, DmReadState, DmReadStateView, DmThread, DmThreadView};
+
+    let ctx = test_context().await;
+
+    let trx = ctx.begin();
+    let alice = trx.create(&User { display_name: "Alice".into(), oidc_sub: None }).await.unwrap().id();
+    let bob = trx.create(&User { display_name: "Bob".into(), oidc_sub: None }).await.unwrap().id();
+    trx.commit().await.unwrap();
+
+    let (a, b) = canonical_pair(alice, bob);
+
+    let trx = ctx.begin();
+    let thread = trx.create(&DmThread { a: a.into(), b: b.into(), created_at: 1 }).await.unwrap().id();
+    trx.commit().await.unwrap();
+
+    let trx = ctx.begin();
+    let message = trx
+        .create(&DmMessage {
+            thread: thread.into(),
+            a: a.into(),
+            b: b.into(),
+            user: alice.into(),
+            text: "hello".into(),
+            timestamp: 2,
+            deleted: false,
+            edited_at: None,
+        })
+        .await
+        .unwrap()
+        .id();
+    let read_state =
+        trx.create(&DmReadState { user: alice.into(), thread: thread.into(), last_read_ts: 2 }).await.unwrap().id();
+    trx.commit().await.unwrap();
+
+    // Both participants present on the thread, in canonical order.
+    let thread_view = ctx.get::<DmThreadView>(thread).await.unwrap();
+    assert_eq!(thread_view.a().unwrap().id(), a, "`a` is present and is the lower id");
+    assert_eq!(thread_view.b().unwrap().id(), b, "`b` is present and is the higher id");
+    assert!(thread_view.a().unwrap().id() <= thread_view.b().unwrap().id());
+
+    // Both participants copied verbatim onto the message, plus its filing key
+    // (`thread`) and its sender.
+    let message_view = ctx.get::<DmMessageView>(message).await.unwrap();
+    assert_eq!(message_view.a().unwrap().id(), a);
+    assert_eq!(message_view.b().unwrap().id(), b);
+    assert_eq!(message_view.thread().unwrap().id(), thread, "render paths key off `thread`, so it must round-trip exactly");
+    assert_eq!(message_view.user().unwrap().id(), alice);
+    assert_eq!(message_view.text().unwrap(), "hello");
+    assert!(!message_view.deleted().unwrap());
+    assert_eq!(message_view.edited_at().unwrap(), None, "a never-edited message reads None, not an error");
+
+    // The read cursor carries no participant pair by design (it is scoped to
+    // its owner, not to the thread's members) — just owner and thread.
+    let read_state_view = ctx.get::<DmReadStateView>(read_state).await.unwrap();
+    assert_eq!(read_state_view.user().unwrap().id(), alice);
+    assert_eq!(read_state_view.thread().unwrap().id(), thread);
+    assert_eq!(read_state_view.last_read_ts().unwrap(), 2);
+}

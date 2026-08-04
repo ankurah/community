@@ -1,4 +1,4 @@
-use ankurah::{property::Json, Model, Ref};
+use ankurah::{property::Json, EntityId, Model, Ref};
 use serde::{Deserialize, Serialize};
 
 pub mod mention_display;
@@ -271,4 +271,173 @@ pub struct NotificationPref {
     /// mirrors the `UserRoles.roles` Json-array idiom. Mentions in a muted
     /// room produce no notification.
     pub muted_rooms: Json,
+}
+
+// ---------------------------------------------------------------------------
+// Direct messages (two-party) — #30
+// ---------------------------------------------------------------------------
+//
+// The three `dm_*` collections below all carry their membership ON THE ROW, so
+// the row itself answers "may this user see me": the policy read scope is
+// `a = $jwt.sub OR b = $jwt.sub` over two `Ref<User>` fields, which is exactly
+// what stock ankurah 0.9.0 can express for a two-party thread.
+//
+// WHY THE PARTICIPANT FIELDS ARE PLAIN `Ref<User>` AND NEVER `Option<Ref<User>>`
+// ============================================================================
+// Wave-1 taught this codebase a rule: a new field added to an EXISTING
+// collection must be `Option<T>`, because rows written before the field existed
+// carry no such property and only `Option<T>` reads an absent property as
+// `None` instead of `PropertyError::Missing` (see `Room.topic`,
+// `Message.collaborative`, `ModAction.message`). That rule is about RETROFITS.
+//
+// It must not be applied here, and applying it would be a security bug rather
+// than a style choice. `Predicate::Or` evaluates its left operand first and
+// propagates an evaluator error before it ever reaches the right operand, and
+// comparing against a property an entity does not have IS an error, not
+// `false`. So a `dm_*` row missing its `a` property is invisible to BOTH
+// participants — including the one named by `b` — on the live path AND the
+// fetch path, silently, with nothing delivered and no error surfaced. That is
+// pinned by `server/tests/or_scope_live_tests.rs`
+// (`a_row_missing_the_left_arm_is_invisible_even_to_the_right_arms_participant`).
+//
+// Therefore: these collections are BORN with both participant fields, every
+// create path sets both, and no participant field may ever become optional or
+// be added to a `dm_*` collection after the fact. A future reader "fixing" the
+// missing `Option` here would make existing threads vanish for everyone in
+// them. If a fourth participant-shaped field is ever needed, it needs a new
+// collection, not a retrofit.
+//
+// The fields are `LWW` because that is the only backend available for a `Ref`
+// — not because anything rewrites them. Nothing in this repo edits `a` or `b`
+// after creation, and `server/tests/model_pin_tests.rs` pins that the create
+// paths always set both.
+
+/// Order a participant pair canonically: one unordered pair of users maps to
+/// exactly one `(a, b)` tuple, so one pair ⇒ one `DmThread` and a find-or-create
+/// on either side lands on the same query.
+///
+/// Ordering is `EntityId`'s own `Ord` — the ULID's 16 bytes, big-endian — NOT
+/// the base64 text form. Those two orders differ (the base64url alphabet is not
+/// ASCII-ordered), and the byte order is the one the spec names and the one the
+/// storage engines collate `Ref` values by. The duplicate-thread tie-break in
+/// the client uses this same `Ord` for the same reason; the older
+/// `min_by_key(|r| r.id().to_base64())` idiom in `read_state`/notification prefs
+/// is a different (purely local, order-irrelevant) decision and is not a
+/// precedent for this one.
+///
+/// A self-pair (`x == y`) is returned unchanged. The UI never offers a
+/// self-thread — the "Message" button is hidden on your own member card — but
+/// the helper is total rather than partial so no caller has to invent an error
+/// path for a case it cannot reach.
+pub fn canonical_pair(x: EntityId, y: EntityId) -> (EntityId, EntityId) {
+    if x <= y { (x, y) } else { (y, x) }
+}
+
+/// Given a thread's participants and the viewer, the OTHER participant — whose
+/// name a DM row shows and who a DM notification goes to. `None` for a
+/// degenerate self-thread, and for a viewer who is not a participant at all
+/// (which the read scope already makes unreachable through a scoped context).
+pub fn dm_partner(a: EntityId, b: EntityId, viewer: EntityId) -> Option<EntityId> {
+    if a == viewer && b != viewer {
+        Some(b)
+    } else if b == viewer && a != viewer {
+        Some(a)
+    } else {
+        None
+    }
+}
+
+/// A two-party direct-message thread: exactly one row per unordered pair of
+/// users, with the pair denormalized onto the row as `a`/`b` in
+/// [`canonical_pair`] order.
+///
+/// Both participants are set at creation and never rewritten — see the module
+/// section above for why they are plain `Ref<User>` and why that is
+/// load-bearing.
+///
+/// Duplicate threads for one pair are possible (two clients opening their first
+/// DM concurrently; entity deletion does not exist in ankurah 0.9.0). Readers
+/// resolve the duplicate by pinning the LOWEST entity id as THE thread for the
+/// pair, and post into that one; the twin is inert.
+#[derive(Model, Debug, Serialize, Deserialize)]
+pub struct DmThread {
+    /// The lower-ordered participant. Set at creation, never edited.
+    #[active_type(LWW)]
+    pub a: Ref<User>,
+    /// The higher-ordered participant. Set at creation, never edited.
+    #[active_type(LWW)]
+    pub b: Ref<User>,
+    /// ms since epoch (same unit as `Message.timestamp`).
+    pub created_at: i64,
+}
+
+/// One message in a `DmThread`.
+///
+/// `a`/`b` are copied verbatim from the thread at send: they exist so the
+/// policy read scope can answer "may this user see me" from the row alone,
+/// without a join the scope grammar cannot express. They are NOT the filing
+/// key — every render path queries `thread = ?`, never `a`/`b`.
+///
+/// That split is the mitigation for the one integrity nuance this design
+/// carries: a participant can hand-craft a message whose `a`/`b` name a pair
+/// they are in while `thread` points at a different thread of theirs. The write
+/// scope still forces them to be one of `a`/`b` and to be the `user`, so they
+/// can never write into a conversation they are not in, and they can never read
+/// anyone else's data. The worst case is that they mis-file their OWN message
+/// somewhere no render path looks at it.
+#[derive(Model, Debug, Serialize, Deserialize)]
+pub struct DmMessage {
+    /// The thread this message belongs to — the only field render paths filter
+    /// on. Set at creation, never edited.
+    #[active_type(LWW)]
+    pub thread: Ref<DmThread>,
+    /// Participant copied from the thread at send (see the type doc).
+    #[active_type(LWW)]
+    pub a: Ref<User>,
+    /// Participant copied from the thread at send (see the type doc).
+    #[active_type(LWW)]
+    pub b: Ref<User>,
+    /// The sender. The `dm_message` write scope pins this to the caller
+    /// (`user = $jwt.sub`), so a participant cannot attribute a message in
+    /// their own thread to the other person.
+    #[active_type(LWW)]
+    pub user: Ref<User>,
+    /// Collaborative text, exactly like `Message.text`: no `#[active_type]`
+    /// attribute means the derive picks `YrsString` for a `String`. DM text has
+    /// to be the same active type as room text or the composer, the markdown
+    /// renderer and the x-ray decoder would all need a second code path.
+    pub text: String,
+    /// ms since epoch (same unit as `Message.timestamp`).
+    pub timestamp: i64,
+    /// Soft delete, like `Message.deleted`: rows are never removed (entity
+    /// deletion does not exist in ankurah 0.9.0), they become tombstones.
+    #[active_type(LWW)]
+    pub deleted: bool,
+    /// When the sender last edited the text (ms since epoch), `None` if never.
+    /// `Option<i64>` matches `Message.edited_at` — but note the reason differs:
+    /// there are no legacy `dm_message` rows, so this `Option` encodes "never
+    /// edited", not "property might be absent". It is not a precedent for
+    /// making a participant field optional.
+    pub edited_at: Option<i64>,
+}
+
+/// Per-user, per-thread read cursor — the `ReadState` pattern, keyed on a
+/// thread instead of a room. Unread badges in the DM sidebar are messages newer
+/// than `last_read_ts` authored by the other participant.
+///
+/// DELIBERATE POLICY ASYMMETRY: unlike `DmThread`/`DmMessage`, this collection
+/// carries NO `a`/`b` and its policy scope is `user = $jwt.sub` (the `readstate`
+/// idiom), not `a = $jwt.sub OR b = $jwt.sub`. A read cursor is a read receipt:
+/// scoping it to the participant pair would publish "when did you last look at
+/// our thread" to your correspondent, which the room read cursors deliberately
+/// do not do and which nothing in the DM design asks for. The row is private to
+/// its owner on reads and writes, with no moderator bypass — same posture as
+/// `readstate` and `notificationpref`.
+#[derive(Model, Debug, Serialize, Deserialize)]
+pub struct DmReadState {
+    #[active_type(LWW)]
+    pub user: Ref<User>,
+    #[active_type(LWW)]
+    pub thread: Ref<DmThread>,
+    pub last_read_ts: i64,
 }

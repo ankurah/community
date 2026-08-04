@@ -245,6 +245,9 @@ fn model_collection_names_match_policy_keys() {
         community_model::Notification::collection(),
         community_model::LinkPreview::collection(),
         community_model::NotificationPref::collection(),
+        community_model::DmThread::collection(),
+        community_model::DmMessage::collection(),
+        community_model::DmReadState::collection(),
     ] {
         assert!(config.collections.contains_key(collection.as_str()), "policy.json has no entry for collection '{}'", collection.as_str());
     }
@@ -357,4 +360,200 @@ fn notificationpref_rows_are_private_to_their_owner_on_reads_and_writes() {
         rule.applies_to.applies_to_reads() && rule.applies_to.applies_to_writes(),
         "notificationpref scope must constrain both reads and writes"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Direct messages (#30): the participant-pair scopes
+// ---------------------------------------------------------------------------
+
+/// Build a participant-pair predicate the way the agent does. The filter names
+/// `$jwt.sub` TWICE, so the placeholder substitution yields two `?`s and both
+/// are populated with the same caller id.
+fn pair_scope_predicate(collection: &str, rule_index: usize, caller: EntityId) -> ankurah::ankql::ast::Predicate {
+    let config = policy();
+    let rule = &config.collections[collection].scope[rule_index];
+    let query = rule.filter.replace("$jwt.sub", "?");
+    parse_selection(&query)
+        .expect("dm scope filter parses")
+        .predicate
+        .populate([Expr::from(&caller), Expr::from(&caller)])
+        .expect("two placeholders, two values")
+}
+
+/// A `dm_thread` row as the scope evaluator sees it. Both participants are
+/// `Option` HERE — not in the model — so the absent-property hazard the model's
+/// "born with both fields" rule exists to prevent can be exercised.
+struct FakeDmThread {
+    a: Option<EntityId>,
+    b: Option<EntityId>,
+}
+
+impl Filterable for FakeDmThread {
+    fn collection(&self) -> &str { "dmthread" }
+    fn value(&self, name: &str) -> Option<Value> {
+        match name {
+            "a" => self.a.map(Value::EntityId),
+            "b" => self.b.map(Value::EntityId),
+            _ => None,
+        }
+    }
+}
+
+/// Both participants pass the thread scope — the left arm short-circuits for
+/// the one named `a`, and the one named `b` is reached only after the left arm
+/// is evaluated and returns false. A third party fails it.
+#[test]
+fn both_dm_participants_pass_the_thread_scope_and_strangers_fail_it() {
+    let me = EntityId::new();
+    let them = EntityId::new();
+    let stranger = EntityId::new();
+
+    let as_me = pair_scope_predicate("dmthread", 0, me);
+    assert_eq!(evaluate_predicate(&FakeDmThread { a: Some(me), b: Some(them) }, &as_me), Ok(true), "left arm names me");
+    assert_eq!(evaluate_predicate(&FakeDmThread { a: Some(them), b: Some(me) }, &as_me), Ok(true), "right arm names me");
+
+    let as_stranger = pair_scope_predicate("dmthread", 0, stranger);
+    assert_eq!(evaluate_predicate(&FakeDmThread { a: Some(me), b: Some(them) }, &as_stranger), Ok(false), "a stranger is in neither arm");
+}
+
+/// The constraint the model's participant fields exist to satisfy, restated
+/// against the REAL policy filter (the spike proved it end-to-end through the
+/// reactor with a test-local policy; this pins the shipped rule).
+///
+/// A row missing `a` is denied to the participant named by `b`: the left
+/// comparison errors on the absent property and `Predicate::Or` propagates that
+/// error instead of falling through to the right arm. `enforce_read_scope` maps
+/// evaluator errors to `AccessDenied`, so the row is invisible to BOTH
+/// participants — which is why no `dm_*` participant field may ever be
+/// `Option` or added after the collection ships.
+#[test]
+fn a_dm_row_missing_the_left_participant_is_denied_even_to_the_right_one() {
+    let me = EntityId::new();
+    let predicate = pair_scope_predicate("dmthread", 0, me);
+    assert_eq!(
+        evaluate_predicate(&FakeDmThread { a: None, b: Some(me) }, &predicate),
+        Err(FilterError::PropertyNotFound("a".to_string())),
+        "an absent left arm errors the whole OR — a denial, not a fall-through"
+    );
+}
+
+/// A `dm_message` row as the evaluator sees it: the pair that gates
+/// read/write, plus the sender the second write rule pins.
+struct FakeDmMessage {
+    a: EntityId,
+    b: EntityId,
+    user: EntityId,
+}
+
+impl Filterable for FakeDmMessage {
+    fn collection(&self) -> &str { "dmmessage" }
+    fn value(&self, name: &str) -> Option<Value> {
+        match name {
+            "a" => Some(Value::EntityId(self.a)),
+            "b" => Some(Value::EntityId(self.b)),
+            "user" => Some(Value::EntityId(self.user)),
+            _ => None,
+        }
+    }
+}
+
+/// Writing a DM message must satisfy BOTH rules (scope rules AND together):
+/// the writer is one of the two participants, AND the message is attributed to
+/// the writer. So a participant can post into their own thread as themselves,
+/// and cannot post as the other person; a stranger fails the first rule
+/// whatever they claim.
+#[test]
+fn dm_message_write_requires_participation_and_self_attribution() {
+    let me = EntityId::new();
+    let them = EntityId::new();
+    let stranger = EntityId::new();
+
+    // The sender rule is the SECOND rule on dmmessage, so it needs the
+    // rule-index form rather than `self_scope_predicate` (which reads rule 0).
+    let pair_rule = |caller| pair_scope_predicate("dmmessage", 0, caller);
+    let sender_rule = |caller: EntityId| {
+        let config = policy();
+        let query = config.collections["dmmessage"].scope[1].filter.replace("$jwt.sub", "?");
+        parse_selection(&query).expect("sender filter parses").predicate.populate([Expr::from(&caller)]).expect("one placeholder")
+    };
+
+    // Me, in my own thread, as myself: both rules pass.
+    let mine = FakeDmMessage { a: me, b: them, user: me };
+    assert_eq!(evaluate_predicate(&mine, &pair_rule(me)), Ok(true));
+    assert_eq!(evaluate_predicate(&mine, &sender_rule(me)), Ok(true));
+
+    // Me, in my own thread, attributed to THEM: the pair rule passes (I am a
+    // participant), the sender rule denies it. This is the rule that stops a
+    // participant putting words in the other person's mouth.
+    let spoofed = FakeDmMessage { a: me, b: them, user: them };
+    assert_eq!(evaluate_predicate(&spoofed, &pair_rule(me)), Ok(true));
+    assert_eq!(evaluate_predicate(&spoofed, &sender_rule(me)), Ok(false), "sender binding must reject a mis-attributed message");
+
+    // A stranger fails the pair rule outright, even attributing honestly.
+    assert_eq!(evaluate_predicate(&mine, &pair_rule(stranger)), Ok(false));
+    let stranger_msg = FakeDmMessage { a: me, b: them, user: stranger };
+    assert_eq!(evaluate_predicate(&stranger_msg, &pair_rule(stranger)), Ok(false));
+}
+
+/// The shipped rule shapes for all three dm collections, pinned. The ruling
+/// this encodes (community#30, 2026-08-04): **DMs are private from moderators**
+/// — no `unless_privilege` anywhere in these scopes. Abuse response flows
+/// through reports that carry a message ref, never through browsing threads.
+/// Adding moderator visibility later is a one-line change HERE, which is
+/// exactly why the absence must be asserted rather than assumed.
+#[test]
+fn dm_scope_rule_shapes_unchanged_and_no_moderator_bypass() {
+    let config = policy();
+
+    let thread = &config.collections["dmthread"];
+    assert_eq!(thread.read.as_deref(), Some("view"));
+    assert_eq!(thread.write.as_deref(), Some("post"));
+    assert_eq!(thread.scope.len(), 1, "one rule: the participant pair. A second rule would AND in and narrow it");
+    assert_eq!(thread.scope[0].filter, "a = $jwt.sub OR b = $jwt.sub");
+    assert!(
+        thread.scope[0].applies_to.applies_to_reads() && thread.scope[0].applies_to.applies_to_writes(),
+        "the pair rule must gate reads AND writes: it is what stops anyone opening a thread between two other people"
+    );
+    assert!(thread.scope[0].unless_privilege.is_none(), "DMs are private from moderators (community#30 ruling)");
+
+    let message = &config.collections["dmmessage"];
+    assert_eq!(message.read.as_deref(), Some("view"));
+    assert_eq!(message.write.as_deref(), Some("post"));
+    assert_eq!(message.scope.len(), 2, "the pair rule plus the sender-binding rule");
+    assert_eq!(message.scope[0].filter, "a = $jwt.sub OR b = $jwt.sub");
+    assert!(message.scope[0].applies_to.applies_to_reads() && message.scope[0].applies_to.applies_to_writes());
+    assert!(message.scope[0].unless_privilege.is_none(), "DMs are private from moderators (community#30 ruling)");
+    assert_eq!(message.scope[1].filter, "user = $jwt.sub");
+    assert!(
+        message.scope[1].applies_to.applies_to_writes() && !message.scope[1].applies_to.applies_to_reads(),
+        "sender binding is a WRITE rule; as a read rule it would hide the other person's messages from you"
+    );
+    assert!(message.scope[1].unless_privilege.is_none(), "moderators do not author or edit DM messages either");
+
+    // The read state is the deliberate asymmetry: a read cursor is a read
+    // receipt, so it stays private to its owner (the `readstate` idiom) rather
+    // than being shared with the correspondent by a pair scope.
+    let read_state = &config.collections["dmreadstate"];
+    assert_eq!(read_state.read.as_deref(), Some("view"));
+    assert_eq!(read_state.write.as_deref(), Some("post"));
+    assert_eq!(read_state.scope.len(), 1);
+    assert_eq!(read_state.scope[0].filter, "user = $jwt.sub", "NOT the participant pair — see the DmReadState model doc");
+    assert!(read_state.scope[0].applies_to.applies_to_reads() && read_state.scope[0].applies_to.applies_to_writes());
+    assert!(read_state.scope[0].unless_privilege.is_none(), "not even moderators read others' DM read cursors");
+}
+
+/// Members must hold the collection-level write privilege for all three dm
+/// collections, or the row scopes never get a chance to run: jwt-auth checks
+/// `can_write_collection` BEFORE evaluating scopes (the `notification`
+/// precedent). Clients create their own threads and messages, so "system"
+/// would break the feature outright.
+#[test]
+fn members_can_write_dm_collections_at_the_collection_gate() {
+    let config = policy();
+    for collection in ["dmthread", "dmmessage", "dmreadstate"] {
+        assert!(
+            config.can_write_collection(&["member".to_string()], &collection.into()),
+            "the member role must pass the {collection} collection write gate; the row scope does the real filtering"
+        );
+    }
 }
