@@ -9,9 +9,23 @@ name: Deploy
 #   GCP_DEPLOY_SERVICE_ACCOUNT, ARTIFACT_REGISTRY_REPOSITORY, CLOUD_RUN_SERVICE,
 #   CLOUD_RUN_SERVICE_ACCOUNT, CLOUD_SQL_INSTANCE_CONNECTION_NAME,
 #   DATABASE_URL_SECRET, JWT_SIGNING_KEY_SECRET, SMOKE_BASE_URL
+# Optional repo variable:
+#   CI_HOOK_SECRET_NAME — the Secret Manager secret holding the shared HMAC key
+#   for POST /hooks/ci (#66). Left unset, this deploy simply does not mount it
+#   and the endpoint answers 503; nothing else changes. To turn the channel on:
+#     openssl rand -hex 32 | tr -d '\n' | gcloud secrets create community-ci-hook-secret \
+#       --project ankurah-community --data-file=-
+#     gcloud secrets add-iam-policy-binding community-ci-hook-secret \
+#       --project ankurah-community \
+#       --member serviceAccount:community-runtime@ankurah-community.iam.gserviceaccount.com \
+#       --role roles/secretmanager.secretAccessor
+#     gh variable set CI_HOOK_SECRET_NAME --repo ankurah/community --body community-ci-hook-secret
+#   The SAME value must be set as the COMMUNITY_CI_HOOK_SECRET Actions secret on
+#   ankurah/ankurah, whose reporter workflow signs deliveries with it.
 # Secret Manager secrets the runtime SA must be able to access:
 #   community-database-url, community-jwt-signing-key (RS256 key that mints
-#   the ankurah session tokens issued by /auth/session).
+#   the ankurah session tokens issued by /auth/session), and — once configured —
+#   community-ci-hook-secret.
 
 on:
   workflow_dispatch:
@@ -39,6 +53,7 @@ env:
   DATABASE_URL_SECRET: ${{ vars.DATABASE_URL_SECRET || 'community-database-url' }}
   JWT_SIGNING_KEY_SECRET: ${{ vars.JWT_SIGNING_KEY_SECRET || 'community-jwt-signing-key' }}
   CLOUD_SQL_INSTANCE_CONNECTION_NAME: ${{ vars.CLOUD_SQL_INSTANCE_CONNECTION_NAME || '' }}
+  CI_HOOK_SECRET_NAME: ${{ vars.CI_HOOK_SECRET_NAME || '' }}
   SMOKE_BASE_URL: ${{ vars.SMOKE_BASE_URL || '' }}
 
 jobs:
@@ -85,6 +100,15 @@ jobs:
 
       - name: Deploy to Cloud Run
         run: |
+          # The CI webhook secret is mounted only once CI_HOOK_SECRET_NAME
+          # names a Secret Manager secret. Naming one that does not exist would
+          # fail the deploy, so an unset variable must leave the flag alone —
+          # the server treats an absent CI_HOOK_SECRET as "endpoint closed".
+          secrets="DATABASE_URL=${DATABASE_URL_SECRET}:latest,ANKURAH_JWT_SIGNING_KEY=${JWT_SIGNING_KEY_SECRET}:latest"
+          if [ -n "${CI_HOOK_SECRET_NAME}" ]; then
+            secrets="${secrets},CI_HOOK_SECRET=${CI_HOOK_SECRET_NAME}:latest"
+          fi
+
           # Durable node: a single instance keeps in-memory state coherent
           # (--max-instances 1); it still scales to zero when idle.
           args=(
@@ -101,7 +125,7 @@ jobs:
             --max-instances 1
             --timeout 900
             --no-invoker-iam-check
-            --set-secrets "DATABASE_URL=${DATABASE_URL_SECRET}:latest,ANKURAH_JWT_SIGNING_KEY=${JWT_SIGNING_KEY_SECRET}:latest"
+            --set-secrets "${secrets}"
             --quiet
           )
           if [ -n "${CLOUD_SQL_INSTANCE_CONNECTION_NAME}" ]; then

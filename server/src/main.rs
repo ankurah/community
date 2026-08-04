@@ -23,6 +23,7 @@ use tower_http::{
 };
 use tracing::{info, warn, Level};
 
+mod ci_hook;
 mod oidc;
 mod workers;
 use oidc::{OidcVerifier, VerifiedIdentity};
@@ -69,6 +70,15 @@ struct AppState {
     signing_keys: SigningKeys,
     /// Validates incoming idp.to ID tokens against their JWKS.
     oidc: Arc<OidcVerifier>,
+    /// Seeded identities + shared secret for `POST /hooks/ci` (#66).
+    ci: ci_hook::CiHook,
+}
+
+/// The CI webhook handler asks for its own state, not the whole `AppState` —
+/// it has no business with the signing keys or the OIDC verifier. This is what
+/// lets axum hand it just the piece it needs.
+impl axum::extract::FromRef<AppState> for ci_hook::CiHook {
+    fn from_ref(state: &AppState) -> Self { state.ci.clone() }
 }
 
 #[tokio::main]
@@ -103,6 +113,10 @@ async fn main() -> Result<()> {
     // Seed the default community rooms (idempotent).
     ensure_default_rooms(&system_ctx).await?;
 
+    // Seed the #ci room and the system "CI" user that authors its messages,
+    // and read the webhook secret. Also idempotent; see ci_hook.rs.
+    let ci = ci_hook::seed(&system_ctx).await?;
+
     // Server-side reactive workers (mention fan-out → notification rows,
     // link unfurl → linkpreview rows): a standing message LiveQuery on the
     // privileged context — the durable-node sibling of the policy watcher
@@ -118,6 +132,7 @@ async fn main() -> Result<()> {
         system_ctx,
         signing_keys,
         oidc: Arc::new(OidcVerifier::from_env()),
+        ci,
     };
 
     // One axum app serves the Ankurah /ws endpoint, the OIDC mint endpoint, AND
@@ -129,6 +144,9 @@ async fn main() -> Result<()> {
         .route("/ws", get(ws_server.route_handler()))
         .route("/health", get(health))
         .route("/auth/session", post(auth_session))
+        // CI status webhook (#66). Not an auth route: it authenticates itself
+        // with an HMAC over the raw body, never an IdP token. See ci_hook.rs.
+        .route("/hooks/ci", post(ci_hook::handle))
         .fallback(spa_fallback)
         .with_state(state)
         // Permissive CORS so cross-origin callers (e.g. a native/RN client on a
@@ -370,32 +388,45 @@ async fn spa_fallback(State(state): State<AppState>, request: Request<Body>) -> 
 }
 
 fn is_backend_path(path: &str) -> bool {
-    path == "/ws" || path.starts_with("/ws/") || path == "/health" || path == "/auth/session"
+    path == "/ws" || path.starts_with("/ws/") || path == "/health" || path == "/auth/session" || path.starts_with("/hooks/")
 }
 
 /// Seed the default rooms for the community. Idempotent — only creates rooms
 /// that don't already exist, so it's safe to run on every boot. Runs under the
 /// privileged system context (bypasses RBAC).
+///
+/// `#ci` is deliberately not in this list: it is seeded by `ci_hook::seed`,
+/// which also needs the room's id, so that subsystem owns its own room.
 async fn ensure_default_rooms(ctx: &Context) -> Result<()> {
     const DEFAULT_ROOMS: &[&str] = &["general", "support", "announcements", "introductions"];
 
     for name in DEFAULT_ROOMS {
-        // Parameterized rather than spliced into the query text (#17) — the
-        // names are constants today, but predicates built with format! are
-        // exactly the idiom that issue bans.
-        let selection = ankurah::ankql::parser::parse_selection("name = ?")?
-            .predicate
-            .populate([ankurah::ankql::ast::Expr::from(*name)])?;
-        let existing = ctx.fetch::<RoomView>(selection).await?;
-        if existing.is_empty() {
-            info!("Creating '{name}' room");
-            let trx = ctx.begin();
-            trx.create(&Room { name: name.to_string(), created_by: None, topic: None }).await?;
-            trx.commit().await?;
-        }
+        ensure_room(ctx, name).await?;
     }
 
     Ok(())
+}
+
+/// Create a room by name if it does not exist; return its id either way.
+/// Idempotent, and the id is what lets a caller (the CI hook) hold onto the
+/// room it seeded instead of looking it up by name per request.
+pub(crate) async fn ensure_room(ctx: &Context, name: &str) -> Result<EntityId> {
+    // Parameterized rather than spliced into the query text (#17) — the
+    // names are constants today, but predicates built with format! are
+    // exactly the idiom that issue bans.
+    let selection = ankurah::ankql::parser::parse_selection("name = ?")?
+        .predicate
+        .populate([ankurah::ankql::ast::Expr::from(name)])?;
+    if let Some(existing) = ctx.fetch::<RoomView>(selection).await?.into_iter().next() {
+        return Ok(existing.id());
+    }
+
+    info!("Creating '{name}' room");
+    let trx = ctx.begin();
+    let created = trx.create(&Room { name: name.to_string(), created_by: None, topic: None }).await?;
+    let id = created.id();
+    trx.commit().await?;
+    Ok(id)
 }
 
 #[cfg(test)]
