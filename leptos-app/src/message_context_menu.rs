@@ -274,7 +274,7 @@ pub fn MessageContextMenu(
                 // presence is what makes the tombstone read "by a moderator".
                 if !is_own {
                     trx.create(&ModAction {
-                        actor: crate::current_user_id().into(),
+                        actor: Some(crate::current_user_id().into()),
                         message: Some(ankurah::Ref::from(&message)),
                         user: None,
                         action: "delete".to_string(),

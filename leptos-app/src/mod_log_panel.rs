@@ -94,17 +94,19 @@ pub fn ModLogPanel(on_close: impl Fn() + Clone + 'static) -> impl IntoView {
 /// hover); user-targeted rows ("ban"/"unban") name the member instead.
 #[component]
 fn ModLogRow(action: ModActionView, names_by_user: Memo<HashMap<String, String>>) -> impl IntoView {
-    let actor_id = action.actor().map(|a| a.id().to_base64()).unwrap_or_default();
-    let hue = fmt::hue_class(&actor_id);
+    // `actor` is `None` on automated rows — today the DM rate limiter, which
+    // tombstones abusive traffic with no moderator in the loop. Those render as
+    // "Automatic" rather than "Unknown": the difference between "nobody acted"
+    // and "we lost track of who acted" is exactly what a moderator reading this
+    // log needs to know.
+    let actor_id = action.actor().ok().flatten().map(|a| a.id().to_base64());
+    let hue = fmt::hue_class(actor_id.as_deref().unwrap_or(""));
 
     let actor_id_for_name = actor_id.clone();
-    let actor_name = move || {
-        names_by_user.with(|map| {
-            map.get(&actor_id_for_name)
-                .filter(|n| !n.trim().is_empty())
-                .cloned()
-                .unwrap_or_else(|| "Unknown".to_string())
-        })
+    let actor_name = move || match &actor_id_for_name {
+        None => "Automatic".to_string(),
+        Some(id) => names_by_user
+            .with(|map| map.get(id).filter(|n| !n.trim().is_empty()).cloned().unwrap_or_else(|| "Unknown".to_string())),
     };
     let actor_name_for_initials = actor_name.clone();
 

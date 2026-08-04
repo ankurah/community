@@ -166,13 +166,17 @@ async fn mention_notification_exists(ctx: &Context, recipient: EntityId, message
 /// `kind` for an event in `room`. Runs under Root, which bypasses the
 /// pref collection's owner-only scope. No pref row means default-allow.
 ///
+/// Shared with the DM worker (`dm_notify`), which passes an empty `room_b64`:
+/// a DM happens in no room, so the mute leg cannot match, while the
+/// `mentions_only` leg applies to `kind="dm"` like any other non-mention kind.
+///
 /// Duplicate rows can exist (two devices racing their first-ever write; rows
 /// are not deletable in ankurah 0.9.0). The client pins the LOWEST id — by
 /// base64, its exact comparator — as THE row for display and edits, so this
 /// evaluates only that row: honoring a twin the UI neither shows nor edits
 /// would suppress a room's notifications forever with no user-reachable
 /// repair.
-async fn pref_allows_delivery(ctx: &Context, recipient: EntityId, kind: &str, room_b64: &str) -> Result<bool> {
+pub(super) async fn pref_allows_delivery(ctx: &Context, recipient: EntityId, kind: &str, room_b64: &str) -> Result<bool> {
     let predicate = parse_selection("user = ?")?.predicate.populate([Expr::from(&recipient)])?;
     let Some(pref) = ctx.fetch::<NotificationPrefView>(predicate).await?.into_iter().min_by_key(|p| p.id().to_base64()) else {
         return Ok(true);

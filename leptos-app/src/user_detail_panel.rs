@@ -321,7 +321,7 @@ fn ban_member(user_id: String, user_name: String) {
             .await?;
             // The lights-on log row (#10): user-targeted, so no message ref.
             trx.create(&ModAction {
-                actor: crate::current_user_id().into(),
+                actor: Some(crate::current_user_id().into()),
                 message: None,
                 user: Some(user_eid.into()),
                 action: "ban".to_string(),
@@ -354,7 +354,7 @@ fn unban_member(user_id: String, rows: Vec<BanView>) {
                 row.edit(&trx)?.active().set(&false)?;
             }
             trx.create(&ModAction {
-                actor: crate::current_user_id().into(),
+                actor: Some(crate::current_user_id().into()),
                 message: None,
                 user: Some(user_eid.into()),
                 action: "unban".to_string(),

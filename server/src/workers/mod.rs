@@ -40,6 +40,8 @@
 //! in-flight message is dropped, healed by the next boot sweep or the
 //! message's next change.
 
+pub mod dm_notify;
+pub mod dm_rate_limit;
 pub mod mentions;
 pub mod og;
 pub mod ssrf;
@@ -52,7 +54,7 @@ use ankurah::changes::{ChangeSet, ItemChange};
 use ankurah::signals::{Peek, Subscribe};
 use ankurah::{Context, EntityId, LiveQuery};
 use anyhow::Result;
-use community_model::MessageView;
+use community_model::{DmMessageView, MessageView};
 use futures_util::future::BoxFuture;
 use futures_util::FutureExt;
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -63,11 +65,82 @@ use tracing::{error, info};
 /// (the server keeps serving chat; derived data just goes stale), and the
 /// task never returns otherwise.
 pub fn start(ctx: Context) {
+    let dm_ctx = ctx.clone();
     tokio::spawn(async move {
         if let Err(e) = watch_messages(ctx).await {
             error!("message workers failed to start: {e:#}");
         }
     });
+    tokio::spawn(async move {
+        if let Err(e) = watch_dms(dm_ctx).await {
+            error!("DM workers failed to start: {e:#}");
+        }
+    });
+}
+
+/// The DM half of the worker subsystem (#30): one standing `dm_message`
+/// LiveQuery feeding two consumers, exactly the shape [`watch_messages`] uses
+/// for room messages.
+///
+/// It is a SEPARATE query and separate consumers on purpose, not a branch
+/// inside the room-message pipeline. The mention fan-out must never run on DM
+/// text — a third party named inside a private thread cannot read it and must
+/// not be told it exists — and the surest way to guarantee that is for the DM
+/// stream never to reach the mention worker at all. `dm_notify` explains the
+/// rule; this is the structure that enforces it.
+///
+/// Cost: the query holds every non-tombstoned `dm_message` in memory on the
+/// durable node, the same posture as the room-message query above (`deleted =
+/// false` over the whole collection). The rate limiter needs a full history to
+/// rebuild its window after a restart, so this is load-bearing rather than
+/// incidental; if DM volume ever outgrows it, the replacement is a bounded
+/// recent-window query plus persisted counters, not a smaller sweep.
+async fn watch_dms(ctx: Context) -> Result<()> {
+    let (notify_tx, notify_rx) = tokio::sync::mpsc::unbounded_channel::<DmMessageView>();
+    let (limit_tx, limit_rx) = tokio::sync::mpsc::unbounded_channel::<DmMessageView>();
+
+    // Tombstoned DMs produce no notifications, and the limiter treats them as
+    // history — the predicate keeps them out of the stream entirely. Note the
+    // limiter's own tombstones therefore arrive as Removes, which it ignores:
+    // enforcing on a row it just tombstoned would loop.
+    let live: LiveQuery<DmMessageView> = ctx.query("deleted = false")?;
+
+    let subscription_guard = {
+        let notify_tx = notify_tx.clone();
+        let limit_tx = limit_tx.clone();
+        live.subscribe(move |changeset: ChangeSet<DmMessageView>| {
+            for change in &changeset.changes {
+                match change {
+                    ItemChange::Add { item, .. } | ItemChange::Update { item, .. } => {
+                        let _ = notify_tx.send(item.clone());
+                        let _ = limit_tx.send(item.clone());
+                    }
+                    ItemChange::Initial { .. } | ItemChange::Remove { .. } => {}
+                }
+            }
+        })
+    };
+
+    {
+        let ctx = ctx.clone();
+        supervise("DM notification", notify_rx, move |rx| dm_notify::run(ctx.clone(), rx).boxed());
+    }
+    {
+        let ctx = ctx.clone();
+        supervise("DM rate limit", limit_rx, move |rx| dm_rate_limit::run(ctx.clone(), rx).boxed());
+    }
+
+    live.wait_initialized().await;
+    let backlog: Vec<DmMessageView> = live.resultset().peek();
+    info!(messages = backlog.len(), "DM workers: standing dm_message LiveQuery initialized; sweeping backlog");
+    for msg in backlog {
+        let _ = notify_tx.send(msg.clone());
+        let _ = limit_tx.send(msg);
+    }
+
+    std::future::pending::<()>().await;
+    drop((live, subscription_guard)); // unreachable; documents what parking keeps alive
+    Ok(())
 }
 
 async fn watch_messages(ctx: Context) -> Result<()> {
@@ -135,10 +208,10 @@ async fn watch_messages(ctx: Context) -> Result<()> {
 /// is dropped (idempotent probes heal it on the message's next change or the
 /// next boot sweep). A graceful channel close ends the supervisor: that only
 /// happens at process teardown.
-fn supervise(
+fn supervise<T: Send + 'static>(
     name: &'static str,
-    mut rx: UnboundedReceiver<MessageView>,
-    run: impl for<'a> Fn(&'a mut UnboundedReceiver<MessageView>) -> BoxFuture<'a, ()> + Send + 'static,
+    mut rx: UnboundedReceiver<T>,
+    run: impl for<'a> Fn(&'a mut UnboundedReceiver<T>) -> BoxFuture<'a, ()> + Send + 'static,
 ) {
     tokio::spawn(async move {
         loop {
@@ -192,7 +265,10 @@ mod tests {
     use ankurah::policy::{PermissiveAgent, DEFAULT_CONTEXT};
     use ankurah::Node;
     use ankurah_storage_sled::SledStorageEngine;
-    use community_model::{LinkPreview, LinkPreviewView, Message, NotificationView, Room, User};
+    use community_model::{
+        canonical_pair, DmMessage, DmMessageView, DmThread, LinkPreview, LinkPreviewView, Message, ModActionView,
+        NotificationView, Room, User,
+    };
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -288,5 +364,177 @@ mod tests {
         let previews = ctx.fetch::<LinkPreviewView>("true").await.unwrap();
         assert_eq!(previews.len(), 1, "pre-cached URL must not be re-fetched or duplicated");
         assert_eq!(previews[0].title().unwrap().as_deref(), Some("seeded"));
+    }
+
+    /// The DM fan-out rule that has real privacy weight (#30): a DM notifies
+    /// the OTHER PARTICIPANT and nobody else — in particular, a mention token
+    /// inside DM text notifies nobody.
+    ///
+    /// Why this must be pinned rather than assumed: the mention scanner is a
+    /// pure function over text and the notification worker is one channel away
+    /// from the DM stream, so "run the mention fan-out on DM text too" is a
+    /// two-line change that looks like a feature and is actually a leak. A
+    /// third party named in a private thread cannot read that thread (the
+    /// `dm_message` read scope names exactly two people), so a notification
+    /// would tell them a conversation they have no access to is about them and
+    /// deep-link them into a view that renders empty.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_dm_mentioning_a_third_party_notifies_only_the_recipient() {
+        let ctx = test_context().await;
+        start(ctx.clone());
+
+        let trx = ctx.begin();
+        let alice = trx.create(&User { display_name: "Alice".into(), oidc_sub: None }).await.unwrap().id();
+        let bob = trx.create(&User { display_name: "Bob".into(), oidc_sub: None }).await.unwrap().id();
+        let carol = trx.create(&User { display_name: "Carol".into(), oidc_sub: None }).await.unwrap().id();
+        trx.commit().await.unwrap();
+
+        let (a, b) = canonical_pair(alice, bob);
+        let trx = ctx.begin();
+        let thread = trx.create(&DmThread { a: a.into(), b: b.into(), created_at: 1, deleted: false }).await.unwrap().id();
+        trx.commit().await.unwrap();
+
+        // Alice DMs Bob, naming Carol in the text. Carol is not a participant.
+        let text = format!("bob, what do you make of <@{}>?", carol.to_base64());
+        let trx = ctx.begin();
+        trx.create(&DmMessage {
+            thread: thread.into(),
+            a: a.into(),
+            b: b.into(),
+            user: alice.into(),
+            text,
+            timestamp: 2,
+            deleted: false,
+            edited_at: None,
+        })
+        .await
+        .unwrap();
+        trx.commit().await.unwrap();
+
+        let notification = wait_for_first_notification(&ctx).await;
+        assert_eq!(notification.recipient().unwrap().id(), bob, "the recipient is the other participant");
+        assert_eq!(notification.kind().unwrap(), "dm");
+        assert_eq!(notification.actor().unwrap().map(|r| r.id()), Some(alice), "the actor is the sender — the deep-link target");
+        assert_eq!(notification.message().unwrap().map(|r| r.id()), None, "Notification.message is a room-message ref; a DM cannot ride in it");
+        assert_eq!(notification.room().unwrap().map(|r| r.id()), None, "a DM happens in no room");
+        assert!(!notification.seen().unwrap());
+
+        // Generous settle, then: still exactly one row in the whole database.
+        // Carol has none, and Bob has not been notified twice.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let all = ctx.fetch::<NotificationView>("true").await.unwrap();
+        assert_eq!(all.len(), 1, "exactly one notification: the mention token in DM text must mint nothing");
+        assert!(
+            !all.iter().any(|n| n.recipient().map(|r| r.id() == carol).unwrap_or(false)),
+            "a third party named inside a DM must never be notified of it"
+        );
+
+        // A second DM from the same sender, while the first is unread, does not
+        // add a row — one unseen row per correspondent (see dm_notify).
+        let trx = ctx.begin();
+        trx.create(&DmMessage {
+            thread: thread.into(),
+            a: a.into(),
+            b: b.into(),
+            user: alice.into(),
+            text: "still there?".into(),
+            timestamp: 3,
+            deleted: false,
+            edited_at: None,
+        })
+        .await
+        .unwrap();
+        trx.commit().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(
+            ctx.fetch::<NotificationView>("true").await.unwrap().len(),
+            1,
+            "a second unread DM from the same person coalesces into the existing inbox row"
+        );
+    }
+
+    /// The rate limiter, end to end on a real node: a sender who opens more
+    /// conversations than the window allows has the excess thread AND its
+    /// messages tombstoned, and one public `dm-rate-limit` ModAction row is
+    /// written with no human actor.
+    ///
+    /// This is the post-hoc shape stated in dm_rate_limit's module docs: the
+    /// rows really do commit first, and the test waits for the worker to catch
+    /// up — which is exactly what a recipient with the thread open would see.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_dm_rate_limiter_tombstones_the_excess_and_logs_one_action() {
+        use super::dm_rate_limit::MAX_INITIATIONS_PER_WINDOW;
+
+        let ctx = test_context().await;
+        start(ctx.clone());
+
+        let trx = ctx.begin();
+        let spammer = trx.create(&User { display_name: "Spammer".into(), oidc_sub: None }).await.unwrap().id();
+        let mut victims = Vec::new();
+        for i in 0..(MAX_INITIATIONS_PER_WINDOW + 1) {
+            victims.push(trx.create(&User { display_name: format!("Victim {i}"), oidc_sub: None }).await.unwrap().id());
+        }
+        trx.commit().await.unwrap();
+
+        // One thread per victim, each opened by the spammer, committed one at a
+        // time so the worker sees them in order (a single transaction would
+        // deliver them as one changeset and the ordering claim would be vague).
+        let now = now_ms();
+        let mut threads = Vec::new();
+        for (i, victim) in victims.iter().enumerate() {
+            let (a, b) = canonical_pair(spammer, *victim);
+            let trx = ctx.begin();
+            let thread = trx.create(&DmThread { a: a.into(), b: b.into(), created_at: now, deleted: false }).await.unwrap().id();
+            trx.create(&DmMessage {
+                thread: thread.into(),
+                a: a.into(),
+                b: b.into(),
+                user: spammer.into(),
+                text: format!("unsolicited {i}"),
+                timestamp: now,
+                deleted: false,
+                edited_at: None,
+            })
+            .await
+            .unwrap();
+            trx.commit().await.unwrap();
+            threads.push(thread);
+            // Let the worker consume this one before the next commits, so
+            // "the excess" is the last thread and not an arbitrary one.
+            tokio::time::sleep(Duration::from_millis(120)).await;
+        }
+
+        // The limiter's tombstone is what removes rows from `deleted = false`.
+        let mut remaining = usize::MAX;
+        for _ in 0..200 {
+            remaining = ctx.fetch::<DmMessageView>("deleted = false").await.unwrap().len();
+            if remaining == MAX_INITIATIONS_PER_WINDOW {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert_eq!(
+            remaining, MAX_INITIATIONS_PER_WINDOW,
+            "exactly the conversations within the limit survive; the excess message is tombstoned with its thread"
+        );
+
+        // One public audit row, no human actor, naming the sender and nothing
+        // about the recipients or the text.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let actions: Vec<ModActionView> = ctx
+            .fetch::<ModActionView>("true")
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|m| m.action().map(|a| a == "dm-rate-limit").unwrap_or(false))
+            .collect();
+        assert_eq!(actions.len(), 1, "a burst produces one ModAction row per sender per window, not one per message");
+        assert_eq!(actions[0].actor().unwrap().map(|r| r.id()), None, "nothing human acted");
+        assert_eq!(actions[0].user().unwrap().map(|r| r.id()), Some(spammer));
+        let reason = actions[0].reason().unwrap().unwrap_or_default();
+        assert!(reason.contains("rate limit"), "the reason explains itself to a moderator, got: {reason}");
+        for victim in &victims {
+            assert!(!reason.contains(&victim.to_base64()), "the public log must never name who was messaged");
+        }
     }
 }

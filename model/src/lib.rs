@@ -145,9 +145,17 @@ pub struct ReadState {
 /// absent properties only read cleanly through `Option<T>`).
 #[derive(Model, Debug, Serialize, Deserialize)]
 pub struct ModAction {
-    /// The moderator who acted.
+    /// The moderator who acted, or `None` when nothing human did — today the
+    /// DM rate limiter (server/src/workers/dm_rate_limit.rs), which tombstones
+    /// abusive traffic and logs it here so moderators can escalate to a Ban.
+    ///
+    /// This became `Option` when automated actions arrived, which is the
+    /// textbook retrofit: every pre-existing row carries the property with a
+    /// value and therefore reads as `Some`, while an absent property (none
+    /// exist) would read as `None` rather than `PropertyError::Missing`. As
+    /// with `ModAction.message`, keep comparisons on this field equality-only.
     #[active_type(LWW)]
-    pub actor: Ref<User>,
+    pub actor: Option<Ref<User>>,
     /// The message acted upon, for message-targeted actions ("delete",
     /// "restore"). `None` on user-targeted rows, which have no message —
     /// there is no null `Ref`, so `Option` is the only honest encoding.
@@ -333,6 +341,23 @@ pub fn canonical_pair(x: EntityId, y: EntityId) -> (EntityId, EntityId) {
     if x <= y { (x, y) } else { (y, x) }
 }
 
+/// Pick THE thread for a pair out of whatever the pair query returned.
+///
+/// Two clients opening their first DM at the same moment both find no thread
+/// and both create one, and ankurah 0.9.0 has no entity deletion, so the twin
+/// is permanent. Rather than a repair pass (which would race in its own right),
+/// every reader collapses duplicates the same way: the LOWEST entity id wins,
+/// and new messages are posted into it. The twin keeps whatever landed in it
+/// during the race window — visible only if something did — and stops
+/// collecting traffic the moment both clients have seen both rows.
+///
+/// This is deliberately the same `EntityId` ordering as [`canonical_pair`], and
+/// it lives here rather than in the client so that the race test, the client,
+/// and any future consumer converge by construction rather than by coincidence.
+pub fn canonical_thread(candidates: impl IntoIterator<Item = EntityId>) -> Option<EntityId> {
+    candidates.into_iter().min()
+}
+
 /// Given a thread's participants and the viewer, the OTHER participant — whose
 /// name a DM row shows and who a DM notification goes to. `None` for a
 /// degenerate self-thread, and for a viewer who is not a participant at all
@@ -369,6 +394,18 @@ pub struct DmThread {
     pub b: Ref<User>,
     /// ms since epoch (same unit as `Message.timestamp`).
     pub created_at: i64,
+    /// Tombstone flag, flipped only by the server's DM rate limiter when a
+    /// sender opens more conversations than the window allows
+    /// (server/src/workers/dm_rate_limit.rs). Clients list threads with
+    /// `deleted = false`, so a tombstoned thread leaves both sidebars.
+    ///
+    /// This exists because there is no remote-write gate an app can extend:
+    /// enforcement is necessarily post-hoc, and this flag is what "post-hoc"
+    /// acts on. It is not a user-facing "delete conversation" affordance — no
+    /// client writes it — and the row survives as the audit trail, paired with
+    /// its `ModAction`.
+    #[active_type(LWW)]
+    pub deleted: bool,
 }
 
 /// One message in a `DmThread`.

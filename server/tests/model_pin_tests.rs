@@ -141,7 +141,7 @@ async fn dm_rows_are_born_with_both_participants_and_refs_round_trip() {
     let (a, b) = canonical_pair(alice, bob);
 
     let trx = ctx.begin();
-    let thread = trx.create(&DmThread { a: a.into(), b: b.into(), created_at: 1 }).await.unwrap().id();
+    let thread = trx.create(&DmThread { a: a.into(), b: b.into(), created_at: 1, deleted: false }).await.unwrap().id();
     trx.commit().await.unwrap();
 
     let trx = ctx.begin();
