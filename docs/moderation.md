@@ -134,7 +134,7 @@ the limiter is a worker, and it acts *after* the fact: an offending message
 commits, replicates, and reaches the recipient's client, and is then
 tombstoned — usually within a second, but a recipient with the thread open can
 watch a message appear and turn into "Message removed". Nothing here stops a
-determined abuser in the moment; it makes volume expensive and leaves a trail.
+determined sender in the moment; it makes volume expensive and leaves a trail.
 **The escalation is a human moderator issuing a `Ban`**, which is enforced at
 token mint and is the part you can rely on.
 
@@ -151,8 +151,8 @@ never approaches the number.
 
 **Attribution comes from `DmMessage.user`, never from the thread row.**
 `DmThread` deliberately records no creator: the write scope only checks that
-the writer is one of `a`/`b`, so a `created_by` field would be forgeable and a
-spammer could blame their victim into a rate limit. `DmMessage.user` is pinned
+the writer is one of `a`/`b`, so a `created_by` field would be unreliable — a
+sender could name someone else as the creator and push THEM into a rate limit. `DmMessage.user` is pinned
 to the caller by the policy's sender-binding rule, so "who started this
 conversation" derived from the oldest message is the one attribution a client
 cannot lie about.
@@ -162,7 +162,7 @@ clamped to the server clock on arrival, which kills future-dating (a message
 dated next year would otherwise sit at the top of every newest-first list
 forever). Back-dating to slip out of the window is possible and is accepted:
 a back-dated message buries itself in the recipient's history, so the evasion
-costs the abuser the visibility they wanted.
+costs the sender the visibility they wanted.
 
 **What a breach does — and what it deliberately does not.** Either limit
 tombstones one message and nothing else: over the initiation limit, the
@@ -175,7 +175,7 @@ initiation breach. That is the one thing an automatic penalty must not do
 here: nothing anywhere in this codebase writes `deleted` back to `false`, so a
 single false positive permanently destroyed a two-way conversation — the other
 participant's messages included — with no repair path for them, for the
-sender, or for a moderator. Tombstoning the message costs a spammer exactly
+sender, or for a moderator. Tombstoning the message costs a bulk sender exactly
 the same delivery, because a thread whose only message was tombstoned has
 nothing left to show, and threads with no messages appear in neither sidebar.
 The friction survives; the data does not die.

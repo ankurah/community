@@ -233,7 +233,7 @@ pub struct Notification {
 /// Written exclusively by the server's unfurl worker under the Root context.
 /// The `linkpreview` policy entry requires a `system` write privilege that no
 /// role holds, so clients can never spoof a preview for a URL they posted —
-/// otherwise a message could carry a forged title/image for a phishing link.
+/// otherwise a message could carry a made-up title/image for a deceptive link.
 #[derive(Model, Debug, Serialize, Deserialize)]
 pub struct LinkPreview {
     /// The URL exactly as extracted from message text (no normalization
@@ -462,10 +462,10 @@ pub struct DmThread {
 /// against the writer, so a member can hand-craft a row naming themselves and
 /// ANY stranger, filed under any thread id they like — including a
 /// conversation between two other people. The scope still stops them reading
-/// anyone else's data (both scopes read the same two fields, so a forged row
+/// anyone else's data (both scopes read the same two fields, so such a row
 /// is visible to exactly the people it names) and still pins `user` to them.
 ///
-/// What stops the forgery being worth anything is an invariant every consumer
+/// What stops the claim being worth anything is an invariant every consumer
 /// must keep: **`a`/`b` are a read-scope device, never a statement of who is
 /// talking to whom.** Who a message is between is read from the row it is
 /// filed under — `thread` — by the render paths, by the DM fan-out
@@ -474,7 +474,7 @@ pub struct DmThread {
 /// thread lookup and believes these two fields hands every member an unlimited
 /// notification channel to strangers, each notification deep-linking to a
 /// conversation the stranger cannot open. That is not hypothetical: it is what
-/// `forged_participants_on_a_dm_notify_the_thread_not_the_forgery` exists to
+/// `claimed_participants_on_a_dm_notify_the_thread_not_the_claim` exists to
 /// keep from coming back.
 #[derive(Model, Debug, Serialize, Deserialize)]
 pub struct DmMessage {

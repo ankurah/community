@@ -476,11 +476,11 @@ mod tests {
     /// every one of them gets tapped on the shoulder about a conversation they
     /// cannot open, while the rate limiter sees one quiet old thread.
     ///
-    /// So both workers resolve the pair from the THREAD row. Alice forges two
+    /// So both workers resolve the pair from the THREAD row. Alice writes two
     /// rows here — one in her own thread with Bob, one filed into Bob and
     /// Carol's thread — and both name Carol. Carol must hear about neither.
     #[tokio::test(flavor = "multi_thread")]
-    async fn forged_participants_on_a_dm_notify_the_thread_not_the_forgery() {
+    async fn claimed_participants_on_a_dm_notify_the_thread_not_the_claim() {
         let ctx = test_context().await;
         start(ctx.clone());
 
@@ -526,12 +526,12 @@ mod tests {
         .unwrap();
         trx.commit().await.unwrap();
 
-        // The forgeries. Both carry Alice+Carol as the pair; neither thread
-        // says so. The first is filed in Alice's own thread with Bob, the
+        // The mismatched rows. Both carry Alice+Carol as the pair; neither
+        // thread says so. The first is filed in Alice's own thread with Bob, the
         // second in a conversation Alice is not part of at all.
         let (ac_a, ac_b) = canonical_pair(alice, carol);
         let trx = ctx.begin();
-        for (thread, text) in [(ab, "forged into my own thread"), (bc, "forged into someone else's")] {
+        for (thread, text) in [(ab, "filed into my own thread"), (bc, "filed into someone else's")] {
             trx.create(&DmMessage {
                 thread: thread.into(),
                 a: ac_a.into(),
@@ -557,18 +557,19 @@ mod tests {
         assert_eq!(
             for_carol[0].actor().unwrap().map(|r| r.id()),
             Some(bob),
-            "and that one is from Bob: a forged pair must never introduce a stranger"
+            "and that one is from Bob: a claimed pair must never introduce a third member"
         );
 
         let for_bob: Vec<_> = notifications.iter().filter(|n| n.recipient().unwrap().id() == bob).collect();
-        assert_eq!(for_bob.len(), 1, "Bob hears from Alice once — the forged row in their thread coalesces, it does not vanish");
+        assert_eq!(for_bob.len(), 1, "Bob hears from Alice once — the mismatched row in their thread coalesces, it does not vanish");
         assert_eq!(for_bob[0].actor().unwrap().map(|r| r.id()), Some(alice));
 
-        // Nothing was tombstoned either: the forgeries were counted against
-        // the threads they were filed in (an old, answered one) or ignored as
-        // a stranger's row, never as new conversations Alice was starting.
+        // Nothing was tombstoned either: the mismatched rows were counted
+        // against the threads they were filed in (an old, answered one) or
+        // ignored as an outsider's row, never as new conversations Alice was
+        // starting.
         let live = ctx.fetch::<DmMessageView>("deleted = false").await.unwrap();
-        assert_eq!(live.len(), 4, "a forged pair does not turn an old conversation into a rate-limited new one");
+        assert_eq!(live.len(), 4, "a claimed pair does not turn an old conversation into a rate-limited new one");
     }
 
     /// The rate limiter, end to end on a real node: a sender who opens more
@@ -590,27 +591,27 @@ mod tests {
         start(ctx.clone());
 
         let trx = ctx.begin();
-        let spammer = trx.create(&User { display_name: "Spammer".into(), oidc_sub: None }).await.unwrap().id();
-        let mut victims = Vec::new();
+        let opener = trx.create(&User { display_name: "Opener".into(), oidc_sub: None }).await.unwrap().id();
+        let mut partners = Vec::new();
         for i in 0..(MAX_INITIATIONS_PER_WINDOW + 1) {
-            victims.push(trx.create(&User { display_name: format!("Victim {i}"), oidc_sub: None }).await.unwrap().id());
+            partners.push(trx.create(&User { display_name: format!("Partner {i}"), oidc_sub: None }).await.unwrap().id());
         }
         trx.commit().await.unwrap();
 
-        // One thread per victim, each opened by the spammer, committed one at a
+        // One thread per partner, each opened by the same sender, committed one at a
         // time so the worker sees them in order (a single transaction would
         // deliver them as one changeset and the ordering claim would be vague).
         let now = now_ms();
         let mut threads = Vec::new();
-        for (i, victim) in victims.iter().enumerate() {
-            let (a, b) = canonical_pair(spammer, *victim);
+        for (i, partner) in partners.iter().enumerate() {
+            let (a, b) = canonical_pair(opener, *partner);
             let trx = ctx.begin();
             let thread = trx.create(&DmThread { a: a.into(), b: b.into(), created_at: now, deleted: false }).await.unwrap().id();
             trx.create(&DmMessage {
                 thread: thread.into(),
                 a: a.into(),
                 b: b.into(),
-                user: spammer.into(),
+                user: opener.into(),
                 text: format!("unsolicited {i}"),
                 timestamp: now,
                 deleted: false,
@@ -665,11 +666,11 @@ mod tests {
             .collect();
         assert_eq!(actions.len(), 1, "a burst produces one ModAction row per sender per window, not one per message");
         assert_eq!(actions[0].actor().unwrap().map(|r| r.id()), None, "nothing human acted");
-        assert_eq!(actions[0].user().unwrap().map(|r| r.id()), Some(spammer));
+        assert_eq!(actions[0].user().unwrap().map(|r| r.id()), Some(opener));
         let reason = actions[0].reason().unwrap().unwrap_or_default();
         assert!(reason.contains("rate limit"), "the reason explains itself to a moderator, got: {reason}");
-        for victim in &victims {
-            assert!(!reason.contains(&victim.to_base64()), "the public log must never name who was messaged");
+        for partner in &partners {
+            assert!(!reason.contains(&partner.to_base64()), "the public log must never name who was messaged");
         }
     }
 }

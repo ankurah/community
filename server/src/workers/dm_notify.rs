@@ -89,8 +89,8 @@ async fn process_dm(ctx: &Context, msg: &DmMessageView, delivered: &mut HashSet<
     // the same row for the next stranger, forever, with the rate limiter
     // seeing one quiet old thread the whole time.
     //
-    // Read from the thread and the forgery buys nothing: the row is visible
-    // only to whoever the forger named, and nobody is told about it.
+    // Read from the thread and the claim buys nothing: the row is visible
+    // only to whoever the sender named, and nobody is told about it.
     let Some((a, b)) = thread_participants(ctx, thread_id).await else {
         debug!(message = %msg.id(), thread = %thread_id, "DM names no thread we can resolve; nobody to notify");
         return Ok(());

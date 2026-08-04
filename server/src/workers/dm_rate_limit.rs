@@ -9,7 +9,7 @@
 //! afterwards — typically within a second, but a recipient with a live thread
 //! open can see a message appear and then turn into a tombstone. That is the
 //! honest cost of the seam we have, and it is why the escalation path (a human
-//! moderator issuing a `Ban`) is the real answer to a determined abuser; this
+//! moderator issuing a `Ban`) is the real answer to a persistent sender; this
 //! worker is friction, not a wall.
 //!
 //! WHAT IS COUNTED. Two limits, both per sender, both over a trailing window:
@@ -67,7 +67,8 @@
 //! WHY THE SENDER IS INFERRED FROM MESSAGES RATHER THAN FROM THE THREAD ROW.
 //! `DmThread` records no creator, deliberately: the write scope only checks
 //! that the writer is one of `a`/`b`, so a `created_by` field would be
-//! forgeable — a spammer could blame the victim and get THEM rate limited.
+//! unreliable — a sender could name someone else as the creator and get
+//! THEM rate limited.
 //! `DmMessage.user` is pinned to the caller by the policy's sender-binding rule
 //! (`user = $jwt.sub`), so "who started this conversation" derived from the
 //! oldest message is the one attribution a client cannot lie about.
@@ -80,19 +81,20 @@
 //! any row and file it under any thread id. Nothing here reads them. The
 //! conversation a message belongs to is its `thread`, and who that
 //! conversation belongs to is read from the thread row (and remembered), so a
-//! stranger's row injected into someone else's thread is ignored instead of
-//! rewriting that thread's facts — one such row would otherwise make a
-//! monologue look answered and switch the unanswered limit off.
+//! row filed into someone else's thread by a member it does not name is
+//! ignored instead of rewriting that thread's facts — one such row would
+//! otherwise make a monologue look answered and switch the unanswered limit
+//! off.
 //!
 //! TIMESTAMPS ARE CLIENT-SUPPLIED, AND THE WINDOW LIVES WITH THAT. A sender
 //! could future-date messages to jump the timeline or back-date them to slip
-//! out of the window. Future-dating is the attractive attack (a message dated
+//! out of the window. Future-dating is the move that pays (a message dated
 //! next year sits at the top of every "newest first" list forever) and it is
 //! neutralized: timestamps are clamped to the server's clock on arrival.
 //! Back-dating is self-defeating — a back-dated message buries itself in the
 //! recipient's history — so it is accepted rather than defended against. That
 //! acceptance now covers one more move: back-dating the first message of a
-//! thread ages that thread out of the initiation window early. The abuser pays
+//! thread ages that thread out of the initiation window early. The sender pays
 //! for it in the only currency that matters to them, by burying every one of
 //! those openings at the bottom of the recipients' lists.
 
@@ -114,7 +116,7 @@ pub const WINDOW_MS: i64 = 60 * 60 * 1000;
 /// How many conversations one sender may START per window. Sized for a human
 /// meeting a community, not for a campaign: five introductions an hour is
 /// generous for the "I just joined and want to say hi to a few people" case and
-/// cheap for a spammer to exhaust.
+/// cheap to exhaust for anyone sending in bulk.
 pub const MAX_INITIATIONS_PER_WINDOW: usize = 5;
 
 /// How many messages one sender may send per window into threads the other
@@ -206,7 +208,7 @@ impl Limiter {
     /// put any pair they like on a row they file into any thread. A message
     /// from someone the thread does not name is ignored outright rather than
     /// counted, because letting it in would let a stranger (or a second
-    /// account) rewrite a conversation's facts: one injected row makes a
+    /// account) rewrite a conversation's facts: one such row makes a
     /// monologue look answered, which switches the unanswered limit off.
     ///
     /// `now` is the server clock, used both to clamp a client-supplied
@@ -605,8 +607,8 @@ mod tests {
 
     /// The other half of that rule, so the fix cannot be an over-correction:
     /// the stamp is the thread's FIRST message, so a conversation opened INSIDE
-    /// the window keeps counting until the window passes it. A spammer must not
-    /// be able to age their own burst out by chatting into the threads they
+    /// the window keeps counting until the window passes it. A bulk sender must
+    /// not be able to age their own burst out by chatting into the threads they
     /// just opened.
     #[test]
     fn conversations_started_inside_the_window_keep_counting_until_it_passes() {
@@ -714,7 +716,7 @@ mod tests {
     /// A row from someone the THREAD does not name never joins that thread's
     /// facts. The `a`/`b` on a message are the sender's own claim, so anyone
     /// can file a row into anyone's conversation; if the limiter believed such
-    /// a row, one injected message (from an accomplice or a second account)
+    /// a row, one such message (from a second account or a cooperating member)
     /// would make a monologue look answered and switch the unanswered limit
     /// off for the thread it was aimed at.
     #[test]
@@ -732,19 +734,19 @@ mod tests {
         }
 
         // Alice, who is in neither seat, files a row into their thread.
-        let injected = now + MAX_UNANSWERED_PER_WINDOW as i64;
+        let outsider = now + MAX_UNANSWERED_PER_WINDOW as i64;
         assert_eq!(
-            limiter.observe(EntityId::new(), thread, theirs, alice, injected, injected),
+            limiter.observe(EntityId::new(), thread, theirs, alice, outsider, outsider),
             Verdict::Allow,
-            "a stranger's row is not traffic in this conversation; it is ignored"
+            "an outsider's row is not traffic in this conversation; it is ignored"
         );
 
         // Carol still has not answered, so Bob's next message is still a
         // monologue and still over the cap.
         assert_eq!(
-            limiter.observe(EntityId::new(), thread, theirs, bob, injected + 1, injected + 1),
+            limiter.observe(EntityId::new(), thread, theirs, bob, outsider + 1, outsider + 1),
             Verdict::TooManyUnanswered { unanswered: MAX_UNANSWERED_PER_WINDOW + 1 },
-            "an injected row must not count as the correspondent answering"
+            "an outsider's row must not count as the correspondent answering"
         );
     }
 
