@@ -87,3 +87,110 @@ quoted underneath.
 
 Everyone sees the ban/unban entries in the public moderation log — that is
 the point of lights-on moderation.
+
+---
+
+# Direct messages (#30) — what moderation can and cannot do
+
+Two-party DMs change the moderation picture in one specific way, so the
+posture is written down here rather than inferred from `policy.json`.
+
+## Moderators cannot read DMs. That is the ruling, not an oversight.
+
+The `dmthread` and `dmmessage` read scopes are `a = $jwt.sub OR b = $jwt.sub`
+with **no `unless_privilege`**. A moderator who is not one of the two
+participants gets nothing: not a one-shot fetch, not a live subscription, not
+a get by entity id. `server/tests/dm_policy_live_tests.rs` asserts all three
+against the real policy on a real node, and
+`policy_scope_tests.rs::dm_scope_rule_shapes_unchanged_and_no_moderator_bypass`
+fails the moment somebody adds the bypass. Both tests exist because adding
+moderator visibility is a one-line policy change, and a one-line change to a
+privacy posture should have to argue with a test.
+
+**Abuse response therefore flows through reports, never through browsing.** A
+member who receives an abusive DM reports the message; the report carries the
+message ref, and the moderator acts on what the report contains. There is no
+"open this member's conversations" affordance anywhere in the product, and
+building one would mean changing the policy above, in public, on purpose.
+(The report flow itself is roadmap item 2.10; until it lands, a recipient's
+route is to tell a moderator directly, and the moderator's tools are the ones
+that already exist — `Ban`, and the DM rate limiter below.)
+
+The one thing moderators DO see is the public `ModAction` log, including the
+automatic `dm-rate-limit` rows described next.
+
+## The DM rate limiter — post-hoc, and honest about it
+
+`server/src/workers/dm_rate_limit.rs`. This is the stranger-DM mitigation the
+feature request asked for (a per-sender rate limit on thread creation and
+first messages); the alternative it was chosen over — a "DM requests" accept
+gate — is specced at #67 and waits on real abuse data.
+
+**Where enforcement actually happens, precisely.** There is no seam in this
+codebase where a remote write can be refused. The only such gate is
+`check_event` inside `ankurah-jwt-auth`, which an application cannot extend
+(the wrapper-agent approach was killed in an earlier architecture review). So
+the limiter is a worker, and it acts *after* the fact: an offending message
+commits, replicates, and reaches the recipient's client, and is then
+tombstoned — usually within a second, but a recipient with the thread open can
+watch a message appear and turn into "Message removed". Nothing here stops a
+determined abuser in the moment; it makes volume expensive and leaves a trail.
+**The escalation is a human moderator issuing a `Ban`**, which is enforced at
+token mint and is the part you can rely on.
+
+**What is counted, per sender, over a trailing 60 minutes:**
+
+| Limit                                    | Value | What trips it                                                |
+| ---------------------------------------- | ----- | ------------------------------------------------------------ |
+| Conversations **started**                | 5     | The sender's message is the oldest in its thread              |
+| Messages into **unanswered** threads     | 20    | Threads where the other participant has never sent anything   |
+
+A thread the correspondent has replied in is exempt from the second limit
+entirely: two people talking are not a broadcast, and a real conversation
+never approaches the number.
+
+**Attribution comes from `DmMessage.user`, never from the thread row.**
+`DmThread` deliberately records no creator: the write scope only checks that
+the writer is one of `a`/`b`, so a `created_by` field would be forgeable and a
+spammer could blame their victim into a rate limit. `DmMessage.user` is pinned
+to the caller by the policy's sender-binding rule, so "who started this
+conversation" derived from the oldest message is the one attribution a client
+cannot lie about.
+
+**Timestamps are client-supplied and the window lives with that.** They are
+clamped to the server clock on arrival, which kills future-dating (a message
+dated next year would otherwise sit at the top of every newest-first list
+forever). Back-dating to slip out of the window is possible and is accepted:
+a back-dated message buries itself in the recipient's history, so the evasion
+costs the abuser the visibility they wanted.
+
+**What a breach does:** over the initiation limit, the thread and every
+message in it are tombstoned (the thread leaves both sidebars); over the
+unanswered limit, the single message is tombstoned. Either way **one**
+`ModAction { action: "dm-rate-limit" }` row is written per sender per window.
+
+**What that public row discloses, stated plainly.** `modaction` is
+world-readable by design, so the row tells the community that this member
+tripped the DM rate limit, and carries the counts. It never names a recipient
+and never contains message text. That trade is deliberate: without a public
+row an automated tombstone would be invisible to the moderators who are
+supposed to decide whether it warrants a ban — and since moderators cannot
+read DMs, rows like this one and user reports are the only signal they get.
+
+`ModAction.actor` is `None` on these rows: nothing human acted. The mod-log
+panel renders that as "Automatic", which is deliberately distinct from the
+"Unknown" it shows when an actor exists but cannot be named.
+
+## Not in the DM lane, on purpose
+
+- **The x-ray inspector refuses deleted DMs outright** (`xray/inspector.rs`),
+  with no moderator escape hatch — unlike the room-message carve-out, which
+  has one. DM history must not be one click more readable than room history
+  (community#68 item 4).
+- **DM read cursors are private even from the correspondent.** `dmreadstate`
+  is scoped `user = $jwt.sub`, not to the participant pair: a read cursor is a
+  read receipt, and shipping read receipts is a product decision nobody made.
+- **Mentions inside DM text notify nobody.** A third party named in a private
+  thread cannot read it, so telling them it exists would leak the fact of the
+  conversation. `server/src/workers/dm_notify.rs` is a separate worker on a
+  separate query precisely so this cannot be "fixed" by accident.
