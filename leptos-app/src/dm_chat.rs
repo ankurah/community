@@ -35,12 +35,26 @@ use crate::{
 #[component]
 pub fn DmChat(
     thread: RwSignal<Option<DmThreadView>>,
+    /// The viewer's whole thread set, so an open conversation can be read
+    /// across every row its pair has (see [`crate::dm::pair_rows`]).
+    threads: LiveQuery<DmThreadView>,
     current_user: RwSignal<Option<UserView>>,
     users: LiveQuery<UserView>,
     read_state: DmReadStateManager,
 ) -> impl IntoView {
     let pane = ScrollPane::<DmMessageView>::new();
     pane.install();
+
+    // Which rows this conversation is spread across: normally just the
+    // selected one, and more when a first-DM race left twins. Reactive,
+    // because the losing twin can arrive after the view is already open.
+    let rows = {
+        let threads = threads.clone();
+        Signal::derive(move || match thread.get() {
+            Some(t) => dm::pair_rows(&threads.get(), &t),
+            None => Vec::new(),
+        })
+    };
 
     // The composer's edit/reply state. DM v1 never arms either — they exist
     // because the composer is shared with room chat — and owning them here
@@ -51,10 +65,17 @@ pub fn DmChat(
     let no_room_messages = Signal::derive(Vec::<MessageView>::new);
 
     Effect::new(move |_| {
-        let predicate = thread.get().map(|t| {
-            // Tombstones stay in the timeline like room tombstones (#10), so
-            // the scroll shape does not jump when one appears.
-            crate::queries::predicate("thread = ?", [(&t.id()).into()]).expect("static dm message predicate parses")
+        // The timeline is the union of the pair's rows, so a message written
+        // into a race twin before the clients agreed on a winner is still part
+        // of the conversation the reader sees. With no twins — the normal case
+        // — this is the plain `thread = ?` it has always been.
+        //
+        // Tombstones stay in the timeline like room tombstones (#10), so the
+        // scroll shape does not jump when one appears.
+        let ids = rows.get();
+        let predicate = (!ids.is_empty()).then(|| {
+            let src = vec!["thread = ?"; ids.len()].join(" OR ");
+            crate::queries::predicate(&src, ids.iter().map(|id| id.into())).expect("dm message predicate parses")
         });
         pane.set_source(predicate, "timestamp DESC");
     });
@@ -75,12 +96,15 @@ pub fn DmChat(
     };
 
     // Advance the read cursor whenever the viewer is at the live tail — the
-    // room rule, per thread.
+    // room rule, per thread. Every row of the pair gets the cursor, because
+    // the sidebar's badge counts across all of them: leaving a twin's cursor
+    // behind would leave a badge nothing can clear.
     let mark_read_at_tail = {
         let read_state = read_state.clone();
         move || {
-            if let (Some(t), Some(ts)) = (thread.get_untracked(), newest_timestamp(&messages.get_untracked())) {
-                read_state.mark_read(&t.id().to_base64(), ts);
+            let Some(ts) = newest_timestamp(&messages.get_untracked()) else { return };
+            for id in rows.get_untracked() {
+                read_state.mark_read(&id.to_base64(), ts);
             }
         }
     };

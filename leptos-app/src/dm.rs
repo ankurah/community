@@ -8,24 +8,29 @@
 //!
 //! The whole answer is agreement rather than prevention:
 //!
-//! 1. participants are stored in [`community_model::canonical_pair`] order, so
-//!    both sides build the identical `a = ? AND b = ?` query and neither can
-//!    miss a thread the other created;
+//! 1. participants are stored in [`community_model::canonical_pair`] order and
+//!    looked up in BOTH orders, so neither side can miss a thread the other
+//!    created — not even one written with the pair reversed, which policy has
+//!    no way to refuse (see [`find_or_create_thread`]);
 //! 2. when the query does return more than one, every reader picks the same one
 //!    — [`community_model::canonical_thread`], the lowest entity id — and posts
 //!    there;
 //! 3. an open thread view re-resolves itself whenever the thread set changes
 //!    ([`converge_selection`]), so a client that opened the twin during the race
-//!    window slides onto the winner without the reader noticing.
+//!    window slides onto the winner without the reader noticing;
+//! 4. and every view that READS a conversation reads all of the pair's rows,
+//!    not just the winner ([`Conversation`], [`pair_rows`]) — the twin keeps
+//!    whatever landed in it during the race, and agreeing on where to write
+//!    next must not make what was already written unreachable.
 //!
-//! The twin keeps whatever landed in it during the race (a first message,
-//! usually) and stops collecting traffic. `server/tests/dm_policy_live_tests.rs`
-//! pins the convergence at the storage level against the same
-//! `canonical_thread` this module calls.
+//! `server/tests/dm_policy_live_tests.rs` pins the convergence at the storage
+//! level against the same `canonical_thread` this module calls.
 
 use ankurah::{model::Mutable, EntityId, LiveQuery};
 use ankurah_signals::{Get as AnkurahGet, Peek};
-use community_model::{canonical_pair, canonical_thread, dm_partner, DmMessage, DmThread, DmThreadView, UserView};
+use community_model::{
+    canonical_pair, canonical_thread, dm_partner, DmMessage, DmThread, DmThreadView, UserView, THREADS_FOR_PAIR,
+};
 use leptos::prelude::*;
 
 use crate::{ctx, current_user_id, queries};
@@ -40,27 +45,72 @@ pub fn threads_query() -> LiveQuery<DmThreadView> {
     ctx().query::<DmThreadView>("deleted = false").expect("failed to create DmThreadView LiveQuery")
 }
 
-/// One row per correspondent: duplicates from a first-DM race collapse to the
-/// canonical thread, so the sidebar never shows the same person twice.
+/// One conversation per correspondent, as the UI has to treat it: the row
+/// every reader agrees to call THE thread for that pair, plus every row the
+/// pair has.
 ///
-/// Threads are keyed by their participant pair rather than by their id, which
-/// is exactly what makes the collapse possible.
-pub fn canonical_threads(threads: &[DmThreadView]) -> Vec<DmThreadView> {
-    let mut by_pair: std::collections::HashMap<(EntityId, EntityId), DmThreadView> = std::collections::HashMap::new();
+/// The extra rows are the losers of a first-DM race, and they are not inert.
+/// Whoever wrote into one before the race resolved left their message THERE,
+/// and no later message joins it. A view that reads only the agreed row can
+/// therefore show an empty conversation — or hide it from the sidebar
+/// entirely, since a thread with no messages is not listed — while the words
+/// sit one row over. So activity, unread counts and the message timeline are
+/// all read across `rows`; only what a click selects, and where a new message
+/// is written, is [`Conversation::canonical`].
+#[derive(Clone)]
+pub struct Conversation {
+    /// The lowest entity id for the pair — the row every client converges on.
+    pub canonical: DmThreadView,
+    /// Every row for the pair, canonical first, in id order.
+    pub rows: Vec<EntityId>,
+}
+
+/// Group the viewer's threads by correspondent. Threads are keyed by their
+/// participant pair rather than by their id, which is what makes duplicates
+/// from a race collapse into one sidebar row — and the pair is canonicalized
+/// on the way in, so a row stored in the reversed order (which policy permits;
+/// see [`find_or_create_thread`]) groups with its twin rather than beside it.
+pub fn conversations(threads: &[DmThreadView]) -> Vec<Conversation> {
+    let mut by_pair: std::collections::HashMap<(EntityId, EntityId), Vec<DmThreadView>> = std::collections::HashMap::new();
     for thread in threads {
         let (Ok(a), Ok(b)) = (thread.a(), thread.b()) else { continue };
-        let key = canonical_pair(a.id(), b.id());
-        match by_pair.get(&key) {
-            Some(existing) if existing.id() <= thread.id() => {}
-            _ => {
-                by_pair.insert(key, thread.clone());
-            }
-        }
+        by_pair.entry(canonical_pair(a.id(), b.id())).or_default().push(thread.clone());
     }
-    let mut rows: Vec<DmThreadView> = by_pair.into_values().collect();
+    let mut conversations: Vec<Conversation> = by_pair
+        .into_values()
+        .filter_map(|mut rows| {
+            rows.sort_by_key(|t| t.id());
+            let canonical = rows.first()?.clone();
+            Some(Conversation { canonical, rows: rows.iter().map(|t| t.id()).collect() })
+        })
+        .collect();
     // Stable order for the caller to re-sort; ids are ULIDs, so this is
     // oldest-thread-first until the sidebar sorts by recent activity.
-    rows.sort_by_key(|t| t.id());
+    conversations.sort_by_key(|c| c.canonical.id());
+    conversations
+}
+
+/// Every thread row belonging to the same pair as `thread`, including it.
+///
+/// What it is for: any view opened on one row of a raced pair has to read the
+/// whole pair, or the messages that landed in the other row are unreachable
+/// (see [`Conversation`]).
+pub fn pair_rows(threads: &[DmThreadView], thread: &DmThreadView) -> Vec<EntityId> {
+    let (Ok(a), Ok(b)) = (thread.a(), thread.b()) else { return vec![thread.id()] };
+    let pair = canonical_pair(a.id(), b.id());
+    let mut rows: Vec<EntityId> = threads
+        .iter()
+        .filter(|t| {
+            let (Ok(ta), Ok(tb)) = (t.a(), t.b()) else { return false };
+            canonical_pair(ta.id(), tb.id()) == pair
+        })
+        .map(|t| t.id())
+        .collect();
+    if !rows.contains(&thread.id()) {
+        // The live thread set has not caught up with the open selection yet.
+        rows.push(thread.id());
+    }
+    rows.sort();
     rows
 }
 
@@ -130,12 +180,19 @@ async fn find_or_create_thread(me: EntityId, partner: EntityId) -> Result<DmThre
     // Parameterized, never spliced (#17). Both participants build this exact
     // query, which is what makes find-or-create converge.
     //
+    // The lookup asks about both orderings, because the model cannot insist on
+    // one — see `community_model::THREADS_FOR_PAIR`, where the source lives so
+    // that a test can prove it parses (no test CI runs compiles this file).
+    //
     // `deleted = false` is safe only while nothing tombstones threads, which is
     // today's ruling (see `DmThread::deleted`). The day something does, this
     // line stops finding the pair's thread and mints a second one beside it,
     // stranding the history in a row neither participant can reach again — so
     // whoever adds a thread tombstone owes this call an adoption path.
-    let selection = queries::selection("a = ? AND b = ? AND deleted = false", [(&a).into(), (&b).into()])?;
+    let selection = queries::selection(
+        &format!("{THREADS_FOR_PAIR} AND deleted = false"),
+        [(&a).into(), (&b).into(), (&b).into(), (&a).into()],
+    )?;
     let existing = ctx().fetch::<DmThreadView>(selection).await?;
     if let Some(winner) = canonical_thread(existing.iter().map(|t| t.id()))
         && let Some(row) = existing.into_iter().find(|t| t.id() == winner)

@@ -386,11 +386,13 @@ pub fn ChatApp() -> impl IntoView {
                     let users = users.clone();
                     let read_state = read_state.clone();
                     let dm_read_state = dm_read_state.clone();
+                    let dm_threads = dm_threads.clone();
                     move || {
                         if selected_dm.get().is_some() {
                             view! {
                                 <DmChat
                                     thread=selected_dm
+                                    threads=dm_threads.clone()
                                     current_user=current_user
                                     users=users.clone()
                                     read_state=dm_read_state.clone()

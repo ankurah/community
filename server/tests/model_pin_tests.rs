@@ -89,15 +89,22 @@ fn canonical_pair_is_symmetric_total_and_byte_ordered() {
     let me = ankurah::EntityId::new();
     assert_eq!(canonical_pair(me, me), (me, me));
 
-    // Byte order vs base64 order really do differ, so the choice is load-bearing
-    // rather than cosmetic. Find a pair where they disagree and pin that the
-    // helper follows the bytes.
-    let (x, y) = (0..4096)
-        .map(|_| (ankurah::EntityId::new(), ankurah::EntityId::new()))
-        .find(|(x, y)| (x < y) != (x.to_base64() < y.to_base64()))
-        .expect("4096 random pairs must contain one whose byte order and base64 order disagree");
-    let (a, _) = community_model::canonical_pair(x, y);
-    assert_eq!(a, std::cmp::min(x, y), "canonical order follows entity-id bytes, not base64 text");
+    // Byte order and base64 order really do disagree, so the choice is
+    // load-bearing rather than cosmetic — and the witness is constructed
+    // rather than searched for, so this leg cannot quietly test nothing.
+    //
+    // The base64url alphabet runs A-Z, a-z, 0-9, '-', '_': value 62 encodes as
+    // '-' (ASCII 45) and value 0 as 'A' (ASCII 65). So an id whose first six
+    // bits are 62 sorts AFTER one whose first six bits are 0 by bytes, and
+    // BEFORE it as text.
+    let leading_62 = ankurah::EntityId::from_bytes([0xF8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    let leading_0 = ankurah::EntityId::from_bytes([0; 16]);
+    assert!(leading_0 < leading_62, "by bytes, the id starting 0x00 is the lower one");
+    assert!(leading_62.to_base64() < leading_0.to_base64(), "as text, '-…' sorts before 'A…' — the orders disagree");
+
+    let (a, b) = community_model::canonical_pair(leading_62, leading_0);
+    assert_eq!(a, leading_0, "canonical order follows entity-id bytes, not base64 text");
+    assert_eq!(b, leading_62);
 }
 
 /// The viewer's correspondent, from either arm; `None` for the degenerate

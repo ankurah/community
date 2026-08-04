@@ -38,23 +38,29 @@ pub fn DmList(
 ) -> impl IntoView {
     let me = current_user_id();
 
-    // Duplicate threads from a concurrent first-DM race collapse to the
-    // canonical one, so a correspondent never appears twice; rows with no
-    // messages yet are hidden, and the rest sort by most recent activity.
+    // Duplicate threads from a concurrent first-DM race collapse to one row per
+    // correspondent; conversations with no messages are hidden, and the rest
+    // sort by most recent activity.
+    //
+    // Activity is read across EVERY row of the pair rather than the one the
+    // sidebar row stands for. A message written into the losing twin during a
+    // race stays there forever, and a conversation whose only message landed
+    // there would otherwise be filtered out of this list as empty — the
+    // correspondent would simply disappear (see `dm::Conversation`).
     let rows = {
         let threads = threads.clone();
         let read_state = read_state.clone();
         Signal::derive(move || {
-            let mut rows: Vec<(DmThreadView, i64)> = dm::canonical_threads(&threads.get())
+            let mut rows: Vec<(dm::Conversation, i64)> = dm::conversations(&threads.get())
                 .into_iter()
-                .map(|t| {
-                    let newest = read_state.newest_ts(&t.id().to_base64());
-                    (t, newest)
+                .map(|conversation| {
+                    let newest = conversation.rows.iter().map(|id| read_state.newest_ts(&id.to_base64())).max().unwrap_or(0);
+                    (conversation, newest)
                 })
                 .filter(|(_, newest)| *newest > 0)
                 .collect();
-            rows.sort_by(|(a_thread, a_ts), (b_thread, b_ts)| b_ts.cmp(a_ts).then_with(|| a_thread.id().cmp(&b_thread.id())));
-            rows.into_iter().map(|(t, _)| t).collect::<Vec<_>>()
+            rows.sort_by(|(a, a_ts), (b, b_ts)| b_ts.cmp(a_ts).then_with(|| a.canonical.id().cmp(&b.canonical.id())));
+            rows.into_iter().map(|(conversation, _)| conversation).collect::<Vec<_>>()
         })
     };
 
@@ -72,14 +78,15 @@ pub fn DmList(
             </Show>
             <For
                 each=move || rows.get()
-                key=|thread: &DmThreadView| thread.id()
+                key=|conversation: &dm::Conversation| conversation.canonical.id()
                 children={
                     let users = users.clone();
                     let read_state = read_state.clone();
-                    move |thread: DmThreadView| {
+                    move |conversation: dm::Conversation| {
                         view! {
                             <DmListItem
-                                thread=thread
+                                thread=conversation.canonical
+                                rows=conversation.rows
                                 users=users.clone()
                                 selected_dm=selected_dm
                                 read_state=read_state.clone()
@@ -96,6 +103,9 @@ pub fn DmList(
 #[component]
 fn DmListItem(
     thread: DmThreadView,
+    /// Every thread row this conversation is spread across (see
+    /// `dm::Conversation`) — what the unread badge counts over.
+    rows: Vec<ankurah::EntityId>,
     users: LiveQuery<UserView>,
     selected_dm: RwSignal<Option<DmThreadView>>,
     read_state: DmReadStateManager,
@@ -124,7 +134,7 @@ fn DmListItem(
     let is_selected = move || selected_dm.get().as_ref().map(|t| t.id().to_base64() == thread_id_selected).unwrap_or(false);
 
     let thread_for_click = thread.clone();
-    let thread_id_badge = thread_id.clone();
+    let row_keys: Vec<String> = rows.iter().map(|id| id.to_base64()).collect();
 
     view! {
         <div
@@ -136,7 +146,9 @@ fn DmListItem(
             </span>
             <span class="roomLabel">{partner_name}</span>
             {move || {
-                let unread_count = read_state.unread_count(&thread_id_badge);
+                // Across the pair's rows, for the same reason the sidebar's
+                // activity is: unread messages can be sitting in a race twin.
+                let unread_count: usize = row_keys.iter().map(|key| read_state.unread_count(key)).sum();
                 (unread_count > 0).then(|| {
                     let badge_text = if unread_count >= 10 { "10+".to_string() } else { unread_count.to_string() };
                     view! { <span class="unreadBadge">{badge_text}</span> }

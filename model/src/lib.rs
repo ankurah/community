@@ -341,6 +341,25 @@ pub fn canonical_pair(x: EntityId, y: EntityId) -> (EntityId, EntityId) {
     if x <= y { (x, y) } else { (y, x) }
 }
 
+/// The lookup that finds a pair's threads: AnkQL source with four `?`
+/// placeholders, to be populated with `a`, `b`, `b`, `a`.
+///
+/// It asks about BOTH orderings because nothing can insist on one. Clients
+/// write the pair in [`canonical_pair`] order, but the `dm_thread` write scope
+/// can only ask whether the writer is one of `a`/`b` — comparing the two
+/// fields to each other is not something the scope grammar expresses — so a
+/// row with the pair reversed is a row the server accepts. A lookup matching
+/// only the canonical order would not see such a row, and find-or-create would
+/// mint a second thread beside a perfectly good one, forking the conversation
+/// in two. Matching both leaves a reversed row merely untidy:
+/// [`canonical_thread`] picks the winner out of whatever comes back.
+///
+/// The source lives here, beside the ordering rule it compensates for, so that
+/// it can be pinned by a test — the client that runs it is a wasm binary no
+/// test in CI compiles, and a typo would surface only as a "Message" button
+/// that quietly does nothing.
+pub const THREADS_FOR_PAIR: &str = "((a = ? AND b = ?) OR (a = ? AND b = ?))";
+
 /// Pick THE thread for a pair out of whatever the pair query returned.
 ///
 /// Two clients opening their first DM at the same moment both find no thread
@@ -354,6 +373,12 @@ pub fn canonical_pair(x: EntityId, y: EntityId) -> (EntityId, EntityId) {
 /// This is deliberately the same `EntityId` ordering as [`canonical_pair`], and
 /// it lives here rather than in the client so that the race test, the client,
 /// and any future consumer converge by construction rather than by coincidence.
+///
+/// Winning decides where the NEXT message is written, and nothing more. What
+/// landed in the twin during the race is still part of the conversation, so
+/// every reading path takes the union of the pair's rows (see
+/// `leptos-app/src/dm.rs`, `Conversation`); agreeing on where to write must not
+/// make what was already written unreachable.
 pub fn canonical_thread(candidates: impl IntoIterator<Item = EntityId>) -> Option<EntityId> {
     candidates.into_iter().min()
 }
@@ -508,4 +533,39 @@ pub struct DmReadState {
     #[active_type(LWW)]
     pub thread: Ref<DmThread>,
     pub last_read_ts: i64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// [`THREADS_FOR_PAIR`] really is a query: it parses, it takes exactly the
+    /// four parameters its callers pass, and it survives the `AND deleted =
+    /// false` the client appends.
+    ///
+    /// Pinned here because the only code that runs it is a wasm binary CI never
+    /// compiles into a test. A typo in that string would not fail a build; it
+    /// would fail as a "Message" button that quietly does nothing, on a path
+    /// whose whole job is to not open a second thread for a pair.
+    #[test]
+    fn the_pair_lookup_parses_and_takes_four_parameters() {
+        use ankurah::ankql::{ast::Expr, parser::parse_selection};
+
+        let (a, b) = canonical_pair(EntityId::new(), EntityId::new());
+        let as_the_client_writes_it = format!("{THREADS_FOR_PAIR} AND deleted = false");
+
+        let selection = parse_selection(&as_the_client_writes_it).expect("the pair lookup parses, parentheses and all");
+        selection
+            .predicate
+            .clone()
+            .populate([Expr::from(&a), Expr::from(&b), Expr::from(&b), Expr::from(&a)])
+            .expect("four placeholders take the pair in both orders");
+
+        // And exactly four: a caller passing one ordering only must fail
+        // closed rather than silently querying half the question.
+        assert!(
+            selection.predicate.populate([Expr::from(&a), Expr::from(&b)]).is_err(),
+            "a placeholder/parameter mismatch must fail rather than pass a half-populated query"
+        );
+    }
 }

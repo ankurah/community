@@ -40,6 +40,19 @@ use wasm_bindgen_futures::spawn_local;
 
 use crate::{ctx, queries};
 
+/// This client's clock, in the project's ms-since-epoch unit.
+fn now_ms() -> i64 { js_sys::Date::now() as i64 }
+
+/// A message's timestamp as the badges and the sidebar order may use it:
+/// never later than now.
+///
+/// Timestamps are written by whichever client sent the message, so "newest"
+/// is a claim, not a fact. A single future-dated message would otherwise pin
+/// its conversation to the top of the sidebar forever and, once the reader
+/// opened the thread, push their cursor past every message that followed.
+/// Clamping keeps a bad clock (or a bad actor) inside today.
+fn stamp_of(message: &DmMessageView) -> Option<i64> { message.timestamp().ok().map(|ts| ts.min(now_ms())) }
+
 #[derive(Clone)]
 pub struct DmReadStateManager(SendWrapper<Arc<Inner>>);
 
@@ -156,6 +169,11 @@ impl DmReadStateManager {
     /// the cursor advances; otherwise the local map updates immediately
     /// (badges clear instantly) and a row upsert is flushed in the background.
     pub fn mark_read(&self, thread_id: &str, ts: i64) {
+        // Never let a cursor run past now. `ts` comes from a message, and a
+        // message's timestamp is whatever its sender's clock said (or claimed):
+        // one message dated 2100 would otherwise park this cursor in 2100 and
+        // silence the thread's badge for every real message after it.
+        let ts = ts.min(now_ms());
         let inner: &Arc<Inner> = &self.0;
         {
             let cursors = inner.last_read.peek();
@@ -229,7 +247,7 @@ impl DmReadStateManager {
         let cursor = inner.last_read.peek().get(thread_id).copied().unwrap_or(0);
         let count = items
             .iter()
-            .filter(|m| m.timestamp().map(|ts| ts > cursor).unwrap_or(false))
+            .filter(|m| stamp_of(m).map(|ts| ts > cursor).unwrap_or(false))
             .filter(|m| m.user().map(|u| u.id() != inner.user_id).unwrap_or(true))
             .count();
 
@@ -243,7 +261,7 @@ impl DmReadStateManager {
             inner.unread.set(unread);
         }
 
-        let newest_ts = items.iter().filter_map(|m| m.timestamp().ok()).max().unwrap_or(0);
+        let newest_ts = items.iter().filter_map(stamp_of).max().unwrap_or(0);
         let mut newest = inner.newest.peek().clone();
         if newest.get(thread_id).copied().unwrap_or(0) != newest_ts {
             newest.insert(thread_id.to_string(), newest_ts);
