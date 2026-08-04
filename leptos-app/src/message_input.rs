@@ -4,9 +4,24 @@ use std::collections::HashMap;
 use web_sys::KeyboardEvent;
 
 use ankurah_signals::{Get as AnkurahGet, Peek as AnkurahPeek};
-use community_model::{Message, MessageView, RoomView, UserView};
+use community_model::{DmThreadView, Message, MessageView, RoomView, UserView};
 
 use crate::{ctx, fmt, ws_client};
+
+/// Where a composed message goes. Everything ABOVE the send — autosize, the
+/// mention popup and its `@Name` re-encoding, `:emoji:` completion, the IME
+/// guards, Enter/Shift+Enter — is identical for rooms and DMs, so the composer
+/// is one component and only the create branch differs.
+///
+/// Edit and reply are room-only in DM v1: they are driven by
+/// `editing_message`/`replying_to`, which are `MessageView`-typed and which the
+/// DM thread view never arms. A DM composer therefore renders no chips and
+/// Cmd/Ctrl+Up navigates nothing (the DM view passes an empty message list).
+#[derive(Clone)]
+pub enum ComposerTarget {
+    Room(RoomView),
+    Dm(DmThreadView),
+}
 
 /// Cap on the auto-grown composer height (#50) — roughly eight lines of text;
 /// beyond it the textarea scrolls internally instead of eating the timeline.
@@ -189,7 +204,8 @@ fn mention_candidates(users: &[UserView], query: &str) -> Vec<UserView> {
 /// untouched — the server scanner sees exactly what it always saw.
 #[component]
 pub fn MessageInput(
-    room: RoomView,
+    /// The room or DM thread this composer posts into.
+    target: ComposerTarget,
     current_user: Option<UserView>,
     editing_message: RwSignal<Option<MessageView>>,
     /// The message the next send replies to (#23), armed by the context
@@ -443,7 +459,7 @@ pub fn MessageInput(
 
     let send = {
         let current_user = current_user.clone();
-        let room = room.clone();
+        let target = target.clone();
         let mention_users = mention_users.clone();
         move || {
             mention_draft.set(None);
@@ -513,13 +529,15 @@ pub fn MessageInput(
                 // Create a new message. ankurah stores user/room as typed Refs;
                 // an armed reply (#23) rides along as `re`. The wire text is
                 // the display draft with `@Name` runs re-encoded to canonical
-                // tokens (#56) — what the server's mention scanner fans out.
-                let user_ref = ankurah::Ref::from(&user);
-                let room_ref = ankurah::Ref::from(&room);
+                // tokens (#56) — what the server's mention scanner fans out for
+                // ROOM messages. A DM carries the same tokens and renders them
+                // the same way, and the server deliberately does not fan them
+                // out (see server/src/workers/dm_notify.rs).
+                let target = target.clone();
+                let user = user.clone();
                 let input_text = input_text.trim().to_string();
                 let wire_text = directory().encode(&input_text, &mention_picks.get_value());
                 let reply_to = replying_to.get_untracked();
-                let re = reply_to.as_ref().map(ankurah::Ref::from);
                 // Clear synchronously: clearing only in the async completion
                 // left a window where a second Enter re-sent the same text.
                 // The reply chip clears with it — this send owns it now.
@@ -527,20 +545,24 @@ pub fn MessageInput(
                 replying_to.set(None);
                 wasm_bindgen_futures::spawn_local(async move {
                     let result = async {
-                        let trx = ctx().begin();
-                        let timestamp = js_sys::Date::now() as i64;
-                        trx.create(&Message {
-                            user: user_ref,
-                            room: room_ref,
-                            text: wire_text,
-                            timestamp,
-                            deleted: false,
-                            edited_at: None,
-                            collaborative: None,
-                            re,
-                        })
-                        .await?;
-                        trx.commit().await?;
+                        match &target {
+                            ComposerTarget::Room(room) => {
+                                let trx = ctx().begin();
+                                trx.create(&Message {
+                                    user: ankurah::Ref::from(&user),
+                                    room: ankurah::Ref::from(room),
+                                    text: wire_text,
+                                    timestamp: js_sys::Date::now() as i64,
+                                    deleted: false,
+                                    edited_at: None,
+                                    collaborative: None,
+                                    re: reply_to.as_ref().map(ankurah::Ref::from),
+                                })
+                                .await?;
+                                trx.commit().await?;
+                            }
+                            ComposerTarget::Dm(thread) => crate::dm::send_dm(thread, &user, wire_text).await?,
+                        }
                         Ok::<_, Box<dyn std::error::Error>>(())
                     }
                     .await;

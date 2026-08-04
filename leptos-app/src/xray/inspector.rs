@@ -21,7 +21,7 @@ use ankurah::core::retrieval::{CachedEventGetter, GetEvents};
 use ankurah::proto::{Clock, EntityId, Event, EventId};
 use ankurah::View;
 use ankurah_jwt_auth::{parse_claims_unverified, JwtContext};
-use community_model::{MessageView, RoomView, UserView};
+use community_model::{DmMessageView, MessageView, RoomView, UserView};
 
 use super::dag::{layout, DagModel, DagNodeInput, DagView};
 use super::decode::op_badges;
@@ -106,14 +106,49 @@ async fn fetch_history(target: InspectTarget, cancelled: Arc<AtomicBool>) -> Pha
     // Present a missing/errored optional field as an em dash.
     let dash = || "—".to_string();
 
-    // POLICY POSTURE (pending product ruling, raised in community#39 /
-    // alongside ankurah#337): `deleted` is an LWW flag, and members can read
-    // deleted messages' events — the UI filters them, policy does not. X-ray
-    // of a deleted message would resurrect its text from yrs history in one
-    // click, so v0 refuses the inspector for non-moderators. This is UI
-    // posture, not security: the events remain fetchable by any client with
-    // a console. If the ruling says "history is public", delete this block.
-    if collection == MessageView::collection() {
+    // DELETED-MESSAGE GATE, DM HALF (#30, and community#68 item 4). Same
+    // posture as the room half further down, for the same reason: `deleted` is
+    // an LWW flag, so a tombstoned message's text is still reconstructible from
+    // its yrs history, and the inspector would make that one click. DM history
+    // must never be MORE readable than room history.
+    //
+    // One deliberate difference: this refusal has no moderator escape hatch,
+    // because DMs are private from moderators (the community#30 ruling). That
+    // costs nothing — a moderator is not a participant, so the read scope
+    // refuses them the entity and the `get` below fails first — but stating it
+    // here keeps the room gate's `can_moderate()` from being copied over by
+    // reflex.
+    if collection == DmMessageView::collection() {
+        match ctx().get::<DmMessageView>(entity_id).await {
+            Ok(message) => {
+                if message.deleted().unwrap_or(false) {
+                    return Phase::Refused(
+                        "This direct message was removed. Its history is not inspectable.".to_string(),
+                    );
+                }
+                head = Some(message.entity().head());
+                collect_lww_provenance(message.entity(), &["thread", "a", "b", "user", "deleted"], &mut lww_current);
+                current_state = vec![
+                    ("text".into(), message.text().unwrap_or_default()),
+                    ("thread".into(), message.thread().map(|r| r.id().to_base64_short()).unwrap_or_else(|_| dash())),
+                    ("user".into(), message.user().map(|r| r.id().to_base64_short()).unwrap_or_else(|_| dash())),
+                    ("timestamp".into(), message.timestamp().map(|t| t.to_string()).unwrap_or_else(|_| dash())),
+                    ("deleted".into(), message.deleted().map(|b| b.to_string()).unwrap_or_else(|_| dash())),
+                    ("edited_at".into(), message.edited_at().ok().flatten().map(|t| t.to_string()).unwrap_or_else(dash)),
+                ];
+            }
+            Err(e) => return Phase::Failed(format!("Could not load entity: {}", e)),
+        }
+    } else if collection == MessageView::collection() {
+        // POLICY POSTURE (pending product ruling, raised in community#39 /
+        // alongside ankurah#337): `deleted` is an LWW flag, and members can
+        // read deleted messages' events — the UI filters them, policy does
+        // not. X-ray of a deleted message would resurrect its text from yrs
+        // history in one click, so v0 refuses the inspector for
+        // non-moderators. This is UI posture, not security: the events remain
+        // fetchable by any client with a console. If the ruling says "history
+        // is public", delete this block — and the DM block above with it, or
+        // DM history becomes the stricter of the two for no stated reason.
         match ctx().get::<MessageView>(entity_id).await {
             Ok(message) => {
                 if message.deleted().unwrap_or(false) && !can_moderate() {

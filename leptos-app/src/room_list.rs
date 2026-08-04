@@ -4,9 +4,9 @@ use web_sys::{KeyboardEvent, window};
 
 use ankurah::{LiveQuery, model::Mutable};
 use ankurah_signals::Get as AnkurahGet;
-use community_model::{Room, RoomView};
+use community_model::{DmThreadView, Room, RoomView, UserView};
 
-use crate::{ctx, read_state::ReadStateManager};
+use crate::{ctx, dm_list::DmList, dm_read_state::DmReadStateManager, read_state::ReadStateManager};
 
 /// Auto-select a room from the list if none is currently selected.
 /// Chooses based on URL parameter or defaults to "general".
@@ -64,6 +64,13 @@ pub fn RoomList(
     rooms: LiveQuery<RoomView>,
     selected_room: RwSignal<Option<RoomView>>,
     read_state: ReadStateManager,
+    /// The viewer's DM threads (#30) — the sidebar hosts the "Direct messages"
+    /// section below the rooms, so this component owns the whole sidebar even
+    /// though its name still says rooms.
+    dm_threads: LiveQuery<DmThreadView>,
+    users: LiveQuery<UserView>,
+    selected_dm: RwSignal<Option<DmThreadView>>,
+    dm_read_state: DmReadStateManager,
 ) -> impl IntoView {
     let is_creating = RwSignal::new(false);
     Effect::new(auto_select_room(&rooms, selected_room));
@@ -93,8 +100,10 @@ pub fn RoomList(
                     <div class="emptyRooms">"No rooms yet — press + to plant one."</div>
                 </Show>
 
-                <RoomListUl rooms selected_room read_state />
+                <RoomListUl rooms selected_room read_state selected_dm />
             </div>
+
+            <DmList threads=dm_threads users=users selected_dm=selected_dm read_state=dm_read_state />
         </div>
     }
 }
@@ -104,6 +113,7 @@ fn RoomListUl(
     #[prop(into)] rooms: LiveQuery<RoomView>,
     selected_room: RwSignal<Option<RoomView>>,
     read_state: ReadStateManager,
+    selected_dm: RwSignal<Option<DmThreadView>>,
 ) -> impl IntoView {
     view! {
         <For
@@ -117,6 +127,7 @@ fn RoomListUl(
                             room=room
                             selected_room=selected_room
                             read_state=read_state.clone()
+                            selected_dm=selected_dm
                         />
                     }
                 }
@@ -126,12 +137,23 @@ fn RoomListUl(
 }
 
 #[component]
-fn RoomItem(room: RoomView, selected_room: RwSignal<Option<RoomView>>, read_state: ReadStateManager) -> impl IntoView {
+fn RoomItem(
+    room: RoomView,
+    selected_room: RwSignal<Option<RoomView>>,
+    read_state: ReadStateManager,
+    selected_dm: RwSignal<Option<DmThreadView>>,
+) -> impl IntoView {
     let room_id = room.id().to_base64();
     let name = room.name().unwrap_or_default();
 
+    // A room stays "selected" in app state while a DM is open (so closing the
+    // DM returns you to it), but only ONE sidebar row may look selected —
+    // otherwise the sidebar claims you are in two places at once.
     let room_id_selected = room_id.clone();
-    let is_selected = move || selected_room.get().as_ref().map(|r| r.id().to_base64() == room_id_selected).unwrap_or(false);
+    let is_selected = move || {
+        selected_dm.get().is_none()
+            && selected_room.get().as_ref().map(|r| r.id().to_base64() == room_id_selected).unwrap_or(false)
+    };
 
     let room_for_click = room.clone();
     let room_id_badge = room_id.clone();
@@ -139,7 +161,10 @@ fn RoomItem(room: RoomView, selected_room: RwSignal<Option<RoomView>>, read_stat
     view! {
         <div
             class=move || if is_selected() { "roomItem selected" } else { "roomItem" }
-            on:click=move |_| selected_room.set(Some(room_for_click.clone()))
+            on:click=move |_| {
+                selected_room.set(Some(room_for_click.clone()));
+                selected_dm.set(None);
+            }
         >
             <span class="roomHash" aria-hidden="true">"#"</span>
             <span class="roomLabel">{name}</span>

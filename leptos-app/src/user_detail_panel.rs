@@ -22,7 +22,13 @@ use community_model::{Ban, BanView, ModAction, UserRolesView, UserView};
 use crate::{ctx, fmt};
 
 #[component]
-pub fn UserDetailPanel(user_id: EntityId, on_close: impl Fn() + Clone + 'static) -> impl IntoView {
+pub fn UserDetailPanel(
+    user_id: EntityId,
+    /// The app's open-DM signal, so "Message" can open the conversation with
+    /// this member (#30). Threaded from `ChatApp` through the panel host.
+    selected_dm: RwSignal<Option<community_model::DmThreadView>>,
+    on_close: impl Fn() + Clone + 'static,
+) -> impl IntoView {
     // The user row, resolved once (local-first: IndexedDB, then the peer).
     // The view itself is live afterwards — display-name edits re-render.
     let user = RwSignal::new(None::<UserView>);
@@ -108,6 +114,13 @@ pub fn UserDetailPanel(user_id: EntityId, on_close: impl Fn() + Clone + 'static)
     // No self-ban affordance (locking yourself out is a mistake, not
     // moderation), and no actions on yourself at all.
     let show_mod_actions = crate::can_moderate() && user_id != crate::current_user_id();
+
+    // Start-DM entry point (#30). Offered for every member except yourself: a
+    // self-thread has no other participant to show or notify, and the
+    // find-or-create refuses one anyway. This is the ONLY place a conversation
+    // is started from — the sidebar section lists what already exists.
+    let can_message = user_id != crate::current_user_id();
+    let message_user_id = user_id;
 
     let user_id_b64 = user_id.to_base64();
     let hue = fmt::hue_class(&user_id_b64);
@@ -222,6 +235,38 @@ pub fn UserDetailPanel(user_id: EntityId, on_close: impl Fn() + Clone + 'static)
                             })
                     }
                 }
+
+                {can_message
+                    .then(|| {
+                            view! {
+                                <div class="userDetailActions">
+                                    <button
+                                        class="userDetailActionBtn userDetailMessageBtn"
+                                        // Closes through the global panel
+                                        // manager rather than this panel's
+                                        // `on_close`: the button lives inside a
+                                        // view leptos stores as a thread-safe
+                                        // closure, and `on_close` is not
+                                        // Send+Sync. Same effect — the header's
+                                        // on_close IS panels().close().
+                                        on:click=move |_| {
+                                            crate::dm::open_thread_with(message_user_id, selected_dm);
+                                            crate::panels::panels().close();
+                                        }
+                                    >
+                                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                            stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+                                            aria-hidden="true">
+                                            <path d="M4 6h16v11H8l-4 4z" />
+                                        </svg>
+                                        "Message"
+                                    </button>
+                                    <p class="userDetailMessageNote">
+                                        "Direct messages are private to the two of you — moderators cannot read them."
+                                    </p>
+                                </div>
+                            }
+                    })}
 
                 {show_mod_actions
                     .then(|| {

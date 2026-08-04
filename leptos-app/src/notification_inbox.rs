@@ -62,6 +62,9 @@ pub fn NotificationBadge() -> impl IntoView {
 #[component]
 pub fn NotificationInbox(
     selected_room: RwSignal<Option<RoomView>>,
+    /// The open DM thread — a kind="dm" row deep-links by opening the
+    /// conversation with its sender.
+    selected_dm: RwSignal<Option<community_model::DmThreadView>>,
     // `Send + Sync` (unlike the other panels' `on_close`) because this one is
     // captured inside `Show`/`For` children, which leptos stores as
     // thread-safe closures. The header's `move || panels().close()`
@@ -255,6 +258,7 @@ pub fn NotificationInbox(
                                             room_names
                                             rooms=rooms.clone()
                                             selected_room
+                                            selected_dm
                                             on_close=on_close.clone()
                                         />
                                     }
@@ -289,6 +293,10 @@ fn is_mine(n: &NotificationView, me: EntityId) -> bool { n.recipient().map(|r| r
 fn kind_verb(kind: &str) -> String {
     match kind {
         "mention" => "mentioned you".to_string(),
+        // #30. Deliberately says nothing about the message: the inbox row is
+        // a knock on the door, and the content lives behind the thread's own
+        // read scope.
+        "dm" => "sent you a direct message".to_string(),
         // Honest fallback for kinds this build predates.
         other => format!("sent you a \u{201c}{}\u{201d} notification", other),
     }
@@ -305,6 +313,7 @@ fn NotificationRow(
     room_names: Memo<HashMap<String, String>>,
     rooms: LiveQuery<RoomView>,
     selected_room: RwSignal<Option<RoomView>>,
+    selected_dm: RwSignal<Option<community_model::DmThreadView>>,
     on_close: impl Fn() + Clone + Send + Sync + 'static,
 ) -> impl IntoView {
     let actor_id = notification.actor().ok().flatten().map(|a| a.id().to_base64());
@@ -350,13 +359,27 @@ fn NotificationRow(
         if !notification_for_click.seen().unwrap_or(false) {
             mark_seen(vec![notification_for_click.clone()]);
         }
-        // Deep-link: select the room behind the overlay and close. Falls
+        // Deep-link. A DM row carries no room and no message — `Notification`
+        // has no typed slot a DM fits in (its `message` is a `Ref<Message>`,
+        // its `room` a `Ref<Room>`) — so the target is the SENDER, in `actor`,
+        // and opening the thread is the same find-or-create the "Message"
+        // button on a member's card runs. That resolves to the existing
+        // conversation, which is what the notification was about.
+        if notification_for_click.kind().unwrap_or_default() == "dm" {
+            if let Ok(Some(actor)) = notification_for_click.actor() {
+                crate::dm::open_thread_with(actor.id(), selected_dm);
+                on_close();
+            }
+            return;
+        }
+        // Room deep-link: select the room behind the overlay and close. Falls
         // through quietly (mark-seen only, panel stays open) if the room
         // isn't in the resultset.
         if let Ok(Some(room_ref)) = notification_for_click.room() {
             let room_eid = room_ref.id();
             if let Some(room) = rooms.peek().iter().find(|r| r.id() == room_eid).cloned() {
                 selected_room.set(Some(room));
+                selected_dm.set(None);
                 on_close();
             }
         }

@@ -1,9 +1,10 @@
 use leptos::prelude::*;
 
+use ankurah::LiveQuery;
 use community_model::{MessageView, RoomView, UserView};
 
 use crate::{
-    chat_debug_header::ChatDebugHeader, ctx, message_input::MessageInput, message_list::MessageList,
+    chat_debug_header::ChatDebugHeader, message_input::MessageInput, message_list::MessageList,
     read_state::ReadStateManager, scroll_pane::ScrollPane,
 };
 
@@ -18,6 +19,12 @@ use crate::{
 pub fn Chat(
     room: RwSignal<Option<RoomView>>,
     current_user: RwSignal<Option<UserView>>,
+    /// The app-lifetime users query (author names, mention rendering). Owned by
+    /// `ChatApp` rather than created here: this component remounts whenever the
+    /// reader switches between a room and a DM thread, and a per-mount
+    /// LiveQuery would also mean a per-mount X-ray bus registration that is
+    /// never released.
+    users: LiveQuery<UserView>,
     read_state: ReadStateManager,
 ) -> impl IntoView {
     let show_debug = RwSignal::new(false);
@@ -29,11 +36,6 @@ pub fn Chat(
 
     let pane = ScrollPane::<MessageView>::new();
     pane.install();
-
-    // Query all users once (for author name lookup in message rows).
-    let users = ctx().query::<UserView>("true").expect("failed to create UserView LiveQuery");
-    // Surface it in the X-ray queries card (app-lifetime; id discarded).
-    let _ = crate::xray::bus::bus().register("users (chat)", &users);
 
     // (Re)point the pane whenever the selected room changes.
     Effect::new(move |_| {
@@ -167,7 +169,7 @@ pub fn Chat(
                             </Show>
 
                             <MessageInput
-                                room=current_room.clone()
+                                target=crate::message_input::ComposerTarget::Room(current_room.clone())
                                 current_user=current_user.get()
                                 editing_message=editing_message
                                 replying_to=replying_to
