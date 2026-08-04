@@ -31,6 +31,15 @@ jobs:
       - name: Test server & model
         run: cargo test -p community-server -p community-model --release --locked
 
+      # The sled-gated tests — the CI webhook's end-to-end route proof, the
+      # worker tests, the model-pin tests, the OR-of-Refs live-scope tests —
+      # compile to nothing under the default (postgres) feature set. Without
+      # this step they were written but never run on a pull request. They need
+      # a second invocation rather than an added feature: sled and postgres are
+      # alternative storage engines, and `main` picks one at compile time.
+      - name: Test server (sled storage)
+        run: cargo test -p community-server --no-default-features --features sled --release --locked
+
       - name: Build SPA (release)
         working-directory: leptos-app
         run: trunk build --release

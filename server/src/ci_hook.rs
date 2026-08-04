@@ -88,10 +88,16 @@ const SECRET_ENV: &str = "CI_HOOK_SECRET";
 /// two, while keeping a captured request useless soon after capture.
 const TIMESTAMP_TOLERANCE_SECS: i64 = 300;
 
-/// Largest body we will even authenticate. A CI report is a few hundred bytes;
-/// this bounds the work an unauthenticated caller can commission, since the
-/// HMAC runs before we know whether the caller is legitimate.
-const MAX_BODY_BYTES: usize = 16 * 1024;
+/// Largest body we will read at all. A CI report is a few hundred bytes.
+///
+/// This bounds two different things, in two places. `main` hangs a
+/// `DefaultBodyLimit` of this size on the route, so an unauthenticated caller
+/// cannot make the server BUFFER more than this — axum's 2 MiB default, times
+/// the service's concurrency, is otherwise attacker-driven memory. The check in
+/// [`deliver`] then bounds the HMAC work, which runs before we know whether the
+/// caller is legitimate; it also keeps that bound where the test suite can
+/// reach it, since the layer lives in the router rather than here.
+pub const MAX_BODY_BYTES: usize = 16 * 1024;
 
 /// Longest `webhook-id` we accept. The id is remembered for replay rejection,
 /// so it must not be an unbounded caller-chosen string.
@@ -270,11 +276,16 @@ async fn deliver(hook: &CiHook, headers: &HeaderMap, body: &[u8], now_secs: i64)
 
     match post_message(hook, &format_message(&report)).await {
         Ok(message_id) => {
+            // The payload fields are authenticated, not trustworthy — the same
+            // reason `format_message` sanitizes them. A workflow named
+            // "\n::error::forged" would otherwise write a second line into the
+            // server's log that reads like a log line of its own, so what lands
+            // here is what landed in the message: sanitized, single-line.
             info!(
                 message = %message_id,
-                repo = %report.repo,
-                workflow = %report.workflow,
-                conclusion = %report.conclusion,
+                repo = %sanitize(&report.repo, 64),
+                workflow = %sanitize(&report.workflow, 64),
+                conclusion = %sanitize(&report.conclusion, 24),
                 "ci report posted to #ci"
             );
             Ok(Accepted::Posted(message_id))
@@ -305,7 +316,13 @@ fn authenticate(secret: &str, headers: &HeaderMap, body: &[u8], now_secs: i64) -
     let sent_at: i64 = timestamp
         .parse()
         .map_err(|_| Rejected::new(StatusCode::UNAUTHORIZED, "webhook-timestamp is not a unix second count"))?;
-    if (now_secs - sent_at).abs() > TIMESTAMP_TOLERANCE_SECS {
+    // `abs_diff` rather than `(now - sent).abs()`: `sent_at` is a caller-chosen
+    // `i64` checked before the signature is, so a timestamp far enough away
+    // overflows the subtraction — which panics in debug and, worse, wraps in
+    // release to a value whose `abs()` is still negative, waving the delivery
+    // through the window it was supposed to fail. The u64 distance cannot
+    // overflow for any pair of `i64`s.
+    if now_secs.abs_diff(sent_at) > TIMESTAMP_TOLERANCE_SECS as u64 {
         return Err(Rejected::new(StatusCode::UNAUTHORIZED, "webhook-timestamp is outside the accepted window"));
     }
 
@@ -501,11 +518,12 @@ impl CiHook {
 
 /// Bounded record of the delivery ids already accepted, oldest evicted first.
 ///
-/// Memory-only and per-process, which is exactly enough: the Cloud Run service
-/// runs a single instance (`--max-instances 1`), and the timestamp window
-/// already bounds how long a replay can be attempted — so the worst a restart
-/// costs is one duplicate line, for a delivery replayed within five minutes of
-/// a boot.
+/// Memory-only and per-process, which is exactly enough — but not because the
+/// service runs one instance. It nominally does (`--max-instances 1`), yet a
+/// Cloud Run rollout serves the old and new revisions at once, so a delivery
+/// can meet a process that never saw its id. What actually bounds the damage is
+/// the timestamp window: a delivery is replayable for five minutes at most, so
+/// the worst a restart or a rollout costs is one duplicate line.
 #[derive(Default)]
 struct SeenDeliveries {
     order: VecDeque<String>,
@@ -535,9 +553,13 @@ impl SeenDeliveries {
 
 /// Sign exactly the way the reporter workflow's `openssl` pipeline does:
 /// HMAC-SHA256 over `"<id>.<timestamp>.<body>"`, base64-encoded. Shared by both
-/// test modules — if this and `.github/workflows/ci-report.yml` ever disagree,
-/// these tests pass while production 401s, so keep them literally the same
-/// construction.
+/// test modules.
+///
+/// The reporter is `.github/workflows/ci-report.yml` in a DIFFERENT repository —
+/// ankurah/ankurah, whose workflow conclusions this channel reports — so nothing
+/// in this repo's CI can catch the two constructions drifting apart. If they
+/// ever disagree, these tests still pass while production 401s. Keep them
+/// literally the same construction.
 #[cfg(test)]
 fn test_signature(secret: &str, id: &str, timestamp: i64, body: &[u8]) -> String {
     let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
@@ -640,6 +662,25 @@ mod tests {
         assert!(authenticate(SECRET, &headers("delivery-1", NOW, &good.replace("v1,", "v2,")), BODY, NOW).is_err());
         assert!(authenticate(SECRET, &headers("delivery-1", NOW, "v1,not base64!!"), BODY, NOW).is_err());
         assert!(authenticate(SECRET, &headers("delivery-1", NOW, ""), BODY, NOW).is_err());
+    }
+
+    #[test]
+    fn a_timestamp_at_the_edges_of_i64_is_refused_rather_than_overflowing() {
+        // The window check runs on a caller-supplied number BEFORE the
+        // signature is verified, so both extremes have to be survivable as well
+        // as refused. `i64::MIN` is the sharp one: computed as a difference it
+        // overflows, and the wrapped result's `abs()` is still negative — which
+        // would read as "inside the window" and skip the freshness check
+        // entirely. Signing these correctly proves the refusal comes from the
+        // window and not from a bad tag.
+        for extreme in [i64::MIN, i64::MAX] {
+            let hdrs = headers("delivery-1", extreme, &test_signature(SECRET, "delivery-1", extreme, BODY));
+            assert_eq!(
+                authenticate(SECRET, &hdrs, BODY, NOW),
+                Err(Rejected::new(StatusCode::UNAUTHORIZED, "webhook-timestamp is outside the accepted window")),
+                "{extreme}"
+            );
+        }
     }
 
     #[test]

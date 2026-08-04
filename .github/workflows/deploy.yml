@@ -12,16 +12,28 @@ name: Deploy
 # Optional repo variable:
 #   CI_HOOK_SECRET_NAME — the Secret Manager secret holding the shared HMAC key
 #   for POST /hooks/ci (#66). Left unset, this deploy simply does not mount it
-#   and the endpoint answers 503; nothing else changes. To turn the channel on:
-#     openssl rand -hex 32 | tr -d '\n' | gcloud secrets create community-ci-hook-secret \
+#   and the endpoint answers 503; nothing else changes.
+#
+#   Turning the channel on means putting ONE value in two places: Secret Manager
+#   here, and the COMMUNITY_CI_HOOK_SECRET Actions secret on ankurah/ankurah,
+#   whose reporter workflow signs each delivery with it. Both sides must hold
+#   the same bytes or every delivery 401s — so generate it once, into a shell
+#   variable, and set both from that variable before discarding it:
+#     secret=$(openssl rand -hex 32)
+#     printf '%s' "${secret}" | gcloud secrets create community-ci-hook-secret \
 #       --project ankurah-community --data-file=-
+#     printf '%s' "${secret}" | gh secret set COMMUNITY_CI_HOOK_SECRET --repo ankurah/ankurah
+#     unset secret
+#   Then let the runtime service account read it, and point this deploy at it:
 #     gcloud secrets add-iam-policy-binding community-ci-hook-secret \
 #       --project ankurah-community \
 #       --member serviceAccount:community-runtime@ankurah-community.iam.gserviceaccount.com \
 #       --role roles/secretmanager.secretAccessor
 #     gh variable set CI_HOOK_SECRET_NAME --repo ankurah/community --body community-ci-hook-secret
-#   The SAME value must be set as the COMMUNITY_CI_HOOK_SECRET Actions secret on
-#   ankurah/ankurah, whose reporter workflow signs deliveries with it.
+#   The accessor grant is not optional: without it the revision fails to start
+#   rather than falling back to the closed endpoint. Skipping the `gh secret
+#   set` fails quietly instead — the reporter finds no secret, logs a warning,
+#   and every run silently reports nothing.
 # Secret Manager secrets the runtime SA must be able to access:
 #   community-database-url, community-jwt-signing-key (RS256 key that mints
 #   the ankurah session tokens issued by /auth/session), and — once configured —
@@ -110,7 +122,12 @@ jobs:
           fi
 
           # Durable node: a single instance keeps in-memory state coherent
-          # (--max-instances 1); it still scales to zero when idle.
+          # (--max-instances 1), and one instance is always warm
+          # (--min-instances 1). The floor is what keeps the first visitor after
+          # an idle stretch from paying for the whole boot — loading the sled/
+          # postgres node, seeding rooms, starting the workers — which is a
+          # multi-second wait landing on exactly the arrival that matters most.
+          # It costs an always-on instance's CPU/memory allocation.
           args=(
             run deploy "${CLOUD_RUN_SERVICE}"
             --project "${GCP_PROJECT_ID}"
@@ -121,7 +138,7 @@ jobs:
             --cpu 1
             --memory 512Mi
             --concurrency 40
-            --min-instances 0
+            --min-instances 1
             --max-instances 1
             --timeout 900
             --no-invoker-iam-check

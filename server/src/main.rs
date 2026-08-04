@@ -4,7 +4,7 @@ use ankurah_websocket_server::WebsocketServer;
 use anyhow::{Context as _, Result};
 use axum::{
     body::Body,
-    extract::State,
+    extract::{DefaultBodyLimit, State},
     http::{Request, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -146,7 +146,13 @@ async fn main() -> Result<()> {
         .route("/auth/session", post(auth_session))
         // CI status webhook (#66). Not an auth route: it authenticates itself
         // with an HMAC over the raw body, never an IdP token. See ci_hook.rs.
-        .route("/hooks/ci", post(ci_hook::handle))
+        //
+        // The body limit is what keeps an unauthenticated caller from making us
+        // buffer: the handler takes `Bytes`, so the request is fully
+        // materialized before the handler can check anything — at axum's 2 MiB
+        // default, times this service's concurrency of 40. Refusing at the
+        // layer means the bytes are never collected in the first place.
+        .route("/hooks/ci", post(ci_hook::handle).layer(DefaultBodyLimit::max(ci_hook::MAX_BODY_BYTES)))
         .fallback(spa_fallback)
         .with_state(state)
         // Permissive CORS so cross-origin callers (e.g. a native/RN client on a
