@@ -72,6 +72,18 @@
 //! (`user = $jwt.sub`), so "who started this conversation" derived from the
 //! oldest message is the one attribution a client cannot lie about.
 //!
+//! AND WHY THE PAIR IS READ FROM THE THREAD ROW RATHER THAN FROM THE MESSAGE.
+//! The `a`/`b` on a `dm_message` are denormalized copies that exist for one
+//! reason: the read scope has to answer "may this user see this row" from the
+//! row alone. They are client-written LWW fields, and the write scope checks
+//! them only against the writer — so a sender can put any pair they like on
+//! any row and file it under any thread id. Nothing here reads them. The
+//! conversation a message belongs to is its `thread`, and who that
+//! conversation belongs to is read from the thread row (and remembered), so a
+//! stranger's row injected into someone else's thread is ignored instead of
+//! rewriting that thread's facts — one such row would otherwise make a
+//! monologue look answered and switch the unanswered limit off.
+//!
 //! TIMESTAMPS ARE CLIENT-SUPPLIED, AND THE WINDOW LIVES WITH THAT. A sender
 //! could future-date messages to jump the timeline or back-date them to slip
 //! out of the window. Future-dating is the attractive attack (a message dated
@@ -89,10 +101,10 @@ use std::sync::Arc;
 
 use ankurah::{Context, EntityId};
 use anyhow::{Context as _, Result};
-use community_model::{DmMessageView, ModAction};
+use community_model::{DmMessageView, DmThreadView, ModAction};
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::Mutex;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use super::now_ms;
 
@@ -187,9 +199,30 @@ pub struct Limiter {
 impl Limiter {
     /// Record one message and decide what to do about it.
     ///
+    /// `participants` are the two people named by the THREAD row, and they are
+    /// a parameter rather than something read off the message on purpose: a
+    /// `DmMessage` carries its own `a`/`b` copies, they are client-written, and
+    /// the write scope only checks them against the writer — so a sender can
+    /// put any pair they like on a row they file into any thread. A message
+    /// from someone the thread does not name is ignored outright rather than
+    /// counted, because letting it in would let a stranger (or a second
+    /// account) rewrite a conversation's facts: one injected row makes a
+    /// monologue look answered, which switches the unanswered limit off.
+    ///
     /// `now` is the server clock, used both to clamp a client-supplied
     /// timestamp and as the right edge of the window.
-    pub fn observe(&mut self, message: EntityId, thread: EntityId, sender: EntityId, client_ts: i64, now: i64) -> Verdict {
+    pub fn observe(
+        &mut self,
+        message: EntityId,
+        thread: EntityId,
+        participants: (EntityId, EntityId),
+        sender: EntityId,
+        client_ts: i64,
+        now: i64,
+    ) -> Verdict {
+        if sender != participants.0 && sender != participants.1 {
+            return Verdict::Allow;
+        }
         let ts = client_ts.min(now);
 
         let facts = self.threads.entry(thread).or_default();
@@ -280,6 +313,11 @@ pub struct State {
     /// history in entity-id order, so a verdict mid-history is a verdict on a
     /// thread the worker has only half read.
     enforcing: bool,
+    /// thread -> the pair the THREAD row names, read once from storage. The
+    /// limiter is told who a conversation belongs to rather than believing the
+    /// message's own copy of it (see [`Limiter::observe`]), and this is what
+    /// keeps that from costing a query per message during the boot sweep.
+    thread_pairs: HashMap<EntityId, (EntityId, EntityId)>,
 }
 
 /// What the limiter's channel carries.
@@ -333,7 +371,15 @@ async fn process(ctx: &Context, state: &mut State, msg: &DmMessageView) -> Resul
     let client_ts = msg.timestamp().context("read DM timestamp")?;
     let now = now_ms();
 
-    let verdict = state.limiter.observe(msg.id(), thread, sender, client_ts, now);
+    // Who this conversation belongs to comes from the thread row it is filed
+    // under. A message whose thread cannot be resolved is filed into a view
+    // nobody can open — no thread row means no sidebar entry and no
+    // notification — so there is no traffic here to limit.
+    let Some(participants) = thread_participants(ctx, state, thread).await else {
+        return Ok(());
+    };
+
+    let verdict = state.limiter.observe(msg.id(), thread, participants, sender, client_ts, now);
     if !state.enforcing {
         // Boot backlog: the row counted, and that is the whole job. Judging a
         // thread the sweep has only half delivered is what this defers.
@@ -380,6 +426,33 @@ async fn process(ctx: &Context, state: &mut State, msg: &DmMessageView) -> Resul
             Ok(())
         }
     }
+}
+
+/// The pair named by a thread row, read once per thread and remembered.
+///
+/// `None` means the row is not there or does not carry both participants —
+/// which is not an error worth retrying: a message can name any thread id its
+/// sender likes, including one no row was ever created for, and such a message
+/// is invisible to everyone (no thread row, no sidebar entry, and `dm_notify`
+/// tells nobody about it).
+async fn thread_participants(ctx: &Context, state: &mut State, thread: EntityId) -> Option<(EntityId, EntityId)> {
+    if let Some(pair) = state.thread_pairs.get(&thread) {
+        return Some(*pair);
+    }
+    let view = match ctx.get::<DmThreadView>(thread).await {
+        Ok(view) => view,
+        Err(e) => {
+            debug!(thread = %thread, "DM rate limit: no thread row for this message, so nothing to count: {e:#}");
+            return None;
+        }
+    };
+    let (Ok(a), Ok(b)) = (view.a(), view.b()) else {
+        debug!(thread = %thread, "DM rate limit: thread row names no participants, so nothing to count");
+        return None;
+    };
+    let pair = (a.id(), b.id());
+    state.thread_pairs.insert(thread, pair);
+    Some(pair)
 }
 
 /// Write this sender's one public row for the window, unless they already have
@@ -445,6 +518,13 @@ mod tests {
 
     fn ids(n: usize) -> Vec<EntityId> { (0..n).map(|_| EntityId::new()).collect() }
 
+    /// The pair a thread names, for the many tests where the only participants
+    /// that matter are the sender and whoever they are talking to. Written out
+    /// rather than defaulted, because "who does this thread belong to" is an
+    /// input the limiter is given (see [`Limiter::observe`]) and a test that
+    /// hid it would hide the check that reads it.
+    fn pair(sender: EntityId, correspondent: EntityId) -> (EntityId, EntityId) { (sender, correspondent) }
+
     /// A sender opening conversations one after another is allowed up to the
     /// limit and tombstoned past it — and the count is of DISTINCT threads, so
     /// re-observing the same message (the boot sweep after a live delivery)
@@ -456,16 +536,18 @@ mod tests {
         let now = 1_000_000_000;
         let threads = ids(MAX_INITIATIONS_PER_WINDOW + 1);
         let messages = ids(MAX_INITIATIONS_PER_WINDOW + 1);
+        let strangers = ids(MAX_INITIATIONS_PER_WINDOW + 1);
 
         for i in 0..MAX_INITIATIONS_PER_WINDOW {
-            assert_eq!(limiter.observe(messages[i], threads[i], sender, now, now), Verdict::Allow, "conversation {i} is within the limit");
+            let with = pair(sender, strangers[i]);
+            assert_eq!(limiter.observe(messages[i], threads[i], with, sender, now, now), Verdict::Allow, "conversation {i} is within the limit");
             // The same message seen twice must not count twice.
-            assert_eq!(limiter.observe(messages[i], threads[i], sender, now, now), Verdict::Allow, "re-observing message {i} must be inert");
+            assert_eq!(limiter.observe(messages[i], threads[i], with, sender, now, now), Verdict::Allow, "re-observing message {i} must be inert");
         }
 
         let last = MAX_INITIATIONS_PER_WINDOW;
         assert_eq!(
-            limiter.observe(messages[last], threads[last], sender, now, now),
+            limiter.observe(messages[last], threads[last], pair(sender, strangers[last]), sender, now, now),
             Verdict::TooManyInitiations { initiations: MAX_INITIATIONS_PER_WINDOW + 1 },
             "the message opening the conversation past the limit is tombstoned"
         );
@@ -495,15 +577,16 @@ mod tests {
         // A month of real two-way conversation: the sender opened each thread
         // on a different day, and each correspondent answered.
         for (i, thread) in threads.iter().enumerate() {
+            let with = pair(sender, correspondents[i]);
             let opened = now - (30 - i as i64) * DAY_MS;
             assert_eq!(
-                limiter.observe(EntityId::new(), *thread, sender, opened, opened),
+                limiter.observe(EntityId::new(), *thread, with, sender, opened, opened),
                 Verdict::Allow,
                 "opening conversation {i}, weeks apart, is within the limit"
             );
             let answered = opened + 60_000;
             assert_eq!(
-                limiter.observe(EntityId::new(), *thread, correspondents[i], answered, answered),
+                limiter.observe(EntityId::new(), *thread, with, correspondents[i], answered, answered),
                 Verdict::Allow,
                 "correspondent {i} answering"
             );
@@ -513,7 +596,7 @@ mod tests {
         for (i, thread) in threads.iter().enumerate() {
             let ts = now + i as i64 * 10 * 60_000;
             assert_eq!(
-                limiter.observe(EntityId::new(), *thread, sender, ts, ts),
+                limiter.observe(EntityId::new(), *thread, pair(sender, correspondents[i]), sender, ts, ts),
                 Verdict::Allow,
                 "reply {i} into a conversation started a month ago must not count as starting one"
             );
@@ -531,9 +614,14 @@ mod tests {
         let sender = EntityId::new();
         let start = 1_700_000_000_000;
         let threads = ids(MAX_INITIATIONS_PER_WINDOW + 2);
+        let strangers = ids(MAX_INITIATIONS_PER_WINDOW + 2);
 
         for (i, thread) in threads.iter().take(MAX_INITIATIONS_PER_WINDOW).enumerate() {
-            assert_eq!(limiter.observe(EntityId::new(), *thread, sender, start, start), Verdict::Allow, "opening conversation {i}");
+            assert_eq!(
+                limiter.observe(EntityId::new(), *thread, pair(sender, strangers[i]), sender, start, start),
+                Verdict::Allow,
+                "opening conversation {i}"
+            );
         }
 
         // Half an hour of chatter into those same threads. None of it re-dates
@@ -541,20 +629,26 @@ mod tests {
         let half = start + WINDOW_MS / 2;
         for (i, thread) in threads.iter().take(MAX_INITIATIONS_PER_WINDOW).enumerate() {
             let ts = half + i as i64;
-            assert_eq!(limiter.observe(EntityId::new(), *thread, sender, ts, ts), Verdict::Allow, "chatter in conversation {i}");
+            assert_eq!(
+                limiter.observe(EntityId::new(), *thread, pair(sender, strangers[i]), sender, ts, ts),
+                Verdict::Allow,
+                "chatter in conversation {i}"
+            );
         }
 
         // A sixth conversation, with the first five still inside the window.
+        let sixth = MAX_INITIATIONS_PER_WINDOW;
         assert_eq!(
-            limiter.observe(EntityId::new(), threads[MAX_INITIATIONS_PER_WINDOW], sender, half + 1000, half + 1000),
+            limiter.observe(EntityId::new(), threads[sixth], pair(sender, strangers[sixth]), sender, half + 1000, half + 1000),
             Verdict::TooManyInitiations { initiations: MAX_INITIATIONS_PER_WINDOW + 1 },
             "the five openings are still inside the window, so the sixth is over the limit"
         );
 
         // Once the window has moved past those five, opening one is fine again.
         let later = start + WINDOW_MS + 60_000;
+        let seventh = MAX_INITIATIONS_PER_WINDOW + 1;
         assert_eq!(
-            limiter.observe(EntityId::new(), threads[MAX_INITIATIONS_PER_WINDOW + 1], sender, later, later),
+            limiter.observe(EntityId::new(), threads[seventh], pair(sender, strangers[seventh]), sender, later, later),
             Verdict::Allow,
             "an aged-out window frees the sender"
         );
@@ -570,11 +664,16 @@ mod tests {
         let sender = EntityId::new();
         let now = 1_700_000_000_000;
         let allowed = ids(MAX_INITIATIONS_PER_WINDOW);
+        let strangers = ids(MAX_INITIATIONS_PER_WINDOW);
 
         // Five conversations, one message each: the whole initiation budget,
         // and five of the unanswered budget.
         for (i, thread) in allowed.iter().enumerate() {
-            assert_eq!(limiter.observe(EntityId::new(), *thread, sender, now, now), Verdict::Allow, "opening conversation {i}");
+            assert_eq!(
+                limiter.observe(EntityId::new(), *thread, pair(sender, strangers[i]), sender, now, now),
+                Verdict::Allow,
+                "opening conversation {i}"
+            );
         }
 
         // Ten further attempts, each tombstoned on arrival and forgotten
@@ -583,7 +682,10 @@ mod tests {
             let (message, thread) = (EntityId::new(), EntityId::new());
             let ts = now + i;
             assert!(
-                matches!(limiter.observe(message, thread, sender, ts, ts), Verdict::TooManyInitiations { .. }),
+                matches!(
+                    limiter.observe(message, thread, pair(sender, EntityId::new()), sender, ts, ts),
+                    Verdict::TooManyInitiations { .. }
+                ),
                 "attempt {i} past the initiation limit"
             );
             limiter.forget_initiation(message, thread, sender);
@@ -594,17 +696,55 @@ mod tests {
         // available in the conversations the sender kept.
         for i in MAX_INITIATIONS_PER_WINDOW..MAX_UNANSWERED_PER_WINDOW {
             let ts = now + 1000 + i as i64;
+            let which = i % allowed.len();
             assert_eq!(
-                limiter.observe(EntityId::new(), allowed[i % allowed.len()], sender, ts, ts),
+                limiter.observe(EntityId::new(), allowed[which], pair(sender, strangers[which]), sender, ts, ts),
                 Verdict::Allow,
                 "unanswered message {i} is inside the budget"
             );
         }
         let ts = now + 2000;
         assert_eq!(
-            limiter.observe(EntityId::new(), allowed[0], sender, ts, ts),
+            limiter.observe(EntityId::new(), allowed[0], pair(sender, strangers[0]), sender, ts, ts),
             Verdict::TooManyUnanswered { unanswered: MAX_UNANSWERED_PER_WINDOW + 1 },
             "the budget runs out at the limit, not ten tombstoned messages early"
+        );
+    }
+
+    /// A row from someone the THREAD does not name never joins that thread's
+    /// facts. The `a`/`b` on a message are the sender's own claim, so anyone
+    /// can file a row into anyone's conversation; if the limiter believed such
+    /// a row, one injected message (from an accomplice or a second account)
+    /// would make a monologue look answered and switch the unanswered limit
+    /// off for the thread it was aimed at.
+    #[test]
+    fn a_row_from_someone_the_thread_does_not_name_never_joins_its_facts() {
+        let mut limiter = Limiter::default();
+        let (bob, carol, alice) = (EntityId::new(), EntityId::new(), EntityId::new());
+        let thread = EntityId::new();
+        let theirs = pair(bob, carol);
+        let now = 1_700_000_000_000;
+
+        // Bob monologues at Carol, right up to the cap.
+        for i in 0..MAX_UNANSWERED_PER_WINDOW {
+            let ts = now + i as i64;
+            assert_eq!(limiter.observe(EntityId::new(), thread, theirs, bob, ts, ts), Verdict::Allow, "monologue {i}");
+        }
+
+        // Alice, who is in neither seat, files a row into their thread.
+        let injected = now + MAX_UNANSWERED_PER_WINDOW as i64;
+        assert_eq!(
+            limiter.observe(EntityId::new(), thread, theirs, alice, injected, injected),
+            Verdict::Allow,
+            "a stranger's row is not traffic in this conversation; it is ignored"
+        );
+
+        // Carol still has not answered, so Bob's next message is still a
+        // monologue and still over the cap.
+        assert_eq!(
+            limiter.observe(EntityId::new(), thread, theirs, bob, injected + 1, injected + 1),
+            Verdict::TooManyUnanswered { unanswered: MAX_UNANSWERED_PER_WINDOW + 1 },
+            "an injected row must not count as the correspondent answering"
         );
     }
 
@@ -617,14 +757,19 @@ mod tests {
         let start = 1_000_000_000;
         let threads = ids(MAX_INITIATIONS_PER_WINDOW + 1);
         let messages = ids(MAX_INITIATIONS_PER_WINDOW + 1);
+        let strangers = ids(MAX_INITIATIONS_PER_WINDOW + 1);
 
         for i in 0..MAX_INITIATIONS_PER_WINDOW {
-            assert_eq!(limiter.observe(messages[i], threads[i], sender, start, start), Verdict::Allow);
+            assert_eq!(limiter.observe(messages[i], threads[i], pair(sender, strangers[i]), sender, start, start), Verdict::Allow);
         }
         // One window and a minute later, every earlier initiation has aged out.
         let later = start + WINDOW_MS + 60_000;
         let last = MAX_INITIATIONS_PER_WINDOW;
-        assert_eq!(limiter.observe(messages[last], threads[last], sender, later, later), Verdict::Allow, "an aged-out window frees the sender");
+        assert_eq!(
+            limiter.observe(messages[last], threads[last], pair(sender, strangers[last]), sender, later, later),
+            Verdict::Allow,
+            "an aged-out window frees the sender"
+        );
     }
 
     /// Replying is what distinguishes a conversation from a broadcast: once the
@@ -638,14 +783,16 @@ mod tests {
         let thread = EntityId::new();
         let now = 1_000_000_000;
 
+        let with = pair(sender, partner);
+
         // Sender opens it, partner answers.
-        assert_eq!(limiter.observe(EntityId::new(), thread, sender, now, now), Verdict::Allow);
-        assert_eq!(limiter.observe(EntityId::new(), thread, partner, now + 1, now + 1), Verdict::Allow);
+        assert_eq!(limiter.observe(EntityId::new(), thread, with, sender, now, now), Verdict::Allow);
+        assert_eq!(limiter.observe(EntityId::new(), thread, with, partner, now + 1, now + 1), Verdict::Allow);
 
         // Now the sender can talk as much as they like in THIS thread.
         for i in 0..(MAX_UNANSWERED_PER_WINDOW * 3) {
             let ts = now + 2 + i as i64;
-            assert_eq!(limiter.observe(EntityId::new(), thread, sender, ts, ts), Verdict::Allow, "message {i} into an answered thread");
+            assert_eq!(limiter.observe(EntityId::new(), thread, with, sender, ts, ts), Verdict::Allow, "message {i} into an answered thread");
         }
     }
 
@@ -660,14 +807,15 @@ mod tests {
         let sender = EntityId::new();
         let now = 1_000_000_000;
         let threads = ids(3);
+        let strangers = ids(3);
 
         let mut sent = 0usize;
         let mut tombstoned = None;
         // Round-robin across the three threads until the cap bites.
         for i in 0..(MAX_UNANSWERED_PER_WINDOW * 2) {
-            let thread = threads[i % threads.len()];
+            let which = i % threads.len();
             let ts = now + i as i64;
-            match limiter.observe(EntityId::new(), thread, sender, ts, ts) {
+            match limiter.observe(EntityId::new(), threads[which], pair(sender, strangers[which]), sender, ts, ts) {
                 Verdict::Allow => sent += 1,
                 Verdict::TooManyUnanswered { unanswered } => {
                     tombstoned = Some((i, unanswered));
@@ -697,20 +845,22 @@ mod tests {
         let thread = EntityId::new();
         let now = 1_000_000_000;
 
+        let with = pair(sender, partner);
+
         // The sender opens it and monologues right up to the cap.
         for i in 0..MAX_UNANSWERED_PER_WINDOW {
             let ts = now + i as i64;
-            assert_eq!(limiter.observe(EntityId::new(), thread, sender, ts, ts), Verdict::Allow);
+            assert_eq!(limiter.observe(EntityId::new(), thread, with, sender, ts, ts), Verdict::Allow);
         }
         // The partner answers. From here the thread is a conversation.
         let reply_ts = now + MAX_UNANSWERED_PER_WINDOW as i64;
-        assert_eq!(limiter.observe(EntityId::new(), thread, partner, reply_ts, reply_ts), Verdict::Allow);
+        assert_eq!(limiter.observe(EntityId::new(), thread, with, partner, reply_ts, reply_ts), Verdict::Allow);
 
         // The sender can now keep talking without limit in this thread.
         for i in 0..(MAX_UNANSWERED_PER_WINDOW * 2) {
             let ts = reply_ts + 1 + i as i64;
             assert_eq!(
-                limiter.observe(EntityId::new(), thread, sender, ts, ts),
+                limiter.observe(EntityId::new(), thread, with, sender, ts, ts),
                 Verdict::Allow,
                 "message {i} after a reply must not be limited"
             );
@@ -727,12 +877,18 @@ mod tests {
         let far_future = now + 10 * WINDOW_MS;
 
         let threads = ids(MAX_INITIATIONS_PER_WINDOW + 1);
+        let strangers = ids(MAX_INITIATIONS_PER_WINDOW + 1);
         for (i, thread) in threads.iter().enumerate().take(MAX_INITIATIONS_PER_WINDOW) {
-            assert_eq!(limiter.observe(EntityId::new(), *thread, sender, far_future, now), Verdict::Allow, "conversation {i}");
+            assert_eq!(
+                limiter.observe(EntityId::new(), *thread, pair(sender, strangers[i]), sender, far_future, now),
+                Verdict::Allow,
+                "conversation {i}"
+            );
         }
+        let last = MAX_INITIATIONS_PER_WINDOW;
         assert!(
             matches!(
-                limiter.observe(EntityId::new(), threads[MAX_INITIATIONS_PER_WINDOW], sender, far_future, now),
+                limiter.observe(EntityId::new(), threads[last], pair(sender, strangers[last]), sender, far_future, now),
                 Verdict::TooManyInitiations { .. }
             ),
             "future-dating every message must not spread them across windows"
@@ -768,10 +924,10 @@ mod tests {
         let now = 1_000_000_000;
 
         for _ in 0..(MAX_INITIATIONS_PER_WINDOW + 2) {
-            let _ = limiter.observe(EntityId::new(), EntityId::new(), noisy, now, now);
+            let _ = limiter.observe(EntityId::new(), EntityId::new(), pair(noisy, EntityId::new()), noisy, now, now);
         }
         assert_eq!(
-            limiter.observe(EntityId::new(), EntityId::new(), quiet, now, now),
+            limiter.observe(EntityId::new(), EntityId::new(), pair(quiet, EntityId::new()), quiet, now, now),
             Verdict::Allow,
             "one sender's burst must not spend another's budget"
         );

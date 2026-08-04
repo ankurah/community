@@ -386,10 +386,22 @@ pub fn dm_partner(a: EntityId, b: EntityId, viewer: EntityId) -> Option<EntityId
 /// pair, and post into that one; the twin is inert.
 #[derive(Model, Debug, Serialize, Deserialize)]
 pub struct DmThread {
-    /// The lower-ordered participant. Set at creation, never edited.
+    /// The lower-ordered participant. This pair IS the conversation's identity
+    /// — every consumer that needs to know who a DM is between reads it from
+    /// here rather than from the message's copies (see the `DmMessage` type
+    /// doc) — so what it says has to stay true.
+    ///
+    /// No code path edits it after creation. Nothing enforces that: the write
+    /// scope only asks whether the writer is one of `a`/`b`, so a participant's
+    /// client could in principle rewrite the OTHER seat and hand the
+    /// conversation, and its history, to a third person. Closing that needs a
+    /// write gate the policy grammar cannot express today (a field pinned
+    /// immutable after creation); it is recorded here rather than papered over,
+    /// and it is a reason to be suspicious of any future client code that
+    /// edits a thread row at all.
     #[active_type(LWW)]
     pub a: Ref<User>,
-    /// The higher-ordered participant. Set at creation, never edited.
+    /// The higher-ordered participant, on the same terms.
     #[active_type(LWW)]
     pub b: Ref<User>,
     /// ms since epoch (same unit as `Message.timestamp`).
@@ -420,23 +432,37 @@ pub struct DmThread {
 /// without a join the scope grammar cannot express. They are NOT the filing
 /// key — every render path queries `thread = ?`, never `a`/`b`.
 ///
-/// That split is the mitigation for the one integrity nuance this design
-/// carries: a participant can hand-craft a message whose `a`/`b` name a pair
-/// they are in while `thread` points at a different thread of theirs. The write
-/// scope still forces them to be one of `a`/`b` and to be the `user`, so they
-/// can never write into a conversation they are not in, and they can never read
-/// anyone else's data. The worst case is that they mis-file their OWN message
-/// somewhere no render path looks at it.
+/// That split is what contains the one integrity nuance this design carries.
+/// `a`/`b` are client-written LWW fields and the write scope checks them only
+/// against the writer, so a member can hand-craft a row naming themselves and
+/// ANY stranger, filed under any thread id they like — including a
+/// conversation between two other people. The scope still stops them reading
+/// anyone else's data (both scopes read the same two fields, so a forged row
+/// is visible to exactly the people it names) and still pins `user` to them.
+///
+/// What stops the forgery being worth anything is an invariant every consumer
+/// must keep: **`a`/`b` are a read-scope device, never a statement of who is
+/// talking to whom.** Who a message is between is read from the row it is
+/// filed under — `thread` — by the render paths, by the DM fan-out
+/// (server/src/workers/dm_notify.rs) and by the rate limiter
+/// (server/src/workers/dm_rate_limit.rs) alike. A consumer that skips the
+/// thread lookup and believes these two fields hands every member an unlimited
+/// notification channel to strangers, each notification deep-linking to a
+/// conversation the stranger cannot open. That is not hypothetical: it is what
+/// `forged_participants_on_a_dm_notify_the_thread_not_the_forgery` exists to
+/// keep from coming back.
 #[derive(Model, Debug, Serialize, Deserialize)]
 pub struct DmMessage {
     /// The thread this message belongs to — the only field render paths filter
     /// on. Set at creation, never edited.
     #[active_type(LWW)]
     pub thread: Ref<DmThread>,
-    /// Participant copied from the thread at send (see the type doc).
+    /// Participant copied from the thread at send, for the read scope's use
+    /// only — never read as the truth about who this message is between (see
+    /// the type doc).
     #[active_type(LWW)]
     pub a: Ref<User>,
-    /// Participant copied from the thread at send (see the type doc).
+    /// The other one, on the same terms.
     #[active_type(LWW)]
     pub b: Ref<User>,
     /// The sender. The `dm_message` write scope pins this to the caller

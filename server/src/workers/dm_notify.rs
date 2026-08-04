@@ -20,9 +20,11 @@
 //! `a_dm_mentioning_a_third_party_notifies_only_the_recipient` pins the result.
 //!
 //! Invariants (the mention worker's, restated for this kind):
-//! - Idempotent: at most one `kind="dm"` notification per (recipient, message),
-//!   enforced by an existence probe before each create — safe under the boot
-//!   backlog sweep, edit-driven re-deliveries, and crash/restart replays.
+//! - Idempotent: at most one unread `kind="dm"` row per (recipient, sender) at
+//!   a time, and never a second row for a message already delivered — enforced
+//!   by an existence probe before each create, which is what makes the boot
+//!   backlog sweep, edit-driven re-deliveries and restart replays safe. See
+//!   [`dm_notification_exists`] for why both halves of that are needed.
 //! - Resilient: a failure on one message is logged and never kills the loop.
 //! - Pref-aware: the recipient's `NotificationPref` is consulted through the
 //!   same [`super::mentions::pref_allows`] policy, so `mentions_only` suppresses
@@ -34,7 +36,7 @@ use std::collections::HashSet;
 use ankurah::ankql::{ast::Expr, parser::parse_selection};
 use ankurah::{Context, EntityId};
 use anyhow::{Context as _, Result};
-use community_model::{dm_partner, DmMessageView, Notification, NotificationView};
+use community_model::{dm_partner, DmMessageView, DmThreadView, Notification, NotificationView};
 use tokio::sync::mpsc::UnboundedReceiver;
 use tracing::{debug, info, warn};
 
@@ -52,9 +54,10 @@ pub async fn run(ctx: Context, rx: &mut UnboundedReceiver<DmMessageView>) {
     info!("DM notification worker started (dm_message rows -> kind=\"dm\" notification rows)");
     // (recipient, message) pairs already delivered, so edit-driven Updates
     // don't re-run storage queries. Purely an optimization: a miss falls back
-    // to the existence probe. Unlike the mention worker's cache this is keyed
-    // on the pair rather than a token signature, because a DM's recipient
-    // cannot change — the participants are immutable.
+    // to the existence probe. Keyed on the pair rather than on a token
+    // signature (the mention worker's shape) because there are no tokens here
+    // to sign — a DM's recipient is whoever its thread names, and this cache
+    // only has to recognize a message it already handled for that person.
     let mut delivered: HashSet<(EntityId, EntityId)> = HashSet::new();
     while let Some(msg) = rx.recv().await {
         let message_id = msg.id();
@@ -72,13 +75,30 @@ const MAX_CACHE_ENTRIES: usize = 8192;
 
 async fn process_dm(ctx: &Context, msg: &DmMessageView, delivered: &mut HashSet<(EntityId, EntityId)>) -> Result<()> {
     let sender = msg.user().context("read DM sender")?.id();
-    let a = msg.a().context("read DM participant a")?.id();
-    let b = msg.b().context("read DM participant b")?.id();
+    let thread_id = msg.thread().context("read DM thread")?.id();
 
-    // The recipient is the OTHER participant — resolved from the row's own
-    // pair, never from the text. `None` means the sender is not one of the two
-    // (impossible through the write scope) or the thread is degenerate
-    // (self-DM): either way there is nobody else to tell.
+    // THE RECIPIENT COMES FROM THE THREAD ROW, NEVER FROM THE MESSAGE'S OWN
+    // `a`/`b`. Those two fields are denormalized copies that exist so the read
+    // scope can decide row-locally who may see a message; they are
+    // client-written, and the write scope only checks them against the writer.
+    // A sender can therefore put ANY pair on a row and file it under any
+    // thread. Believing them here would hand every member an unlimited
+    // notification channel to strangers: write one message into your own
+    // long-answered thread, name a stranger in `a`/`b`, and this worker taps
+    // them on the shoulder about a conversation they cannot open — then edit
+    // the same row for the next stranger, forever, with the rate limiter
+    // seeing one quiet old thread the whole time.
+    //
+    // Read from the thread and the forgery buys nothing: the row is visible
+    // only to whoever the forger named, and nobody is told about it.
+    let Some((a, b)) = thread_participants(ctx, thread_id).await else {
+        debug!(message = %msg.id(), thread = %thread_id, "DM names no thread we can resolve; nobody to notify");
+        return Ok(());
+    };
+
+    // The recipient is the OTHER participant. `None` means the sender is not
+    // in this thread at all (a row filed into someone else's conversation) or
+    // the thread is degenerate (self-DM): either way there is nobody to tell.
     let Some(recipient) = dm_partner(a, b, sender) else {
         debug!(message = %msg.id(), "DM has no other participant to notify");
         return Ok(());
@@ -107,7 +127,11 @@ async fn process_dm(ctx: &Context, msg: &DmMessageView, delivered: &mut HashSet<
         debug!(message = %msg.id(), "DM notification suppressed by recipient's notification prefs");
         return Ok(());
     }
-    if dm_notification_exists(ctx, recipient, sender).await? {
+    // Clamped like the rate limiter clamps: a client that dates its message in
+    // the year 2100 must not be able to make every probe below miss and mint a
+    // row per message.
+    let sent_at = msg.timestamp().context("read DM timestamp")?.min(now_ms());
+    if dm_notification_exists(ctx, recipient, sender, sent_at).await? {
         remember(delivered, recipient, msg.id());
         return Ok(());
     }
@@ -146,29 +170,62 @@ fn remember(cache: &mut HashSet<(EntityId, EntityId)>, recipient: EntityId, mess
     cache.insert((recipient, message));
 }
 
-/// Idempotency probe: does this recipient already have an UNSEEN DM
-/// notification from this sender? `Notification` has no typed slot for a DM
-/// message id (see the create above), so the probe cannot key on the message —
-/// it keys on the (recipient, actor) pair, filtered to unseen rows.
+/// The pair a thread row names — the only trustworthy answer to "who is this
+/// conversation between", per the rule at the top of `process_dm`. `None`
+/// means no such row, or a row without both participants: a message can name
+/// any thread id its sender likes, and one nobody created is one nobody can
+/// open, so there is no one to notify.
+async fn thread_participants(ctx: &Context, thread: EntityId) -> Option<(EntityId, EntityId)> {
+    let view = match ctx.get::<DmThreadView>(thread).await {
+        Ok(view) => view,
+        Err(e) => {
+            debug!(thread = %thread, "DM fan-out: no thread row to resolve participants from: {e:#}");
+            return None;
+        }
+    };
+    let (Ok(a), Ok(b)) = (view.a(), view.b()) else {
+        debug!(thread = %thread, "DM fan-out: thread row names no participants");
+        return None;
+    };
+    Some((a.id(), b.id()))
+}
+
+/// Idempotency probe: has this DM already been accounted for in the
+/// recipient's inbox? `Notification` has no typed slot for a DM message id
+/// (see the create above), so the probe cannot key on the message; it keys on
+/// the (recipient, actor) pair and answers yes on either of two grounds.
 ///
-/// The consequence, stated plainly: a recipient gets ONE unseen "X sent you a
-/// message" row per correspondent, not one per message. A second DM from the
-/// same person while the first is still unread adds no second row; once the
-/// recipient marks it seen, the next DM mints a fresh one. That is what a DM
-/// inbox wants — per-message rows would turn one conversation into inbox spam
-/// — but it IS a semantic difference from mentions, where every message that
-/// names you earns its own row. It is also what keeps the boot sweep cheap: a
-/// thread with 500 backlogged messages produces at most one row per restart.
+/// **An unseen row exists** — the coalescing rule. A recipient gets ONE unseen
+/// "X sent you a message" row per correspondent, not one per message: a second
+/// DM while the first is unread adds nothing, and once they mark it seen the
+/// next DM mints a fresh one. That is what a DM inbox wants — per-message rows
+/// would turn one conversation into inbox spam — though it IS a semantic
+/// difference from mentions, where every message naming you earns a row.
+///
+/// **A row exists that is at least as new as this message** — the restart
+/// rule, and the reason `seen` alone is not enough. The boot sweep replays
+/// every message ever sent, so after the recipient reads a DM and the server
+/// restarts, the unseen leg no longer matches and the old message would mint a
+/// brand-new unread row — announcing last month's DM again, on every restart.
+/// A row created at or after the message's own timestamp is proof that message
+/// was already delivered.
+///
+/// The two legs cannot be collapsed into "any row at all": that would make the
+/// FIRST notification from a correspondent the last one they could ever send.
 ///
 /// Equality-only on `actor`, per the `ModAction.message` note: it is an
-/// `Option` field and rows lacking the property are excluded per-row.
-async fn dm_notification_exists(ctx: &Context, recipient: EntityId, sender: EntityId) -> Result<bool> {
-    let predicate = parse_selection("recipient = ? AND actor = ? AND seen = false")?
-        .predicate
-        .populate([Expr::from(&recipient), Expr::from(&sender)])?;
+/// `Option` field and rows lacking the property are excluded per-row. `kind`,
+/// `seen` and `created_at` are compared in code so that one fetch answers
+/// both legs.
+async fn dm_notification_exists(ctx: &Context, recipient: EntityId, sender: EntityId, sent_at: i64) -> Result<bool> {
+    let predicate =
+        parse_selection("recipient = ? AND actor = ?")?.predicate.populate([Expr::from(&recipient), Expr::from(&sender)])?;
     let existing = ctx.fetch::<NotificationView>(predicate).await?;
     for n in existing {
-        if n.kind()? == DM_KIND {
+        if n.kind()? != DM_KIND {
+            continue;
+        }
+        if !n.seen()? || n.created_at()? >= sent_at {
             return Ok(true);
         }
     }

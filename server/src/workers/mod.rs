@@ -464,6 +464,113 @@ mod tests {
         );
     }
 
+    /// `DmMessage.a`/`b` are the SENDER'S CLAIM about who a message is between,
+    /// and nothing that acts on a DM may read them as the truth.
+    ///
+    /// They exist so the read scope can decide row-locally who may see a
+    /// message, they are client-written LWW fields, and the write scope checks
+    /// them only against the writer — so any member can file a row into any
+    /// thread with any pair on it. If the fan-out believed them, one member
+    /// would have an unlimited notification channel to strangers: write into
+    /// your own long-answered thread, name whoever you like in `a`/`b`, and
+    /// every one of them gets tapped on the shoulder about a conversation they
+    /// cannot open, while the rate limiter sees one quiet old thread.
+    ///
+    /// So both workers resolve the pair from the THREAD row. Alice forges two
+    /// rows here — one in her own thread with Bob, one filed into Bob and
+    /// Carol's thread — and both name Carol. Carol must hear about neither.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn forged_participants_on_a_dm_notify_the_thread_not_the_forgery() {
+        let ctx = test_context().await;
+        start(ctx.clone());
+
+        let trx = ctx.begin();
+        let alice = trx.create(&User { display_name: "Alice".into(), oidc_sub: None }).await.unwrap().id();
+        let bob = trx.create(&User { display_name: "Bob".into(), oidc_sub: None }).await.unwrap().id();
+        let carol = trx.create(&User { display_name: "Carol".into(), oidc_sub: None }).await.unwrap().id();
+        trx.commit().await.unwrap();
+
+        // Two real conversations: Alice with Bob, and Bob with Carol.
+        let (ab_a, ab_b) = canonical_pair(alice, bob);
+        let (bc_a, bc_b) = canonical_pair(bob, carol);
+        let trx = ctx.begin();
+        let ab = trx.create(&DmThread { a: ab_a.into(), b: ab_b.into(), created_at: 1, deleted: false }).await.unwrap().id();
+        let bc = trx.create(&DmThread { a: bc_a.into(), b: bc_b.into(), created_at: 1, deleted: false }).await.unwrap().id();
+        trx.commit().await.unwrap();
+
+        // Honest traffic: Bob writes to Carol, Alice writes to Bob.
+        let trx = ctx.begin();
+        trx.create(&DmMessage {
+            thread: bc.into(),
+            a: bc_a.into(),
+            b: bc_b.into(),
+            user: bob.into(),
+            text: "hi carol".into(),
+            timestamp: 2,
+            deleted: false,
+            edited_at: None,
+        })
+        .await
+        .unwrap();
+        trx.create(&DmMessage {
+            thread: ab.into(),
+            a: ab_a.into(),
+            b: ab_b.into(),
+            user: alice.into(),
+            text: "hi bob".into(),
+            timestamp: 3,
+            deleted: false,
+            edited_at: None,
+        })
+        .await
+        .unwrap();
+        trx.commit().await.unwrap();
+
+        // The forgeries. Both carry Alice+Carol as the pair; neither thread
+        // says so. The first is filed in Alice's own thread with Bob, the
+        // second in a conversation Alice is not part of at all.
+        let (ac_a, ac_b) = canonical_pair(alice, carol);
+        let trx = ctx.begin();
+        for (thread, text) in [(ab, "forged into my own thread"), (bc, "forged into someone else's")] {
+            trx.create(&DmMessage {
+                thread: thread.into(),
+                a: ac_a.into(),
+                b: ac_b.into(),
+                user: alice.into(),
+                text: text.into(),
+                timestamp: 4,
+                deleted: false,
+                edited_at: None,
+            })
+            .await
+            .unwrap();
+        }
+        trx.commit().await.unwrap();
+
+        // Generous settle — the workers are asynchronous, so "nothing was
+        // created" has to be given time to be wrong.
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        let notifications = ctx.fetch::<NotificationView>("true").await.unwrap();
+
+        let for_carol: Vec<_> = notifications.iter().filter(|n| n.recipient().unwrap().id() == carol).collect();
+        assert_eq!(for_carol.len(), 1, "Carol hears only from the thread she is actually in");
+        assert_eq!(
+            for_carol[0].actor().unwrap().map(|r| r.id()),
+            Some(bob),
+            "and that one is from Bob: a forged pair must never introduce a stranger"
+        );
+
+        let for_bob: Vec<_> = notifications.iter().filter(|n| n.recipient().unwrap().id() == bob).collect();
+        assert_eq!(for_bob.len(), 1, "Bob hears from Alice once — the forged row in their thread coalesces, it does not vanish");
+        assert_eq!(for_bob[0].actor().unwrap().map(|r| r.id()), Some(alice));
+
+        // Nothing was tombstoned either: the forgeries were counted against
+        // the threads they were filed in (an old, answered one) or ignored as
+        // a stranger's row, never as new conversations Alice was starting.
+        let live = ctx.fetch::<DmMessageView>("deleted = false").await.unwrap();
+        assert_eq!(live.len(), 4, "a forged pair does not turn an old conversation into a rate-limited new one");
+    }
+
     /// The rate limiter, end to end on a real node: a sender who opens more
     /// conversations than the window allows has the excess MESSAGE tombstoned,
     /// the thread it opened left intact, and one public `dm-rate-limit`
