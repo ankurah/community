@@ -13,9 +13,11 @@
 //! conversation they have no access to is talking about them, and the inbox row
 //! would deep-link them to a thread that renders as empty. Room mentions and DM
 //! delivery are different products of the same text and must not share a code
-//! path where one could grow into the other by accident. `mention_free`, below,
-//! is the executable statement of that rule, and
-//! `a_dm_mentioning_a_third_party_notifies_only_the_recipient` pins it.
+//! path where one could grow into the other by accident. No function states
+//! the rule, because nothing here has to: `workers::watch_dms` gives the DM
+//! stream its own query and its own channel, so DM text never reaches
+//! `mentions::run`, and no line in this file reads `DmMessage.text` at all.
+//! `a_dm_mentioning_a_third_party_notifies_only_the_recipient` pins the result.
 //!
 //! Invariants (the mention worker's, restated for this kind):
 //! - Idempotent: at most one `kind="dm"` notification per (recipient, message),

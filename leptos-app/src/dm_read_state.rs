@@ -17,6 +17,13 @@
 //! never lights up your own badge, and the count caps at 10 (rendered "10+"),
 //! exactly like room badges.
 //!
+//! Inherited with that shape rather than introduced here, and deliberately not
+//! fixed in the DM lane: the window is the thread's newest ten messages
+//! whoever wrote them, so a badge reads low when the viewer's own replies fill
+//! it. Room badges undercount the same way for the same reason (#62). The
+//! number is an at-a-glance signal that someone is waiting, not an accounting
+//! of how many times they said so.
+//!
 //! Privacy note that does not apply to rooms: these rows are scoped to their
 //! OWNER (`user = $jwt.sub`), not to the thread's participant pair, so a read
 //! cursor is never a read receipt the correspondent can see. See the

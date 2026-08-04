@@ -119,6 +119,15 @@ pub fn UserDetailPanel(
     // self-thread has no other participant to show or notify, and the
     // find-or-create refuses one anyway. This is the ONLY place a conversation
     // is started from — the sidebar section lists what already exists.
+    //
+    // It also disappears for a member this viewer can see an active ban on
+    // (below): a banned member is refused at token mint, so they could never
+    // answer, and offering to start a conversation with someone who cannot
+    // reply promises something the app cannot deliver. Like the "Banned" badge
+    // beside it, this is only as informed as the viewer's own sight of the ban
+    // rows — moderators see them all, members at most their own — so it hides
+    // the button exactly where the badge appears, and never pretends to be
+    // enforcement.
     let can_message = user_id != crate::current_user_id();
     let message_user_id = user_id;
 
@@ -236,37 +245,42 @@ pub fn UserDetailPanel(
                     }
                 }
 
-                {can_message
-                    .then(|| {
-                            view! {
-                                <div class="userDetailActions">
-                                    <button
-                                        class="userDetailActionBtn userDetailMessageBtn"
-                                        // Closes through the global panel
-                                        // manager rather than this panel's
-                                        // `on_close`: the button lives inside a
-                                        // view leptos stores as a thread-safe
-                                        // closure, and `on_close` is not
-                                        // Send+Sync. Same effect — the header's
-                                        // on_close IS panels().close().
-                                        on:click=move |_| {
-                                            crate::dm::open_thread_with(message_user_id, selected_dm);
-                                            crate::panels::panels().close();
-                                        }
-                                    >
-                                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                                            stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
-                                            aria-hidden="true">
-                                            <path d="M4 6h16v11H8l-4 4z" />
-                                        </svg>
-                                        "Message"
-                                    </button>
-                                    <p class="userDetailMessageNote">
-                                        "Direct messages are private to the two of you — moderators cannot read them."
-                                    </p>
-                                </div>
-                            }
-                    })}
+                {
+                    let banned = banned.clone();
+                    move || {
+                        (can_message && !banned())
+                            .then(|| {
+                                view! {
+                                    <div class="userDetailActions">
+                                        <button
+                                            class="userDetailActionBtn userDetailMessageBtn"
+                                            // Closes through the global panel
+                                            // manager rather than this panel's
+                                            // `on_close`: the button lives inside a
+                                            // view leptos stores as a thread-safe
+                                            // closure, and `on_close` is not
+                                            // Send+Sync. Same effect — the header's
+                                            // on_close IS panels().close().
+                                            on:click=move |_| {
+                                                crate::dm::open_thread_with(message_user_id, selected_dm);
+                                                crate::panels::panels().close();
+                                            }
+                                        >
+                                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                                stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+                                                aria-hidden="true">
+                                                <path d="M4 6h16v11H8l-4 4z" />
+                                            </svg>
+                                            "Message"
+                                        </button>
+                                        <p class="userDetailMessageNote">
+                                            "Direct messages are private to the two of you — moderators cannot read them."
+                                        </p>
+                                    </div>
+                                }
+                            })
+                    }
+                }
 
                 {show_mod_actions
                     .then(|| {

@@ -188,8 +188,8 @@ pub(super) async fn pref_allows_delivery(ctx: &Context, recipient: EntityId, kin
 
 /// Pure pref policy, factored out for testing:
 /// - a muted room suppresses EVERY kind, mentions included;
-/// - `mentions_only` suppresses every kind EXCEPT mentions (a no-op today,
-///   load-bearing the moment a second kind ships).
+/// - `mentions_only` suppresses every kind EXCEPT mentions — which since the
+///   DM lane (#30) means it suppresses `dm` (`dm_notify::DM_KIND`) in full.
 fn pref_allows(kind: &str, mentions_only: bool, muted_rooms: &serde_json::Value, room_b64: &str) -> bool {
     if let Some(rooms) = muted_rooms.as_array() {
         if rooms.iter().any(|r| r.as_str() == Some(room_b64)) {

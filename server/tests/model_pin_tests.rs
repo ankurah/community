@@ -92,13 +92,12 @@ fn canonical_pair_is_symmetric_total_and_byte_ordered() {
     // Byte order vs base64 order really do differ, so the choice is load-bearing
     // rather than cosmetic. Find a pair where they disagree and pin that the
     // helper follows the bytes.
-    let disagreeing = (0..4096)
+    let (x, y) = (0..4096)
         .map(|_| (ankurah::EntityId::new(), ankurah::EntityId::new()))
-        .find(|(x, y)| (x < y) != (x.to_base64() < y.to_base64()));
-    if let Some((x, y)) = disagreeing {
-        let (a, _) = community_model::canonical_pair(x, y);
-        assert_eq!(a, std::cmp::min(x, y), "canonical order follows entity-id bytes, not base64 text");
-    }
+        .find(|(x, y)| (x < y) != (x.to_base64() < y.to_base64()))
+        .expect("4096 random pairs must contain one whose byte order and base64 order disagree");
+    let (a, _) = community_model::canonical_pair(x, y);
+    assert_eq!(a, std::cmp::min(x, y), "canonical order follows entity-id bytes, not base64 text");
 }
 
 /// The viewer's correspondent, from either arm; `None` for the degenerate
@@ -186,4 +185,62 @@ async fn dm_rows_are_born_with_both_participants_and_refs_round_trip() {
     assert_eq!(read_state_view.user().unwrap().id(), alice);
     assert_eq!(read_state_view.thread().unwrap().id(), thread);
     assert_eq!(read_state_view.last_read_ts().unwrap(), 2);
+}
+
+/// `ModAction.actor` became `Option<Ref<User>>` when the DM rate limiter began
+/// writing rows nothing human authored (#30). Both legs of that retrofit are
+/// claims the model doc makes, so both are pinned here: a row written with a
+/// moderator reads back as `Some(that moderator)` — the shape every row
+/// created before the retrofit has, since they all carry the property with a
+/// value — and a row written with `None` reads `None` rather than erroring the
+/// way a bare `Ref` would on an absent property.
+///
+/// The `Some` leg is the one that matters for the mod log: it renders "actor
+/// unknown" for a `None`, so an `Option` read that quietly collapsed every row
+/// to `None` would turn the entire moderation history anonymous while every
+/// test still passed.
+#[tokio::test(flavor = "multi_thread")]
+async fn mod_action_actor_reads_some_for_human_rows_and_none_for_automatic_ones() {
+    use community_model::{ModAction, ModActionView};
+
+    let ctx = test_context().await;
+
+    let trx = ctx.begin();
+    let moderator = trx.create(&User { display_name: "Moderator".into(), oidc_sub: None }).await.unwrap().id();
+    let member = trx.create(&User { display_name: "Member".into(), oidc_sub: None }).await.unwrap().id();
+    let by_hand = trx
+        .create(&ModAction {
+            actor: Some(moderator.into()),
+            message: None,
+            user: Some(member.into()),
+            action: "ban".into(),
+            reason: Some("spam".into()),
+            created_at: 1,
+        })
+        .await
+        .unwrap()
+        .id();
+    let automatic = trx
+        .create(&ModAction {
+            actor: None,
+            message: None,
+            user: Some(member.into()),
+            action: "dm-rate-limit".into(),
+            reason: Some("Automatic DM rate limit.".into()),
+            created_at: 2,
+        })
+        .await
+        .unwrap()
+        .id();
+    trx.commit().await.unwrap();
+
+    let by_hand = ctx.get::<ModActionView>(by_hand).await.unwrap();
+    assert_eq!(
+        by_hand.actor().unwrap().map(|r| r.id()),
+        Some(moderator),
+        "a row with a moderator names them: the retrofit must not read every row as actorless"
+    );
+
+    let automatic = ctx.get::<ModActionView>(automatic).await.unwrap();
+    assert_eq!(automatic.actor().unwrap().map(|r| r.id()), None, "a row nothing human wrote reads None, not an error");
 }
