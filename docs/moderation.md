@@ -164,10 +164,35 @@ forever). Back-dating to slip out of the window is possible and is accepted:
 a back-dated message buries itself in the recipient's history, so the evasion
 costs the abuser the visibility they wanted.
 
-**What a breach does:** over the initiation limit, the thread and every
-message in it are tombstoned (the thread leaves both sidebars); over the
-unanswered limit, the single message is tombstoned. Either way **one**
-`ModAction { action: "dm-rate-limit" }` row is written per sender per window.
+**What a breach does — and what it deliberately does not.** Either limit
+tombstones one message and nothing else: over the initiation limit, the
+message that opened the excess conversation; over the unanswered limit, the
+message that ran the budget out. The `DmThread` row and every earlier message
+in it survive.
+
+An earlier version tombstoned the whole thread and its history on an
+initiation breach. That is the one thing an automatic penalty must not do
+here: nothing anywhere in this codebase writes `deleted` back to `false`, so a
+single false positive permanently destroyed a two-way conversation — the other
+participant's messages included — with no repair path for them, for the
+sender, or for a moderator. Tombstoning the message costs a spammer exactly
+the same delivery, because a thread whose only message was tombstoned has
+nothing left to show, and threads with no messages appear in neither sidebar.
+The friction survives; the data does not die.
+
+**One** `ModAction { action: "dm-rate-limit" }` row is written per sender per
+window, and it goes in *before* the tombstone: a tombstone must never outrun
+the public trace that justifies it. If that write fails, nothing is tombstoned
+and the sender's next message retries both halves.
+
+**A restart re-reads DM history but does not re-judge it.** The window is
+rebuilt by replaying every live `dm_message` row on boot, and verdicts on
+those replayed rows are deliberately dropped: storage hands them back in
+entity-id order rather than send order, so acting partway through a thread's
+history would be acting on a half-read thread. Enforcement resumes once the
+replay is done. A burst committed in the seconds before a restart therefore
+escapes retroactive tombstoning — but it still counts, so the sender's next
+message pays for it.
 
 **What that public row discloses, stated plainly.** `modaction` is
 world-readable by design, so the row tells the community that this member

@@ -394,16 +394,21 @@ pub struct DmThread {
     pub b: Ref<User>,
     /// ms since epoch (same unit as `Message.timestamp`).
     pub created_at: i64,
-    /// Tombstone flag, flipped only by the server's DM rate limiter when a
-    /// sender opens more conversations than the window allows
-    /// (server/src/workers/dm_rate_limit.rs). Clients list threads with
-    /// `deleted = false`, so a tombstoned thread leaves both sidebars.
+    /// Tombstone flag. **Nothing writes it today**, which is a ruling rather
+    /// than an omission: the DM rate limiter tombstones the offending MESSAGE
+    /// and leaves the conversation standing, because nothing in this codebase
+    /// writes `deleted` back to `false` and an automatic penalty must not be
+    /// able to destroy a two-way history it may have misjudged (see
+    /// server/src/workers/dm_rate_limit.rs and docs/moderation.md). There is
+    /// no user-facing "delete conversation" affordance either.
     ///
-    /// This exists because there is no remote-write gate an app can extend:
-    /// enforcement is necessarily post-hoc, and this flag is what "post-hoc"
-    /// acts on. It is not a user-facing "delete conversation" affordance — no
-    /// client writes it — and the row survives as the audit trail, paired with
-    /// its `ModAction`.
+    /// The field stays because every client lists threads with
+    /// `deleted = false`, and a row must carry the property for that filter to
+    /// match it. Whoever gives this flag a writer owes the pair a way back:
+    /// find-or-create (leptos-app/src/dm.rs) looks for live threads only, so a
+    /// tombstoned thread would never be found, a second one would be minted
+    /// beside it, and the original history would be unreachable for both
+    /// participants.
     #[active_type(LWW)]
     pub deleted: bool,
 }

@@ -97,7 +97,9 @@ pub fn start(ctx: Context) {
 /// recent-window query plus persisted counters, not a smaller sweep.
 async fn watch_dms(ctx: Context) -> Result<()> {
     let (notify_tx, notify_rx) = tokio::sync::mpsc::unbounded_channel::<DmMessageView>();
-    let (limit_tx, limit_rx) = tokio::sync::mpsc::unbounded_channel::<DmMessageView>();
+    // The limiter's channel carries the boot sweep's end marker as well as the
+    // rows: it counts the backlog but does not judge it (see dm_rate_limit).
+    let (limit_tx, limit_rx) = tokio::sync::mpsc::unbounded_channel::<dm_rate_limit::Traffic>();
 
     // Tombstoned DMs produce no notifications, and the limiter treats them as
     // history — the predicate keeps them out of the stream entirely. Note the
@@ -113,7 +115,7 @@ async fn watch_dms(ctx: Context) -> Result<()> {
                 match change {
                     ItemChange::Add { item, .. } | ItemChange::Update { item, .. } => {
                         let _ = notify_tx.send(item.clone());
-                        let _ = limit_tx.send(item.clone());
+                        let _ = limit_tx.send(dm_rate_limit::Traffic::Message(item.clone()));
                     }
                     ItemChange::Initial { .. } | ItemChange::Remove { .. } => {}
                 }
@@ -127,7 +129,12 @@ async fn watch_dms(ctx: Context) -> Result<()> {
     }
     {
         let ctx = ctx.clone();
-        supervise("DM rate limit", limit_rx, move |rx| dm_rate_limit::run(ctx.clone(), rx).boxed());
+        // The limiter's state belongs to the supervisor, not to the consumer
+        // loop: a panic must not restart the window from empty (every old
+        // thread would then look like a fresh initiation) nor drop the
+        // enforcing latch, which only the boot sweep can raise.
+        let state = std::sync::Arc::new(tokio::sync::Mutex::new(dm_rate_limit::State::default()));
+        supervise("DM rate limit", limit_rx, move |rx| dm_rate_limit::run(ctx.clone(), state.clone(), rx).boxed());
     }
 
     live.wait_initialized().await;
@@ -135,8 +142,12 @@ async fn watch_dms(ctx: Context) -> Result<()> {
     info!(messages = backlog.len(), "DM workers: standing dm_message LiveQuery initialized; sweeping backlog");
     for msg in backlog {
         let _ = notify_tx.send(msg.clone());
-        let _ = limit_tx.send(msg);
+        let _ = limit_tx.send(dm_rate_limit::Traffic::Message(msg));
     }
+    // The limiter has now seen every message that existed at startup, so its
+    // picture of each thread is as complete as storage can make it. Verdicts
+    // are acted on from here; everything above only counted.
+    let _ = limit_tx.send(dm_rate_limit::Traffic::BacklogComplete);
 
     std::future::pending::<()>().await;
     drop((live, subscription_guard)); // unreachable; documents what parking keeps alive
@@ -266,8 +277,8 @@ mod tests {
     use ankurah::Node;
     use ankurah_storage_sled::SledStorageEngine;
     use community_model::{
-        canonical_pair, DmMessage, DmMessageView, DmThread, LinkPreview, LinkPreviewView, Message, ModActionView,
-        NotificationView, Room, User,
+        canonical_pair, DmMessage, DmMessageView, DmThread, DmThreadView, LinkPreview, LinkPreviewView, Message,
+        ModActionView, NotificationView, Room, User,
     };
     use std::sync::Arc;
     use std::time::Duration;
@@ -454,13 +465,16 @@ mod tests {
     }
 
     /// The rate limiter, end to end on a real node: a sender who opens more
-    /// conversations than the window allows has the excess thread AND its
-    /// messages tombstoned, and one public `dm-rate-limit` ModAction row is
-    /// written with no human actor.
+    /// conversations than the window allows has the excess MESSAGE tombstoned,
+    /// the thread it opened left intact, and one public `dm-rate-limit`
+    /// ModAction row written with no human actor.
     ///
     /// This is the post-hoc shape stated in dm_rate_limit's module docs: the
     /// rows really do commit first, and the test waits for the worker to catch
     /// up — which is exactly what a recipient with the thread open would see.
+    /// It also exercises the boot-sweep handshake end to end: the limiter acts
+    /// only after `Traffic::BacklogComplete` reaches it, so a marker that never
+    /// arrived would leave every message below untouched.
     #[tokio::test(flavor = "multi_thread")]
     async fn the_dm_rate_limiter_tombstones_the_excess_and_logs_one_action() {
         use super::dm_rate_limit::MAX_INITIATIONS_PER_WINDOW;
@@ -515,7 +529,21 @@ mod tests {
         }
         assert_eq!(
             remaining, MAX_INITIATIONS_PER_WINDOW,
-            "exactly the conversations within the limit survive; the excess message is tombstoned with its thread"
+            "exactly the messages within the limit survive; the one that opened the excess conversation is tombstoned"
+        );
+
+        // The penalty is the message, never the conversation: every thread row
+        // is still alive, including the one whose only message was tombstoned.
+        // Nothing in this codebase writes `deleted` back to false, so a thread
+        // tombstone would be a permanent, unrepairable loss of history on what
+        // may well be a false positive — and it buys nothing, because a thread
+        // with no visible messages does not appear in either sidebar
+        // (leptos-app/src/dm_list.rs drops threads with no messages).
+        let live_threads = ctx.fetch::<DmThreadView>("deleted = false").await.unwrap();
+        assert_eq!(
+            live_threads.len(),
+            threads.len(),
+            "a rate limit tombstones the offending message and leaves every conversation standing"
         );
 
         // One public audit row, no human actor, naming the sender and nothing

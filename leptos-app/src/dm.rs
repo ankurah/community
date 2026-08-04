@@ -33,7 +33,9 @@ use crate::{ctx, current_user_id, queries};
 /// The viewer's threads, live. Scoped by policy to threads the viewer is in —
 /// the resultset is self-shaping, so no client-side membership filter is needed
 /// (and one would be a lie about where enforcement lives). Tombstoned threads
-/// (the DM rate limiter's post-hoc action) are excluded.
+/// are excluded, though nothing writes that flag today: the DM rate limiter
+/// tombstones the offending message and leaves the conversation standing (see
+/// `DmThread::deleted` and docs/moderation.md).
 pub fn threads_query() -> LiveQuery<DmThreadView> {
     ctx().query::<DmThreadView>("deleted = false").expect("failed to create DmThreadView LiveQuery")
 }
@@ -127,6 +129,12 @@ async fn find_or_create_thread(me: EntityId, partner: EntityId) -> Result<DmThre
 
     // Parameterized, never spliced (#17). Both participants build this exact
     // query, which is what makes find-or-create converge.
+    //
+    // `deleted = false` is safe only while nothing tombstones threads, which is
+    // today's ruling (see `DmThread::deleted`). The day something does, this
+    // line stops finding the pair's thread and mints a second one beside it,
+    // stranding the history in a row neither participant can reach again — so
+    // whoever adds a thread tombstone owes this call an adoption path.
     let selection = queries::selection("a = ? AND b = ? AND deleted = false", [(&a).into(), (&b).into()])?;
     let existing = ctx().fetch::<DmThreadView>(selection).await?;
     if let Some(winner) = canonical_thread(existing.iter().map(|t| t.id()))

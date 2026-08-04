@@ -15,9 +15,10 @@
 //! WHAT IS COUNTED. Two limits, both per sender, both over a trailing window:
 //!
 //! 1. **Initiations** — conversations the sender STARTED (their message is the
-//!    oldest in its thread). This is the stranger-DM shape: one person opening
-//!    many threads. Over [`MAX_INITIATIONS_PER_WINDOW`] in
-//!    [`WINDOW_MS`], the excess thread is tombstoned along with its messages.
+//!    oldest in its thread) *and started inside the window*. This is the
+//!    stranger-DM shape: one person opening many threads at once. Over
+//!    [`MAX_INITIATIONS_PER_WINDOW`] in [`WINDOW_MS`], the message that opened
+//!    the excess conversation is tombstoned.
 //! 2. **Unanswered messages** — messages into threads where the other
 //!    participant has never said anything. Over
 //!    [`MAX_UNANSWERED_PER_WINDOW`], the excess message is tombstoned. A thread
@@ -25,6 +26,43 @@
 //!    is not counted at all: two people talking are never rate limited.
 //!
 //! Neither limit reads message text. The worker never learns what a DM says.
+//!
+//! AN EVENT IS FILED UNDER ITS OWN TIME, NEVER UNDER THE MOMENT THIS WORKER
+//! SAW IT. An initiation is stamped with the timestamp of the thread's OLDEST
+//! message — when the conversation actually started — so it leaves the window
+//! an hour after that. Stamping it with the message being observed would be a
+//! data-destroying mistake, because "the oldest message in this thread is
+//! mine" is a permanent property of every thread you ever opened: each reply
+//! you sent would restamp it, the window would never age it out, and the map
+//! would hold "old threads I have spoken in recently" instead of "threads I
+//! started recently". Answering six long-standing correspondents within an
+//! hour would then trip a limit that exists to slow six NEW conversations.
+//! `answering_six_old_correspondents_within_an_hour_is_never_limited` is that
+//! regression, and it is the reason this paragraph exists.
+//!
+//! WHAT A BREACH COSTS: THE MESSAGE, NEVER THE CONVERSATION. Both verdicts
+//! tombstone the single offending message and nothing else — the `DmThread`
+//! row and every earlier message in it survive. An earlier design tombstoned
+//! the whole thread on an initiation breach, which meant one false positive
+//! destroyed a two-way history (including the other participant's messages)
+//! with no repair path anywhere in this codebase: nothing ever writes
+//! `deleted` back to `false`. Message-only keeps the friction — the spam does
+//! not land, and a thread whose only message was tombstoned has nothing left
+//! to show, so it does not even appear in the recipient's sidebar (`dm_list`
+//! hides threads with no messages) — while making the worst case a lost
+//! message rather than a lost conversation.
+//!
+//! THE BOOT SWEEP ONLY BUILDS THE PICTURE; IT DOES NOT JUDGE. On startup
+//! `workers::watch_dms` replays every live `dm_message` row through this
+//! worker so the window and the per-thread facts survive a restart. Those
+//! replayed rows are counted and never acted on, because the sweep's query has
+//! no ORDER BY: a thread's messages arrive in entity-id order, which only
+//! approximates send order across clients, so a verdict reached partway
+//! through a thread's history would be a verdict on a half-read thread.
+//! Enforcement begins when the sweep hands over [`Traffic::BacklogComplete`].
+//! The cost is that a burst committed in the seconds before a restart is not
+//! tombstoned retroactively — but the facts it left behind still count, so the
+//! sender's next message pays for it.
 //!
 //! WHY THE SENDER IS INFERRED FROM MESSAGES RATHER THAN FROM THE THREAD ROW.
 //! `DmThread` records no creator, deliberately: the write scope only checks
@@ -40,14 +78,20 @@
 //! next year sits at the top of every "newest first" list forever) and it is
 //! neutralized: timestamps are clamped to the server's clock on arrival.
 //! Back-dating is self-defeating — a back-dated message buries itself in the
-//! recipient's history — so it is accepted rather than defended against.
+//! recipient's history — so it is accepted rather than defended against. That
+//! acceptance now covers one more move: back-dating the first message of a
+//! thread ages that thread out of the initiation window early. The abuser pays
+//! for it in the only currency that matters to them, by burying every one of
+//! those openings at the bottom of the recipients' lists.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use ankurah::{Context, EntityId};
 use anyhow::{Context as _, Result};
-use community_model::{DmMessageView, DmThreadView, ModAction};
+use community_model::{DmMessageView, ModAction};
 use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::sync::Mutex;
 use tracing::{info, warn};
 
 use super::now_ms;
@@ -69,16 +113,19 @@ pub const MAX_UNANSWERED_PER_WINDOW: usize = 20;
 
 /// What the limiter decided about one message. Returned rather than acted on
 /// inline so the decision is testable without a node.
+///
+/// Both breaches cost the same thing — the observed message is tombstoned —
+/// and differ only in which budget ran out, which is the sentence the audit
+/// row carries. Neither ever touches the thread or its earlier messages.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Verdict {
     /// Within both limits.
     Allow,
-    /// The sender has started too many conversations this window: tombstone the
-    /// thread and everything in it.
-    TombstoneThread { initiations: usize },
-    /// The sender is monologuing into too many unanswered threads: tombstone
-    /// this message, leave the thread.
-    TombstoneMessage { unanswered: usize },
+    /// The sender has started too many conversations inside the window: this
+    /// message is the one that opened the excess conversation.
+    TooManyInitiations { initiations: usize },
+    /// The sender is monologuing into too many threads nobody has answered.
+    TooManyUnanswered { unanswered: usize },
 }
 
 /// What the worker knows about one thread, accumulated from the messages it has
@@ -105,6 +152,11 @@ impl ThreadFacts {
     /// Whether `sender` started this conversation.
     fn initiated_by(&self, sender: EntityId) -> bool { self.first.map(|(_, who)| who == sender).unwrap_or(false) }
 
+    /// When this conversation started: the timestamp of its oldest message.
+    /// The initiation window is measured against THIS, not against whichever
+    /// message the worker happens to be looking at (see the module doc).
+    fn started_at(&self) -> Option<i64> { self.first.map(|(ts, _)| ts) }
+
     /// Whether the sender is talking to themselves: they started it and nobody
     /// else has ever answered.
     fn unanswered_by_others(&self, sender: EntityId) -> bool {
@@ -118,9 +170,12 @@ impl ThreadFacts {
 #[derive(Default)]
 pub struct Limiter {
     threads: HashMap<EntityId, ThreadFacts>,
-    /// sender -> (timestamp, thread) for each conversation they started.
-    /// Distinct threads are what count, so a re-observed message (boot sweep
-    /// after a live delivery) cannot inflate the tally.
+    /// sender -> thread -> when that thread's OLDEST message landed, for each
+    /// conversation the sender started. Distinct threads are what count, so a
+    /// re-observed message (boot sweep after a live delivery) cannot inflate
+    /// the tally — and the stamp being the thread's own start is what lets a
+    /// long-standing conversation age out of the window while the sender keeps
+    /// talking in it.
     initiations: HashMap<EntityId, HashMap<EntityId, i64>>,
     /// sender -> message id -> timestamp, for messages into unanswered threads.
     unanswered: HashMap<EntityId, HashMap<EntityId, i64>>,
@@ -141,9 +196,13 @@ impl Limiter {
         facts.observe(sender, ts);
         let initiated = facts.initiated_by(sender);
         let monologue = facts.unanswered_by_others(sender);
+        // The conversation's own start, which is what the initiation window is
+        // measured against. `ts` (this message) would restamp the entry on
+        // every reply and it would never age out — see the module doc.
+        let started_at = facts.started_at().unwrap_or(ts);
 
         if initiated {
-            self.initiations.entry(sender).or_default().insert(thread, ts);
+            self.initiations.entry(sender).or_default().insert(thread, started_at);
         }
         if monologue {
             self.unanswered.entry(sender).or_default().insert(message, ts);
@@ -160,64 +219,110 @@ impl Limiter {
 
         let initiations = self.initiations.get(&sender).map(HashMap::len).unwrap_or(0);
         if initiated && initiations > MAX_INITIATIONS_PER_WINDOW {
-            return Verdict::TombstoneThread { initiations };
+            return Verdict::TooManyInitiations { initiations };
         }
         let unanswered = self.unanswered.get(&sender).map(HashMap::len).unwrap_or(0);
         if monologue && unanswered > MAX_UNANSWERED_PER_WINDOW {
-            return Verdict::TombstoneMessage { unanswered };
+            return Verdict::TooManyUnanswered { unanswered };
         }
         Verdict::Allow
     }
 
-    /// Whether this sender still needs a `ModAction` row this window. Returns
-    /// true at most once per sender per window; the caller logs only then.
-    pub fn should_log(&mut self, sender: EntityId, now: i64) -> bool {
-        if self.logged.contains_key(&sender) {
-            return false;
-        }
-        self.logged.insert(sender, now);
-        true
-    }
+    /// Whether this sender still needs a `ModAction` row this window. A pure
+    /// question: the caller marks them logged with [`Limiter::mark_logged`]
+    /// only once the row has actually committed.
+    fn needs_audit_row(&self, sender: EntityId) -> bool { !self.logged.contains_key(&sender) }
 
-    /// A tombstoned row must stop counting toward the limits, or a sender who
-    /// trips the initiation limit once would stay tripped for the rest of the
-    /// window and lose conversations they never got to start.
-    fn forget_thread(&mut self, thread: EntityId, sender: EntityId) {
-        self.threads.remove(&thread);
-        if let Some(by_thread) = self.initiations.get_mut(&sender) {
-            by_thread.remove(&thread);
-        }
-    }
+    /// Record that this sender's audit row for the window exists, so the rest
+    /// of a burst produces no further rows.
+    fn mark_logged(&mut self, sender: EntityId, now: i64) { self.logged.insert(sender, now); }
 
+    /// A tombstoned message must stop counting toward the unanswered limit:
+    /// the row it referred to is gone, so charging the sender's budget for it
+    /// would spend a budget on nothing and tombstone messages they were owed.
     fn forget_message(&mut self, message: EntityId, sender: EntityId) {
         if let Some(by_message) = self.unanswered.get_mut(&sender) {
             by_message.remove(&message);
         }
     }
+
+    /// The same, for a message that was also the one that opened its thread:
+    /// the conversation it started has nothing left in it, so the thread stops
+    /// counting toward the initiation limit too. Without this a sender who
+    /// tripped once would stay tripped for the rest of the window and lose
+    /// conversations they never got to start.
+    ///
+    /// The thread's FACTS deliberately stay. They record who spoke in it and
+    /// when it started, which is exactly what makes the sender's next attempt
+    /// at the same thread trip again — and dropping them would also forget
+    /// that the correspondent had ever replied.
+    fn forget_initiation(&mut self, message: EntityId, thread: EntityId, sender: EntityId) {
+        self.forget_message(message, sender);
+        if let Some(by_thread) = self.initiations.get_mut(&sender) {
+            by_thread.remove(&thread);
+        }
+    }
+}
+
+/// Everything the worker carries between messages: the counting state, and
+/// whether the boot sweep has finished handing over the backlog.
+///
+/// Owned by the supervisor rather than by [`run`], so a consumer panic loses
+/// only the in-flight message. If this lived in `run`'s stack frame, a respawn
+/// would restart with an empty window (every old thread would look like a
+/// fresh initiation) and with `enforcing` back to false and no second sweep
+/// coming to flip it — the limiter would go quiet for the life of the process.
+#[derive(Default)]
+pub struct State {
+    limiter: Limiter,
+    /// False until [`Traffic::BacklogComplete`] arrives. Messages seen before
+    /// then are counted and never acted on: the sweep delivers a thread's
+    /// history in entity-id order, so a verdict mid-history is a verdict on a
+    /// thread the worker has only half read.
+    enforcing: bool,
+}
+
+/// What the limiter's channel carries.
+pub enum Traffic {
+    /// One `dm_message` row — from the live query, or replayed by the boot
+    /// sweep. Which one it is does not have to be marked: everything the sweep
+    /// sends precedes the marker below.
+    Message(DmMessageView),
+    /// The boot sweep has handed over its whole backlog. Verdicts are acted on
+    /// from here.
+    BacklogComplete,
 }
 
 /// Consumer loop. The receiver is borrowed from the supervisor
-/// (`workers::supervise`), which respawns this loop if it ever panics — the
-/// limiter state is rebuilt by the next boot sweep, so a respawn loses at most
-/// the window's counts and never mis-tombstones anything.
-pub async fn run(ctx: Context, rx: &mut UnboundedReceiver<DmMessageView>) {
+/// (`workers::supervise`), which respawns this loop if it ever panics; `state`
+/// is owned by the supervisor for the same reason, so a respawn resumes with
+/// the window it had built rather than with a blank one (see [`State`]).
+pub async fn run(ctx: Context, state: Arc<Mutex<State>>, rx: &mut UnboundedReceiver<Traffic>) {
     info!(
         window_minutes = WINDOW_MS / 60_000,
         max_initiations = MAX_INITIATIONS_PER_WINDOW,
         max_unanswered = MAX_UNANSWERED_PER_WINDOW,
-        "DM rate limiter started (post-hoc: offending rows are tombstoned after they commit)"
+        "DM rate limiter started (post-hoc: offending messages are tombstoned after they commit)"
     );
-    let mut limiter = Limiter::default();
-    while let Some(msg) = rx.recv().await {
-        let message_id = msg.id();
-        if let Err(e) = process(&ctx, &mut limiter, &msg).await {
-            warn!(message = %message_id, "DM rate limiting failed (retries on the message's next change): {e:#}");
+    while let Some(traffic) = rx.recv().await {
+        let mut state = state.lock().await;
+        match traffic {
+            Traffic::BacklogComplete => {
+                state.enforcing = true;
+                info!("DM rate limiter: boot backlog absorbed; live traffic is enforced from here");
+            }
+            Traffic::Message(msg) => {
+                let message_id = msg.id();
+                if let Err(e) = process(&ctx, &mut state, &msg).await {
+                    warn!(message = %message_id, "DM rate limiting failed (retries on the message's next change): {e:#}");
+                }
+            }
         }
     }
     warn!("DM rate limiter: message stream closed; exiting");
 }
 
-async fn process(ctx: &Context, limiter: &mut Limiter, msg: &DmMessageView) -> Result<()> {
+async fn process(ctx: &Context, state: &mut State, msg: &DmMessageView) -> Result<()> {
     // A message already tombstoned (by an earlier pass, or by its sender) is
     // history, not new traffic.
     if msg.deleted().context("read DM deleted flag")? {
@@ -228,69 +333,79 @@ async fn process(ctx: &Context, limiter: &mut Limiter, msg: &DmMessageView) -> R
     let client_ts = msg.timestamp().context("read DM timestamp")?;
     let now = now_ms();
 
-    match limiter.observe(msg.id(), thread, sender, client_ts, now) {
+    let verdict = state.limiter.observe(msg.id(), thread, sender, client_ts, now);
+    if !state.enforcing {
+        // Boot backlog: the row counted, and that is the whole job. Judging a
+        // thread the sweep has only half delivered is what this defers.
+        return Ok(());
+    }
+
+    match verdict {
         Verdict::Allow => Ok(()),
-        Verdict::TombstoneThread { initiations } => {
-            tombstone_thread(ctx, thread).await?;
-            limiter.forget_thread(thread, sender);
+        Verdict::TooManyInitiations { initiations } => {
+            audit(
+                ctx,
+                &mut state.limiter,
+                sender,
+                now,
+                format!(
+                    "Automatic DM rate limit: {initiations} new conversations started within {} minutes (limit {MAX_INITIATIONS_PER_WINDOW}).",
+                    WINDOW_MS / 60_000
+                ),
+            )
+            .await?;
+            tombstone_message(ctx, msg).await?;
+            state.limiter.forget_initiation(msg.id(), thread, sender);
             // Ids and counts only — never text, and never the recipient: the
             // mod log is world-readable, and naming who someone DMs would leak
             // exactly what the DM read scope exists to protect.
-            warn!(sender = %sender, thread = %thread, initiations, "DM rate limit: tombstoned a thread over the initiation limit");
-            if limiter.should_log(sender, now) {
-                log_action(
-                    ctx,
-                    sender,
-                    format!(
-                        "Automatic DM rate limit: {initiations} new conversations started within {} minutes (limit {MAX_INITIATIONS_PER_WINDOW}).",
-                        WINDOW_MS / 60_000
-                    ),
-                )
-                .await?;
-            }
+            warn!(sender = %sender, thread = %thread, initiations, "DM rate limit: tombstoned the message that opened a conversation over the initiation limit");
             Ok(())
         }
-        Verdict::TombstoneMessage { unanswered } => {
+        Verdict::TooManyUnanswered { unanswered } => {
+            audit(
+                ctx,
+                &mut state.limiter,
+                sender,
+                now,
+                format!(
+                    "Automatic DM rate limit: {unanswered} messages within {} minutes into conversations nobody answered (limit {MAX_UNANSWERED_PER_WINDOW}).",
+                    WINDOW_MS / 60_000
+                ),
+            )
+            .await?;
             tombstone_message(ctx, msg).await?;
-            limiter.forget_message(msg.id(), sender);
+            state.limiter.forget_message(msg.id(), sender);
             warn!(sender = %sender, thread = %thread, unanswered, "DM rate limit: tombstoned a message over the unanswered limit");
-            if limiter.should_log(sender, now) {
-                log_action(
-                    ctx,
-                    sender,
-                    format!(
-                        "Automatic DM rate limit: {unanswered} messages within {} minutes into conversations nobody answered (limit {MAX_UNANSWERED_PER_WINDOW}).",
-                        WINDOW_MS / 60_000
-                    ),
-                )
-                .await?;
-            }
             Ok(())
         }
     }
 }
 
-/// Flip `deleted` on a thread AND on every message in it, under Root. Both
-/// halves matter: the thread flag removes it from the sidebars, and the message
-/// flags stop a client that already holds the rows from rendering the payload.
-async fn tombstone_thread(ctx: &Context, thread: EntityId) -> Result<()> {
-    use ankurah::ankql::{ast::Expr, parser::parse_selection};
-
-    let thread_view = ctx.get::<DmThreadView>(thread).await.context("load the thread to tombstone")?;
-    let predicate = parse_selection("thread = ?")?.predicate.populate([Expr::from(&thread)])?;
-    let messages = ctx.fetch::<DmMessageView>(predicate).await.context("load the thread's messages")?;
-
-    let trx = ctx.begin();
-    thread_view.edit(&trx)?.deleted().set(&true)?;
-    for message in &messages {
-        if !message.deleted().unwrap_or(false) {
-            message.edit(&trx)?.deleted().set(&true)?;
-        }
+/// Write this sender's one public row for the window, unless they already have
+/// one, and mark them logged only once it has committed.
+///
+/// The order is load-bearing in both directions. The row is written BEFORE the
+/// caller tombstones anything, because the whole justification for tombstoning
+/// with no human in the loop (docs/moderation.md) is that the community can
+/// see it happened — a tombstone that outran its public trace is the thing
+/// that argument forbids. And the sender is marked only after the commit
+/// succeeds, so a failed write leaves the window unlogged and the offending
+/// message un-tombstoned (the caller propagates the error): the sender's next
+/// message retries both halves, instead of the window's single row being spent
+/// on a write that never landed.
+async fn audit(ctx: &Context, limiter: &mut Limiter, sender: EntityId, now: i64, reason: String) -> Result<()> {
+    if !limiter.needs_audit_row(sender) {
+        return Ok(());
     }
-    trx.commit().await.context("commit thread tombstone")?;
+    log_action(ctx, sender, reason).await?;
+    limiter.mark_logged(sender, now);
     Ok(())
 }
 
+/// Flip `deleted` on the offending message, under Root. The thread row and
+/// every other message in it are untouched — the penalty is this message (see
+/// the module doc).
 async fn tombstone_message(ctx: &Context, msg: &DmMessageView) -> Result<()> {
     let trx = ctx.begin();
     msg.edit(&trx)?.deleted().set(&true)?;
@@ -351,8 +466,145 @@ mod tests {
         let last = MAX_INITIATIONS_PER_WINDOW;
         assert_eq!(
             limiter.observe(messages[last], threads[last], sender, now, now),
-            Verdict::TombstoneThread { initiations: MAX_INITIATIONS_PER_WINDOW + 1 },
-            "the conversation past the limit is tombstoned"
+            Verdict::TooManyInitiations { initiations: MAX_INITIATIONS_PER_WINDOW + 1 },
+            "the message opening the conversation past the limit is tombstoned"
+        );
+    }
+
+    /// THE regression the initiation window exists to not become: six
+    /// long-standing correspondents, every one of them answered within an hour.
+    ///
+    /// The sender opened all six threads — a month ago — so "the oldest message
+    /// in this thread is mine" is true of them forever. What must never be true
+    /// is that answering them today reads as starting six conversations today.
+    /// Every reply below has to be allowed: when the window was stamped with
+    /// the message being observed instead of the thread's own start, the sixth
+    /// reply tombstoned a month of two-way conversation (the correspondent's
+    /// messages included, with nothing anywhere that writes `deleted` back to
+    /// false) and wrote a world-readable row accusing the member of spamming.
+    #[test]
+    fn answering_six_old_correspondents_within_an_hour_is_never_limited() {
+        const DAY_MS: i64 = 24 * 60 * 60 * 1000;
+
+        let mut limiter = Limiter::default();
+        let sender = EntityId::new();
+        let now = 1_700_000_000_000;
+        let threads = ids(MAX_INITIATIONS_PER_WINDOW + 1);
+        let correspondents = ids(MAX_INITIATIONS_PER_WINDOW + 1);
+
+        // A month of real two-way conversation: the sender opened each thread
+        // on a different day, and each correspondent answered.
+        for (i, thread) in threads.iter().enumerate() {
+            let opened = now - (30 - i as i64) * DAY_MS;
+            assert_eq!(
+                limiter.observe(EntityId::new(), *thread, sender, opened, opened),
+                Verdict::Allow,
+                "opening conversation {i}, weeks apart, is within the limit"
+            );
+            let answered = opened + 60_000;
+            assert_eq!(
+                limiter.observe(EntityId::new(), *thread, correspondents[i], answered, answered),
+                Verdict::Allow,
+                "correspondent {i} answering"
+            );
+        }
+
+        // Today, inside one hour, the sender answers all six.
+        for (i, thread) in threads.iter().enumerate() {
+            let ts = now + i as i64 * 10 * 60_000;
+            assert_eq!(
+                limiter.observe(EntityId::new(), *thread, sender, ts, ts),
+                Verdict::Allow,
+                "reply {i} into a conversation started a month ago must not count as starting one"
+            );
+        }
+    }
+
+    /// The other half of that rule, so the fix cannot be an over-correction:
+    /// the stamp is the thread's FIRST message, so a conversation opened INSIDE
+    /// the window keeps counting until the window passes it. A spammer must not
+    /// be able to age their own burst out by chatting into the threads they
+    /// just opened.
+    #[test]
+    fn conversations_started_inside_the_window_keep_counting_until_it_passes() {
+        let mut limiter = Limiter::default();
+        let sender = EntityId::new();
+        let start = 1_700_000_000_000;
+        let threads = ids(MAX_INITIATIONS_PER_WINDOW + 2);
+
+        for (i, thread) in threads.iter().take(MAX_INITIATIONS_PER_WINDOW).enumerate() {
+            assert_eq!(limiter.observe(EntityId::new(), *thread, sender, start, start), Verdict::Allow, "opening conversation {i}");
+        }
+
+        // Half an hour of chatter into those same threads. None of it re-dates
+        // when they were opened.
+        let half = start + WINDOW_MS / 2;
+        for (i, thread) in threads.iter().take(MAX_INITIATIONS_PER_WINDOW).enumerate() {
+            let ts = half + i as i64;
+            assert_eq!(limiter.observe(EntityId::new(), *thread, sender, ts, ts), Verdict::Allow, "chatter in conversation {i}");
+        }
+
+        // A sixth conversation, with the first five still inside the window.
+        assert_eq!(
+            limiter.observe(EntityId::new(), threads[MAX_INITIATIONS_PER_WINDOW], sender, half + 1000, half + 1000),
+            Verdict::TooManyInitiations { initiations: MAX_INITIATIONS_PER_WINDOW + 1 },
+            "the five openings are still inside the window, so the sixth is over the limit"
+        );
+
+        // Once the window has moved past those five, opening one is fine again.
+        let later = start + WINDOW_MS + 60_000;
+        assert_eq!(
+            limiter.observe(EntityId::new(), threads[MAX_INITIATIONS_PER_WINDOW + 1], sender, later, later),
+            Verdict::Allow,
+            "an aged-out window frees the sender"
+        );
+    }
+
+    /// A tombstoned message stops counting toward BOTH limits. The initiation
+    /// half is what lets the sender open a conversation again at all; the
+    /// unanswered half is what stops messages that no longer exist from
+    /// quietly eating the budget of the ones that do.
+    #[test]
+    fn a_tombstoned_message_stops_spending_both_budgets() {
+        let mut limiter = Limiter::default();
+        let sender = EntityId::new();
+        let now = 1_700_000_000_000;
+        let allowed = ids(MAX_INITIATIONS_PER_WINDOW);
+
+        // Five conversations, one message each: the whole initiation budget,
+        // and five of the unanswered budget.
+        for (i, thread) in allowed.iter().enumerate() {
+            assert_eq!(limiter.observe(EntityId::new(), *thread, sender, now, now), Verdict::Allow, "opening conversation {i}");
+        }
+
+        // Ten further attempts, each tombstoned on arrival and forgotten
+        // exactly as `process` forgets it.
+        for i in 0..10 {
+            let (message, thread) = (EntityId::new(), EntityId::new());
+            let ts = now + i;
+            assert!(
+                matches!(limiter.observe(message, thread, sender, ts, ts), Verdict::TooManyInitiations { .. }),
+                "attempt {i} past the initiation limit"
+            );
+            limiter.forget_initiation(message, thread, sender);
+        }
+
+        // The unanswered budget was charged for the five messages that survived
+        // and for none of the ten that did not, so exactly the rest of it is
+        // available in the conversations the sender kept.
+        for i in MAX_INITIATIONS_PER_WINDOW..MAX_UNANSWERED_PER_WINDOW {
+            let ts = now + 1000 + i as i64;
+            assert_eq!(
+                limiter.observe(EntityId::new(), allowed[i % allowed.len()], sender, ts, ts),
+                Verdict::Allow,
+                "unanswered message {i} is inside the budget"
+            );
+        }
+        let ts = now + 2000;
+        assert_eq!(
+            limiter.observe(EntityId::new(), allowed[0], sender, ts, ts),
+            Verdict::TooManyUnanswered { unanswered: MAX_UNANSWERED_PER_WINDOW + 1 },
+            "the budget runs out at the limit, not ten tombstoned messages early"
         );
     }
 
@@ -417,11 +669,11 @@ mod tests {
             let ts = now + i as i64;
             match limiter.observe(EntityId::new(), thread, sender, ts, ts) {
                 Verdict::Allow => sent += 1,
-                Verdict::TombstoneMessage { unanswered } => {
+                Verdict::TooManyUnanswered { unanswered } => {
                     tombstoned = Some((i, unanswered));
                     break;
                 }
-                Verdict::TombstoneThread { initiations } => {
+                Verdict::TooManyInitiations { initiations } => {
                     panic!("three threads must not trip the initiation limit, got {initiations}")
                 }
             }
@@ -481,23 +733,30 @@ mod tests {
         assert!(
             matches!(
                 limiter.observe(EntityId::new(), threads[MAX_INITIATIONS_PER_WINDOW], sender, far_future, now),
-                Verdict::TombstoneThread { .. }
+                Verdict::TooManyInitiations { .. }
             ),
             "future-dating every message must not spread them across windows"
         );
     }
 
-    /// One audit row per sender per window, however many rows get tombstoned.
+    /// One audit row per sender per window, however many messages get
+    /// tombstoned — and the sender is marked only when the row has actually
+    /// been written, so a failed write leaves the window owed a row rather
+    /// than silently spending it.
     #[test]
-    fn the_audit_row_is_logged_once_per_sender_per_window() {
+    fn the_audit_row_is_owed_until_it_is_written_then_once_per_sender_per_window() {
         let mut limiter = Limiter::default();
         let sender = EntityId::new();
         let now = 1_000_000_000;
-        assert!(limiter.should_log(sender, now), "the first breach is logged");
-        assert!(!limiter.should_log(sender, now), "a burst does not produce a row per message");
+
+        assert!(limiter.needs_audit_row(sender), "the first breach is owed a row");
+        assert!(limiter.needs_audit_row(sender), "asking is not writing: an unwritten row is still owed, so a failed commit retries");
+
+        limiter.mark_logged(sender, now);
+        assert!(!limiter.needs_audit_row(sender), "a burst does not produce a row per message");
 
         // A different sender is independent.
-        assert!(limiter.should_log(EntityId::new(), now));
+        assert!(limiter.needs_audit_row(EntityId::new()));
     }
 
     /// Two senders do not share a budget.
