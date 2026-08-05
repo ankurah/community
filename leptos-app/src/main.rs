@@ -360,9 +360,17 @@ pub fn ChatApp() -> impl IntoView {
         .provide();
 
     // The rooms, for community's own use: the notification sounds want a
-    // per-room window, and the header's topic editor wants the row. Read from
-    // the chat handshake, which owns that query for the session — a second
-    // subscription here would be a second copy of the same rows.
+    // per-room window. Read from the chat handshake, which owns that query for
+    // the session — a second subscription here would be a second copy of the
+    // same rows.
+    //
+    // The NotificationManager then HOLDS this handle for the application's
+    // lifetime, which is the anti-pattern the accessor's doc warns about: the
+    // handle is a borrow of the session's, and a host that swapped sessions
+    // would leave this manager reading through a context the reader had left.
+    // It is correct here and only here, because community signs in with a
+    // full-page redirect and never swaps a session under a mounted tree. A
+    // host that does swap must re-ask.
     let rooms = chat.rooms().expect("the chat handshake could not open the rooms query");
 
     // Load the signed-in user (the server upserted it before minting our token;

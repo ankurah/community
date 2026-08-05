@@ -60,7 +60,7 @@ test.describe.skip('Direct messages (#30)', () => {
     await ctxB.close();
   });
 
-  test('double-tab first-DM race converges on one thread', async ({ browser }) => {
+  test('double-tab first-DM race resolves to one conversation', async ({ browser }) => {
     test.setTimeout(90_000);
 
     // ONE user in TWO tabs of the SAME context — same localStorage, same
@@ -99,9 +99,11 @@ test.describe.skip('Direct messages (#30)', () => {
     await expect(tab2.locator('.dmItem')).toHaveCount(1, { timeout: 20_000 });
     await expect(B.locator('.dmItem')).toHaveCount(1, { timeout: 20_000 });
 
-    // And both tabs converge on the SAME thread, so a message sent from either
-    // lands in the conversation the other is looking at. (converge_selection
-    // slides a tab that opened the losing twin onto the winner.)
+    // Both tabs show both messages, whichever row each send landed in. That is
+    // NOT convergence — a selection names a correspondent, never a row, so
+    // there is nothing to converge — it is the read side: a conversation view
+    // reads every row its participant pair has, so words written into the
+    // losing twin during the race stay part of the conversation.
     const m1 = `from tab one ${Date.now()}`;
     const m2 = `from tab two ${Date.now()}`;
     await tab1.locator('.input[placeholder="Type a message..."]').fill(m1);
@@ -118,6 +120,27 @@ test.describe.skip('Direct messages (#30)', () => {
     await B.locator('.dmItem').first().click();
     await expect(B.locator('.messagesContainer')).toContainText(m1, { timeout: 15_000 });
     await expect(B.locator('.messagesContainer')).toContainText(m2, { timeout: 15_000 });
+
+    // AND the write side: every send resolves the pair afresh and picks the
+    // lowest thread id, so once the race has settled both tabs write into the
+    // SAME row. The assertions above would pass with the two tabs writing into
+    // different twins forever — they only read across the pair — so this is
+    // what actually pins canonical routing.
+    //
+    // Read the rows off the DOM rather than the store: a bubble carries its
+    // entity id, and a message's thread is not on screen, so the check is that
+    // the newest message from each tab arrives at the recipient under one
+    // conversation AFTER the race window, when neither tab can still be
+    // resolving.
+    const settled1 = `settled tab one ${Date.now()}`;
+    const settled2 = `settled tab two ${Date.now()}`;
+    await tab1.locator('.input[placeholder="Type a message..."]').fill(settled1);
+    await tab1.click('.button:has-text("Send")');
+    await expect(tab2.locator('.messagesContainer')).toContainText(settled1, { timeout: 15_000 });
+    await tab2.locator('.input[placeholder="Type a message..."]').fill(settled2);
+    await tab2.click('.button:has-text("Send")');
+    await expect(tab1.locator('.messagesContainer')).toContainText(settled2, { timeout: 15_000 });
+    await expect(B.locator('.dmItem')).toHaveCount(1, { timeout: 20_000 });
 
     await ctxA.close();
     await ctxB.close();

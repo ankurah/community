@@ -24,7 +24,7 @@ use wasm_bindgen::JsValue;
 use web_sys::window;
 
 use ankurah::EntityId;
-use ankurah_chat_leptos::{DmSidebar, RoomSelector};
+use ankurah_chat_leptos::{ChatContext, DmSidebar, RoomSelector};
 use ankurah_signals::Get as AnkurahGet;
 
 /// Pick a room when none is selected: the one named in `?room=`, else
@@ -32,13 +32,13 @@ use ankurah_signals::Get as AnkurahGet;
 ///
 /// It reads the rooms out of the chat handshake, which owns that query for the
 /// session — community no longer holds one of its own.
-fn auto_select_room(selected_room: RwSignal<Option<EntityId>>) -> impl Fn() + 'static {
+fn auto_select_room(chat: ChatContext, selected_room: RwSignal<Option<EntityId>>) -> impl Fn() + 'static {
     move || {
         if selected_room.get().is_some() {
             return;
         }
 
-        let items = ankurah_chat_leptos::chat().rooms().map(|q| q.get()).unwrap_or_default();
+        let items = chat.rooms().map(|q| q.get()).unwrap_or_default();
         if items.is_empty() {
             return;
         }
@@ -78,7 +78,9 @@ pub fn Sidebar(
     /// Which correspondent's conversation is open, by id.
     selected_dm: RwSignal<Option<EntityId>>,
 ) -> impl IntoView {
-    Effect::new(auto_select_room(selected_room));
+    // Resolved in the body and handed to the effect, so nothing looks the
+    // handshake up from a context that may not have an owner.
+    Effect::new(auto_select_room(ankurah_chat_leptos::chat(), selected_room));
     Effect::new(sync_url_with_room(selected_room));
 
     // A room stays selected in app state while a conversation is open, so

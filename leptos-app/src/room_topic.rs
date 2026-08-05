@@ -19,12 +19,18 @@ use crate::{can_moderate, ctx, current_user_id};
 
 #[component]
 pub fn RoomTopic(room_id: RwSignal<Option<EntityId>>) -> impl IntoView {
+    // Taken HERE, in the body. The derived signal below is read from click
+    // handlers — start_edit walks can_edit walks room — and a DOM event has no
+    // reactive owner for the handshake to resolve through. Resolving it inside
+    // the closure would panic on the first click.
+    let chat = ankurah_chat_leptos::chat();
+
     // The row behind the id, from the chat handshake's rooms query — the same
     // rows the selector lists, so the topic here and the name there can never
     // be one refresh apart.
     let room = Signal::derive(move || {
         let id = room_id.get()?;
-        ankurah_chat_leptos::chat().rooms()?.get().into_iter().find(|r| r.id() == id)
+        chat.rooms()?.get().into_iter().find(|r| r.id() == id)
     });
     let editing = RwSignal::new(false);
     let draft = RwSignal::new(String::new());
