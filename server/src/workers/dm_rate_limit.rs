@@ -401,23 +401,23 @@ impl Limiter {
     /// this stops is that move being free: everything accumulated about the
     /// thread described a conversation between the OLD pair, and none of it is
     /// true of the new one. So the facts go — the newly named member has never
-    /// answered, whatever the old correspondent did — and the previous pair
-    /// gives back the row. The message being observed then re-establishes the
-    /// thread from scratch, which charges its sender an initiation with the new
-    /// correspondent, dated now, instead of inheriting a conversation opened
-    /// long ago and answered.
-    fn reseat(&mut self, thread: EntityId, previous_participants: Pair) {
-        self.threads.remove(&thread);
-        let previous = canonical_pair(previous_participants.0, previous_participants.1);
-        for by_pair in self.initiations.values_mut() {
-            if let Some(rows) = by_pair.get_mut(&previous) {
-                rows.remove(&thread);
-                if rows.is_empty() {
-                    by_pair.remove(&previous);
-                }
-            }
-        }
-    }
+    /// answered, whatever the old correspondent did — and the message being
+    /// observed re-establishes the thread from scratch, which charges its sender
+    /// an initiation with the new correspondent, dated now, instead of
+    /// inheriting a conversation opened long ago and answered.
+    ///
+    /// THE OLD PAIR KEEPS ITS INITIATION. The sender really did start a
+    /// conversation with the previous correspondent, and the row changing hands
+    /// does not unmake that — the limit counts conversations the sender STARTED
+    /// and started inside the window, which is what this worker's module doc
+    /// says it counts. Handing that entry back made the entire move free: open
+    /// five conversations with five strangers this hour, rewrite one of those
+    /// rows onto a sixth, and the withdrawal plus the re-observation netted to
+    /// five, so the message went through and the sixth stranger was notified.
+    /// Repeat for a seventh and an eighth: one thread row walked through
+    /// correspondent after correspondent at no initiation cost, bounded only by
+    /// the unanswered-monologue limit four times further up.
+    fn reseat(&mut self, thread: EntityId) { self.threads.remove(&thread); }
 }
 
 /// Everything the worker carries between messages: the counting state, and
@@ -596,12 +596,12 @@ async fn thread_participants(ctx: &Context, state: &mut State, thread: EntityId)
     };
     let pair = (a.id(), b.id());
     let reseated =
-        state.thread_pairs.insert(thread, pair).filter(|was| canonical_pair(was.0, was.1) != canonical_pair(pair.0, pair.1));
-    if let Some(previous) = reseated {
+        state.thread_pairs.insert(thread, pair).is_some_and(|was| canonical_pair(was.0, was.1) != canonical_pair(pair.0, pair.1));
+    if reseated {
         // Ids only, and only the thread's: the mod log's rule applies to the
         // server log too.
         warn!(thread = %thread, "DM rate limit: this thread now names a different pair; counting it as a new conversation");
-        state.limiter.reseat(thread, previous);
+        state.limiter.reseat(thread);
     }
     Some(pair)
 }
@@ -869,7 +869,7 @@ mod tests {
         // Today the sender rewrites five of those threads onto five new people
         // and writes into each. Each one is a conversation started today.
         for (i, thread) in threads.iter().enumerate().take(MAX_INITIATIONS_PER_WINDOW) {
-            limiter.reseat(*thread, pair(sender, originals[i]));
+            limiter.reseat(*thread);
             assert_eq!(
                 limiter.observe(EntityId::new(), *thread, pair(sender, newcomers[i]), sender, now, now),
                 Verdict::Allow,
@@ -878,11 +878,53 @@ mod tests {
         }
 
         let last = MAX_INITIATIONS_PER_WINDOW;
-        limiter.reseat(threads[last], pair(sender, originals[last]));
+        limiter.reseat(threads[last]);
         assert_eq!(
             limiter.observe(EntityId::new(), threads[last], pair(sender, newcomers[last]), sender, now, now),
             Verdict::TooManyInitiations { initiations: MAX_INITIATIONS_PER_WINDOW + 1 },
             "five reseated threads are five conversations started today, so the sixth is over the limit"
+        );
+    }
+
+    /// The boundary the previous test cannot reach, because every conversation
+    /// in it was opened weeks ago and had already aged out of the window: a
+    /// thread changing hands does not give the sender back what they spent
+    /// starting the conversation it used to be.
+    ///
+    /// The sender opens five conversations with five strangers this hour, which
+    /// is the whole budget, then rewrites one of those rows onto a sixth
+    /// stranger and writes into it. That is a sixth conversation started inside
+    /// the same hour and the message into it is tombstoned. While `reseat`
+    /// withdrew the old pair's entry, the re-observation put the new pair's
+    /// entry in its place and the count never moved: the message went through,
+    /// the sixth stranger was notified, and the same row could be walked through
+    /// correspondent after correspondent at no cost — the initiation limit
+    /// replaced, in practice, by the unanswered-monologue one four times further
+    /// up.
+    #[test]
+    fn reseating_a_thread_opened_this_hour_does_not_refund_its_initiation() {
+        let mut limiter = Limiter::default();
+        let sender = EntityId::new();
+        let newcomer = EntityId::new();
+        let now = 1_700_000_000_000;
+        let threads = ids(MAX_INITIATIONS_PER_WINDOW);
+        let strangers = ids(MAX_INITIATIONS_PER_WINDOW);
+
+        // The whole budget, spent within the hour.
+        for (i, thread) in threads.iter().enumerate() {
+            assert_eq!(
+                limiter.observe(EntityId::new(), *thread, pair(sender, strangers[i]), sender, now, now),
+                Verdict::Allow,
+                "opening conversation {i}"
+            );
+        }
+
+        // One of those rows is rewritten onto someone who was never in it.
+        limiter.reseat(threads[0]);
+        assert_eq!(
+            limiter.observe(EntityId::new(), threads[0], pair(sender, newcomer), sender, now + 1, now + 1),
+            Verdict::TooManyInitiations { initiations: MAX_INITIATIONS_PER_WINDOW + 1 },
+            "a sixth correspondent inside the window is a sixth conversation, whatever thread row carried the sender there"
         );
     }
 
