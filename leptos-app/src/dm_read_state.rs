@@ -59,9 +59,9 @@ fn now_ms() -> i64 { js_sys::Date::now() as i64 }
 /// the next recompute. It also could not reach the ordering at all — the
 /// window query below sorts by `timestamp` inside the query.
 ///
-/// Between a future-dated message arriving and the server healing it, this
+/// Between a future-dated message arriving and the server settling it, this
 /// client renders the claimed value. That transient is the accepted cost of
-/// the server owning the number; see the sibling worker's module doc.
+/// the server owning the number; see that worker's module doc.
 fn stamp_of(message: &DmMessageView) -> Option<i64> { message.timestamp().ok() }
 
 #[derive(Clone)]

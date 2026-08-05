@@ -18,10 +18,12 @@
 //! 3. an open thread view re-resolves itself whenever the thread set changes
 //!    ([`converge_selection`]), so a client that opened the twin during the race
 //!    window slides onto the winner without the reader noticing;
-//! 4. and every view that READS a conversation reads all of the pair's rows,
-//!    not just the winner ([`Conversation`], [`pair_rows`]) — the twin keeps
-//!    whatever landed in it during the race, and agreeing on where to write
-//!    next must not make what was already written unreachable.
+//! 4. and every view that READS a conversation reads the pair's rows, not just
+//!    the winner ([`Conversation`], [`pair_rows`]) — the twin keeps whatever
+//!    landed in it during the race, and agreeing on where to write next must
+//!    not make what was already written unreachable. "The pair's rows" means
+//!    its lowest [`MAX_ROWS_PER_PAIR`], because the count is otherwise a
+//!    number the other participant chooses.
 //!
 //! `server/tests/dm_policy_live_tests.rs` pins the convergence at the storage
 //! level against the same `canonical_thread` this module calls.
@@ -45,9 +47,26 @@ pub fn threads_query() -> LiveQuery<DmThreadView> {
     ctx().query::<DmThreadView>("deleted = false").expect("failed to create DmThreadView LiveQuery")
 }
 
+/// How many rows of one pair a view reads across.
+///
+/// The rows past the first are the losers of a first-DM race — at most one per
+/// client that happened to be open at that instant, so a handful is already
+/// generous. The cap is here because nothing else bounds the number: the
+/// `dmthread` write scope lets either participant create as many rows naming
+/// the two of them as they like, and every row a view reads costs a term in the
+/// timeline's predicate ([`crate::dm_chat`]) and a read-cursor write each time
+/// the reader reaches the tail. Both would otherwise be sized by a number the
+/// other member picks.
+///
+/// Taking the LOWEST ids is what makes the cap safe: find-or-create and
+/// [`converge_selection`] both settle on the lowest row for the pair, so the
+/// row anyone actually writes into is always inside it, whether the extra rows
+/// were made before that row or after it.
+const MAX_ROWS_PER_PAIR: usize = 8;
+
 /// One conversation per correspondent, as the UI has to treat it: the row
 /// every reader agrees to call THE thread for that pair, plus every row the
-/// pair has.
+/// pair has, up to [`MAX_ROWS_PER_PAIR`].
 ///
 /// The extra rows are the losers of a first-DM race, and they are not inert.
 /// Whoever wrote into one before the race resolved left their message THERE,
@@ -81,7 +100,7 @@ pub fn conversations(threads: &[DmThreadView]) -> Vec<Conversation> {
         .filter_map(|mut rows| {
             rows.sort_by_key(|t| t.id());
             let canonical = rows.first()?.clone();
-            Some(Conversation { canonical, rows: rows.iter().map(|t| t.id()).collect() })
+            Some(Conversation { canonical, rows: rows.iter().take(MAX_ROWS_PER_PAIR).map(|t| t.id()).collect() })
         })
         .collect();
     // Stable order for the caller to re-sort; ids are ULIDs, so this is
@@ -90,7 +109,8 @@ pub fn conversations(threads: &[DmThreadView]) -> Vec<Conversation> {
     conversations
 }
 
-/// Every thread row belonging to the same pair as `thread`, including it.
+/// The thread rows belonging to the same pair as `thread`, including it — the
+/// lowest [`MAX_ROWS_PER_PAIR`] of them.
 ///
 /// What it is for: any view opened on one row of a raced pair has to read the
 /// whole pair, or the messages that landed in the other row are unreachable
@@ -106,11 +126,13 @@ pub fn pair_rows(threads: &[DmThreadView], thread: &DmThreadView) -> Vec<EntityI
         })
         .map(|t| t.id())
         .collect();
+    rows.sort();
+    rows.truncate(MAX_ROWS_PER_PAIR);
     if !rows.contains(&thread.id()) {
         // The live thread set has not caught up with the open selection yet.
         rows.push(thread.id());
+        rows.sort();
     }
-    rows.sort();
     rows
 }
 
