@@ -15,6 +15,12 @@
 //! wrong: the delivered cache below answers for a message already handled and
 //! returns before the probe runs at all.
 //!
+//! "Every row" holds with no exception for failure. When a settling write fails,
+//! the stage upstream keeps that row from this worker entirely and lets it
+//! arrive on its next change or on the next boot sweep instead. So what a
+//! failure costs here is a notification that comes late — never one stamped
+//! against a send time that then moved under it.
+//!
 //! THE RULE THAT MAKES THIS A SEPARATE WORKER RATHER THAN A BRANCH IN
 //! `mentions.rs`: **DM text is never scanned for mentions.** A third party
 //! named inside a private thread cannot read that thread — the `dm_message`

@@ -93,7 +93,11 @@ pub fn start(ctx: Context) {
 /// notification dated earlier than the message it announced, and nothing
 /// afterwards repaired that row (see `dm_timestamp`'s module doc for the
 /// duplicate unread notification it produced on the next restart). Settling
-/// first removes the window instead of converging out of it.
+/// first removes the window instead of converging out of it — and when a settle
+/// fails, the stage withholds that row from the fan-out rather than announcing
+/// something it could not make honest. The limiter is told about it either way;
+/// that is the one place a DM consumer can still see an unsettled send time, and
+/// its own ceiling under the server clock is what covers it.
 ///
 /// It is a SEPARATE query and a separate pipeline on purpose, not a branch
 /// inside the room-message one. The mention fan-out must never run on DM
@@ -182,16 +186,22 @@ async fn watch_dms(ctx: Context) -> Result<()> {
     // enter the window twice, once at each value. Doing it inline is nearly
     // free — a row already at or before the server clock costs one field read
     // and no write, which is every row after the first boot that sees it.
+    let mut settled: Vec<bool> = Vec::with_capacity(backlog.len());
     for msg in &backlog {
-        if let Err(e) = dm_timestamp::settle(&ctx, msg).await {
-            warn!(message = %msg.id(), "DM boot sweep: could not settle this message's timestamp; counting it as it stands: {e:#}");
+        match dm_timestamp::settle(&ctx, msg).await {
+            Ok(()) => settled.push(true),
+            Err(e) => {
+                warn!(message = %msg.id(), "DM boot sweep: could not settle this message's timestamp; counting it as it stands, and not announcing it: {e:#}");
+                settled.push(false);
+            }
         }
     }
 
-    // Same forward step the live stage uses, so both paths agree on what the
-    // two consumers are owed: settled rows, tombstones dropped.
-    for msg in &backlog {
-        dm_timestamp::forward(msg, &notify_tx, &limit_tx);
+    // Same forward step the live stage uses, so both paths agree on what the two
+    // consumers are owed: the limiter is told about every live row, the fan-out
+    // only about rows that are settled, and tombstones reach neither.
+    for (msg, settled) in backlog.iter().zip(settled) {
+        dm_timestamp::forward(msg, settled, &notify_tx, &limit_tx);
     }
     // The limiter has now seen every message that existed at startup, so its
     // picture of each thread is as complete as storage can make it. Verdicts
@@ -1107,5 +1117,53 @@ mod tests {
             .filter(|m| m.action().map(|a| a == "dm-rate-limit").unwrap_or(false))
             .collect();
         assert!(actions.is_empty(), "and it is not traffic the limiter judges");
+    }
+
+    /// A row whose send time could not be settled goes to the rate limiter and
+    /// NOT to the fan-out.
+    ///
+    /// The fan-out half is the one that matters. `settle` writes nothing at all
+    /// for a row already at or before the server clock, so a row that failed to
+    /// settle is either dated in the future or too broken to read a timestamp
+    /// off — and on the first of those the fan-out would stamp an inbox row from
+    /// its own clock against a send time still claiming next century, then never
+    /// revisit it, because its delivered cache answers for a message it has
+    /// handled. That is the duplicate-after-restart defect this lane already
+    /// fixed once, and a failed write must not be a way back into it. Waiting is
+    /// cheap: the row returns on its next change or the next boot sweep.
+    ///
+    /// The limiter half is the deliberate asymmetry. Withholding traffic from it
+    /// is the expensive mistake — an uncounted message is budget a bulk sender
+    /// did not spend — and its own ceiling under the server clock is what makes
+    /// an unsettled value cost it nothing.
+    ///
+    /// The forward step is called directly here because nothing in this test
+    /// setup can make a commit fail: the workers run on a Root context over a
+    /// local sled node, and there is no fault-injection seam to reach through.
+    /// So the decision is pinned where it is made.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_row_that_could_not_be_settled_is_counted_but_not_announced() {
+        let ctx = test_context().await;
+        let (alice, bob, thread) = a_thread_between_two_members(&ctx).await;
+        let view = ctx.get::<DmMessageView>(send_dm_at(&ctx, thread, alice, bob, now_ms()).await).await.unwrap();
+
+        let (notify_tx, mut notify_rx) = tokio::sync::mpsc::unbounded_channel::<DmMessageView>();
+        let (limit_tx, mut limit_rx) = tokio::sync::mpsc::unbounded_channel::<dm_rate_limit::Traffic>();
+
+        dm_timestamp::forward(&view, false, &notify_tx, &limit_tx);
+        assert!(notify_rx.try_recv().is_err(), "a row nobody could settle must not be announced to its recipient");
+        assert!(
+            matches!(limit_rx.try_recv(), Ok(dm_rate_limit::Traffic::Message(m)) if m.id() == view.id()),
+            "but it is still traffic, and the limiter counts it"
+        );
+
+        // And the ordinary case, so the assertions above are read as a
+        // difference rather than as an empty channel proving nothing.
+        dm_timestamp::forward(&view, true, &notify_tx, &limit_tx);
+        assert!(
+            matches!(notify_rx.try_recv(), Ok(m) if m.id() == view.id()),
+            "a settled row goes to both"
+        );
+        assert!(matches!(limit_rx.try_recv(), Ok(dm_rate_limit::Traffic::Message(m)) if m.id() == view.id()));
     }
 }

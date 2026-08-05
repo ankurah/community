@@ -62,13 +62,16 @@
 //! that boot, which is exactly what the recompute-on-read version it replaced
 //! could not say.
 //!
-//! EVERY OTHER DM CONSUMER IS DOWNSTREAM OF THIS ONE. `workers::watch_dms` does
-//! not fan the DM stream out three ways. It feeds this worker alone, and [`run`]
-//! hands each row on to the fan-out and to the rate limiter itself, after it has
-//! settled it ([`forward`]). The boot sweep is that same order written out
-//! inline: it calls [`settle`] on every backlog row and forwards the backlog
-//! only afterwards. So no server-side reader of a DM ever sees a send time that
-//! is about to change, on either path.
+//! THE FAN-OUT IS DOWNSTREAM OF THIS ONE, AND ONLY EVER SEES SETTLED ROWS.
+//! `workers::watch_dms` does not fan the DM stream out three ways. It feeds this
+//! worker alone, and [`run`] hands each row on to the fan-out and to the rate
+//! limiter itself, once it has settled it ([`forward`]). The boot sweep is that
+//! same order written out inline: it calls [`settle`] on every backlog row and
+//! forwards the backlog only afterwards. When a settle FAILS, the row still goes
+//! to the limiter — which counts by a clock it is handed and is idempotent — and
+//! is withheld from the fan-out until a later settle succeeds. So the fan-out's
+//! guarantee is absolute on both paths, with no "unless a write failed" hiding
+//! in it.
 //!
 //! That is a structural guarantee, and it replaces a convergence argument that
 //! did not hold. While the three ran in parallel, the fan-out could sample its
@@ -79,7 +82,8 @@
 //! (`dm_notify`'s delivered cache), so no stored row was ever rewritten: once
 //! the recipient read that notification and the server restarted, the restart
 //! probe found neither an unseen row nor a `created_at` at or after the message,
-//! and minted one duplicate unread row.
+//! and minted one duplicate unread row. A failed settle put the row back into
+//! exactly that state, which is why it is not forwarded there.
 //!
 //! TOMBSTONED ROWS ARE SETTLED TOO, AND GO NO FURTHER. The standing query is
 //! every `dm_message` row rather than the live ones, because a tombstone does
@@ -117,32 +121,57 @@ pub async fn run(
     info!("DM timestamp worker started (a dm_message dated after the server clock is rewritten to it, then passed on)");
     while let Some(msg) = rx.recv().await {
         let message_id = msg.id();
-        if let Err(e) = settle(&ctx, &msg).await {
-            // Forwarded anyway, on the boot sweep's terms: a row nobody could
-            // settle is still traffic, and holding it back would cost the
-            // recipient their notification over a failed write.
-            warn!(message = %message_id, "DM timestamp clamp failed (retries on the message's next change); passing the row on as it stands: {e:#}");
+        let settled = settle(&ctx, &msg).await;
+        if let Err(e) = &settled {
+            warn!(message = %message_id, "DM timestamp clamp failed (retries on the message's next change); the rate limiter is told about this row, the fan-out is not: {e:#}");
         }
-        forward(&msg, &notify_tx, &limit_tx);
+        forward(&msg, settled.is_ok(), &notify_tx, &limit_tx);
     }
     warn!("DM timestamp worker: message stream closed; exiting");
 }
 
-/// Hand one settled row to the fan-out and the rate limiter — unless it is
-/// tombstoned, which is where the widened query is narrowed back down.
+/// Hand one row to the fan-out and the rate limiter, dropping it where it should
+/// not go: tombstones go to neither, and a row whose settle failed goes to the
+/// limiter alone.
 ///
-/// A tombstoned DM notifies nobody and is history to the limiter, which is the
-/// job the old `deleted = false` predicate did before this worker needed to see
-/// tombstones at all (see the module doc). A row whose `deleted` cannot be read
-/// is dropped for the same reason it used to be: a predicate excludes rows
-/// missing the property it names, so this is the behaviour those two consumers
-/// have always had for such a row, not a new judgement about it.
-pub(super) fn forward(msg: &DmMessageView, notify_tx: &UnboundedSender<DmMessageView>, limit_tx: &UnboundedSender<Traffic>) {
+/// TOMBSTONES. A tombstoned DM notifies nobody and is history to the limiter,
+/// which is the job the old `deleted = false` predicate did before this worker
+/// needed to see tombstones at all (see the module doc). A row whose `deleted`
+/// cannot be read is dropped for the same reason it used to be: a predicate
+/// excludes rows missing the property it names, so this is the behaviour those
+/// two consumers have always had for such a row, not a new judgement about it.
+///
+/// `settled = false`, MEANING THE FAN-OUT DOES NOT GET IT. What reaches this
+/// branch is narrower than "some write failed": [`settle`] returns `Ok` WITHOUT
+/// writing anything when the claimed time is at or before the server clock, so
+/// an honest row cannot fail to settle. A row here is therefore either dated in
+/// the future — which is the one shape that hurts the fan-out, because it would
+/// stamp `created_at` from its own clock against a send time still claiming next
+/// century, and its delivered cache means nothing in the process ever revisits
+/// that row — or so broken that its `timestamp` cannot be read at all, which the
+/// fan-out cannot act on either. Both are worth waiting out. The row comes back
+/// on its next change or the next boot sweep, and the recipient is told then; a
+/// late notification for a future-dated DM is a better trade than a stored row
+/// that mints a duplicate after the next restart.
+///
+/// The limiter still gets it, because withholding traffic from the limiter is
+/// the expensive mistake: an uncounted message is budget a bulk sender did not
+/// spend. It counts by the clock it is handed and keeps its own ceiling under
+/// that clock, so an unsettled row costs it nothing, and re-observing the row
+/// later is inert.
+pub(super) fn forward(
+    msg: &DmMessageView,
+    settled: bool,
+    notify_tx: &UnboundedSender<DmMessageView>,
+    limit_tx: &UnboundedSender<Traffic>,
+) {
     match msg.deleted() {
         Ok(false) => {
             // send() fails only at process teardown: the supervisor owns each
             // receiver for the process lifetime.
-            let _ = notify_tx.send(msg.clone());
+            if settled {
+                let _ = notify_tx.send(msg.clone());
+            }
             let _ = limit_tx.send(Traffic::Message(msg.clone()));
         }
         Ok(true) => {}

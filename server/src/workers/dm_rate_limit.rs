@@ -118,14 +118,22 @@
 //! neutralized in `dm_timestamp`, the stage this worker is fed FROM: it
 //! rewrites such a timestamp to the server clock, COMMITS it, and only then
 //! passes the row on, so every reader — this one, the fan-out, and the client
-//! queries that sort inside the query — gets the same honest number, and this
-//! worker is never handed an unsettled one.
+//! queries that sort inside the query — gets the same honest number.
 //!
-//! The local `min(now)` in [`Limiter::observe`] is therefore no longer covering
-//! a window; it is kept as a property of the counting rule itself. [`Limiter`]
-//! is a plain type with its own tests and no knowledge of who feeds it, and
-//! "count a message at no later than the clock you are handed" should be true
-//! of the type rather than of one caller's pipeline. What it must not become
+//! The local `min(now)` in [`Limiter::observe`] therefore covers nothing in the
+//! ordinary case; it is kept as a property of the counting rule itself.
+//! [`Limiter`] is a plain type with its own tests and no knowledge of who feeds
+//! it, and "count a message at no later than the clock you are handed" should be
+//! true of the type rather than of one caller's pipeline.
+//!
+//! It does have one live case, though, and this worker is the only DM consumer
+//! that has one. When the settling write FAILS, `dm_timestamp` withholds that
+//! row from the fan-out — which would otherwise stamp an inbox row against a
+//! send time still claiming next century — but forwards it HERE regardless,
+//! because an uncounted message is budget a bulk sender did not spend, and that
+//! is the more expensive mistake. So this is the one path on which an unsettled
+//! send time reaches a DM consumer, and the ceiling below is what makes it cost
+//! nothing. What the ceiling must not become
 //! again is the whole defence: a clamp recomputed against the current clock
 //! moves every time it is evaluated, and the boot sweep evaluates it on every
 //! restart, which collapsed six gradually-opened future-dated threads into one
