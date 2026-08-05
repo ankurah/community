@@ -15,8 +15,8 @@ use crate::ctx;
 ///
 /// Uses one LIMIT-10 query per room (there is no cross-room "new message"
 /// stream in Ankurah). Unread *badges* are not handled here — they are
-/// persistent, derived from `ReadState` rows by `crate::read_state::
-/// ReadStateManager` (issue #13).
+/// persistent, derived from `ReadState` rows by ankurah-chat-leptos's
+/// `ReadStateManager` (issue #13).
 #[derive(Clone)]
 pub struct NotificationManager(SendWrapper<Arc<Inner>>);
 

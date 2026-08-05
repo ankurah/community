@@ -50,9 +50,13 @@
 /* Multi-tip head = live concurrency: a persistent dashed amber outline —
    outline vs wash keeps "concurrent" and "hovered" visually distinct. The
    class is put on and taken off by xray/inspect.rs, which follows each
-   visible entity's head clock. */
-.xrayOn [data-entity-id].xrayConcurrent,
-.xrayOn [data-entity-id].xrayConcurrent:hover {
+   visible entity's head clock.
+   The `[data-collection]` is not redundant. Without it this ties with the
+   components' own `.messageBubble.editing` rule, which sets a SOLID outline —
+   and the components' sheet is injected after this file loads, so a
+   collaborative edit with concurrent heads would show the wrong one. */
+.xrayOn [data-entity-id][data-collection].xrayConcurrent,
+.xrayOn [data-entity-id][data-collection].xrayConcurrent:hover {
   outline: 1.5px dashed var(--unread-bg);
   outline-offset: 2px;
 }

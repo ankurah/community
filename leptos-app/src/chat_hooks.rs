@@ -8,7 +8,11 @@
 //! - under a bubble, the unfurl card for the first link that unfurled;
 //! - inside a tombstone, who removed the message;
 //! - behind the actions menu's moderator Delete, the removal itself, with its
-//!   optional public reason and the log row that records it.
+//!   optional public reason and the log row that records it;
+//! - at the foot of that menu, x-ray's Inspect entry — which is how the
+//!   inspector stays reachable from the keyboard, since a bubble is not a tab
+//!   stop and the delegated click handler in `xray::inspect` only answers a
+//!   mouse.
 //!
 //! Two more are plain routing: clicking an author opens the profile popover,
 //! clicking an `@mention` opens the member detail panel.
@@ -19,6 +23,7 @@ use leptos::prelude::*;
 use web_sys::window;
 
 use ankurah::EntityId;
+use ankurah::View as _;
 use ankurah_chat_leptos::ChatHooks;
 use ankurah_signals::Get as AnkurahGet;
 use community_model::{LinkPreviewView, MessageView, ModAction, ModActionView};
@@ -42,7 +47,41 @@ pub fn chat_hooks(previews: Memo<HashMap<String, LinkPreviewView>>, profile: Pro
         moderator_delete: Some(Box::new(moderator_delete)),
         member_preview: Some(Box::new(move |user: EntityId, x: i32, y: i32| profile.set(Some((user, x, y))))),
         member_detail: Some(Box::new(|user: EntityId| panels().open(Surface::UserDetail(user)))),
+        menu_actions: Some(Box::new(inspect_entry)),
     }
+}
+
+/// X-ray's "Inspect" entry, offered only while the mode is on.
+///
+/// It exists for the keyboard. `xray::inspect` installs a delegated click
+/// listener over every bubble's `data-entity-id`, which serves a mouse
+/// perfectly and a keyboard not at all — a bubble is not focusable and there is
+/// nothing to tab to. The actions menu is, so the same target is reachable
+/// here. The menu mounts fresh on every open, so a non-reactive read of the
+/// mode is correct.
+fn inspect_entry(message: MessageView, close: Box<dyn Fn()>) -> AnyView {
+    if !crate::xray::state().enabled.get_untracked() {
+        return ().into_any();
+    }
+    let message_id = message.id();
+    view! {
+        <button
+            class="contextMenuItem"
+            role="menuitem"
+            on:click=move |_| {
+                crate::xray::state().open_inspector(MessageView::collection(), message_id);
+                close();
+            }
+        >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <circle cx="11" cy="11" r="7" />
+                <path d="m21 21-4.3-4.3" />
+            </svg>
+            "Inspect (X-ray)"
+        </button>
+    }
+    .into_any()
 }
 
 /// Tombstone body for a deleted message. Attribution follows the lights-on

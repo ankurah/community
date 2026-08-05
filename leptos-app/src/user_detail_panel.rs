@@ -29,6 +29,10 @@ pub fn UserDetailPanel(
     selected_dm: RwSignal<Option<community_model::DmThreadView>>,
     on_close: impl Fn() + Clone + 'static,
 ) -> impl IntoView {
+    // Opening a conversation is a write, and the chat handshake resolves only
+    // where a reactive owner exists — so take it here, not in the click below.
+    let chat = ankurah_chat_leptos::chat();
+
     // The user row, resolved once (local-first: IndexedDB, then the peer).
     // The view itself is live afterwards — display-name edits re-render.
     let user = RwSignal::new(None::<UserView>);
@@ -240,9 +244,11 @@ pub fn UserDetailPanel(
 
                 {
                     let banned = banned.clone();
+                    let chat = chat.clone();
                     move || {
+                        let chat = chat.clone();
                         (can_message && !banned())
-                            .then(|| {
+                            .then(move || {
                                 view! {
                                     <div class="userDetailActions">
                                         <button
@@ -255,7 +261,7 @@ pub fn UserDetailPanel(
                                             // Send+Sync. Same effect — the header's
                                             // on_close IS panels().close().
                                             on:click=move |_| {
-                                                crate::dm::open_thread_with(message_user_id, selected_dm);
+                                                crate::dm::open_thread_with(&chat, message_user_id, selected_dm);
                                                 crate::panels::panels().close();
                                             }
                                         >

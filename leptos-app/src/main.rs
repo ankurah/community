@@ -2,8 +2,8 @@ use leptos::prelude::*;
 
 use std::collections::HashMap;
 
-use ankurah::{Context, EntityId, Node};
-use ankurah_chat_leptos::{ChatContext, DmReadStateManager, DmThread, ReadStateManager, RoomLog};
+use ankurah::{Context, EntityId, LiveQuery, Node};
+use ankurah_chat_leptos::{ChatContext, DmConversation, DmReadStateManager, ReadStateManager, RoomLog};
 use ankurah_jwt_auth::{parse_claims_unverified, JwtAgent, JwtContext};
 use ankurah_signals::{CurrentObserver, Get as AnkurahGet, ReactiveGraphObserver};
 use ankurah_storage_indexeddb_wasm::IndexedDBStorageEngine;
@@ -308,15 +308,43 @@ pub fn ChatApp() -> impl IntoView {
     // take an open popover with it.
     let profile = RwSignal::new(None::<(EntityId, i32, i32)>);
 
-    // Link previews: one standing LiveQuery for every timeline, grouped by
+    // UI-local state for selected room (Leptos signal, not Ankurah).
+    let selected_room = RwSignal::new(None::<RoomView>);
+
+    // UI-local state for current user (Leptos signal).
+    let current_user = RwSignal::new(None::<UserView>);
+
+    // Direct messages: which conversation is open, if any. Declared here
+    // because the link-preview query below is scoped by it; the thread set and
+    // the cursors follow further down.
+    let selected_dm = RwSignal::new(None::<community_model::DmThreadView>);
+
+    // Link previews: ONE standing LiveQuery for the room timeline, grouped by
     // url. `LinkPreview` rows are keyed by url with no room ref, and a query
     // per row would churn with the virtual scroller. `ok = false` rows are
     // excluded — a failed unfurl renders as the plain link that is already in
     // the bubble. The chat components render this into the slot they leave
     // under each bubble; see chat_hooks.
-    let link_previews = ctx().query::<LinkPreviewView>("ok = true").expect("failed to create LinkPreviewView LiveQuery");
-    let previews_by_url = Memo::new(move |_| {
-        link_previews.get().into_iter().filter_map(|p| p.url().ok().map(|u| (u, p))).collect::<HashMap<String, LinkPreviewView>>()
+    //
+    // Created on first sight of a room timeline rather than at mount, and kept
+    // afterwards: only room rows have a preview slot, so a reader who spends
+    // their visit in conversations never opens this subscription at all. A
+    // failure logs and leaves the map empty — a message without its unfurl card
+    // still reads, and the plain link is right there in the bubble.
+    let link_previews = RwSignal::new(None::<SendWrapper<LiveQuery<LinkPreviewView>>>);
+    Effect::new(move |_| {
+        let looking_at_a_room = selected_dm.get().is_none() && selected_room.get().is_some();
+        if !looking_at_a_room || link_previews.get_untracked().is_some() {
+            return;
+        }
+        match ctx().query::<LinkPreviewView>("ok = true") {
+            Ok(query) => link_previews.set(Some(SendWrapper::new(query))),
+            Err(e) => tracing::error!("Failed to create the link-preview LiveQuery: {:?}", e),
+        }
+    });
+    let previews_by_url = Memo::new(move |_| match link_previews.get() {
+        Some(query) => query.get().into_iter().filter_map(|p| p.url().ok().map(|u| (u, p))).collect(),
+        None => HashMap::<String, LinkPreviewView>::new(),
     });
 
     // The handshake the chat components read everything host-shaped through.
@@ -333,12 +361,6 @@ pub fn ChatApp() -> impl IntoView {
 
     // Build the rooms LiveQuery from the global authenticated context.
     let rooms = ctx().query::<RoomView>("true ORDER BY name ASC").expect("failed to create RoomView LiveQuery");
-
-    // UI-local state for selected room (Leptos signal, not Ankurah).
-    let selected_room = RwSignal::new(None::<RoomView>);
-
-    // UI-local state for current user (Leptos signal).
-    let current_user = RwSignal::new(None::<UserView>);
 
     // Load the signed-in user (the server upserted it before minting our token;
     // the JWT `sub` is that User entity's id).
@@ -367,7 +389,7 @@ pub fn ChatApp() -> impl IntoView {
     });
 
     // Persistent per-room read cursors + unread badges (#13).
-    let read_state = ReadStateManager::new(rooms.clone(), current_user_id());
+    let read_state = ReadStateManager::new(ctx(), rooms.clone(), current_user_id());
 
     // Direct messages (#30). The thread query is self-shaping: the dm_thread
     // read scope (`a = $jwt.sub OR b = $jwt.sub`) means this returns exactly
@@ -375,9 +397,8 @@ pub fn ChatApp() -> impl IntoView {
     // pointed at the canonical row for its pair, so a concurrent first-DM race
     // resolves itself under the reader rather than forking the conversation.
     let dm_threads = dm::threads_query();
-    let selected_dm = RwSignal::new(None::<community_model::DmThreadView>);
     dm::converge_selection(dm_threads.clone(), selected_dm);
-    let dm_read_state = DmReadStateManager::new(dm_threads.clone(), current_user_id());
+    let dm_read_state = DmReadStateManager::new(ctx(), dm_threads.clone(), current_user_id());
 
     // One app-lifetime users query, shared by the room timeline, the DM
     // timeline and the DM sidebar. Owned here because the two timelines
@@ -422,7 +443,7 @@ pub fn ChatApp() -> impl IntoView {
                     move || {
                         if selected_dm.get().is_some() {
                             view! {
-                                <DmThread
+                                <DmConversation
                                     thread=selected_dm
                                     threads=dm_threads.clone()
                                     current_user=current_user

@@ -316,6 +316,9 @@ fn NotificationRow(
 ) -> impl IntoView {
     let actor_id = notification.actor().ok().flatten().map(|a| a.id().to_base64());
     let hue = fmt::hue_class(actor_id.as_deref().unwrap_or(""));
+    // Opening a conversation is a write, and the chat handshake resolves only
+    // where a reactive owner exists — so take it here, not in the click below.
+    let chat = ankurah_chat_leptos::chat();
 
     // Reactive: names update live as members rename themselves.
     let actor_id_for_name = actor_id.clone();
@@ -365,7 +368,7 @@ fn NotificationRow(
         // conversation, which is what the notification was about.
         if notification_for_click.kind().unwrap_or_default() == "dm" {
             if let Ok(Some(actor)) = notification_for_click.actor() {
-                crate::dm::open_thread_with(actor.id(), selected_dm);
+                crate::dm::open_thread_with(&chat, actor.id(), selected_dm);
                 on_close();
             }
             return;
