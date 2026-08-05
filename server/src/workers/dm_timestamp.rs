@@ -33,11 +33,11 @@
 //! so `timestamp` is reachable exactly as `deleted` is.
 //!
 //! ONLY DOWNWARD, AND THEREFORE ONLY ONCE. A timestamp at or before the server
-//! clock is left alone; a later one is rewritten to the server clock. A healed
+//! clock is left alone; a later one is rewritten to the server clock. A settled
 //! row therefore reads at most `now` forever after, so re-seeing it — the boot
 //! sweep, an edit, this worker's own write coming back as an Update — writes
 //! nothing and cannot loop. A sender who future-dates the same row again is
-//! healed again, once per write of theirs. Back-dating is untouched: it is
+//! settled again, once per write of theirs. Back-dating is untouched: it is
 //! self-defeating (a back-dated message buries itself in the recipient's
 //! history) and accepted, per the rate limiter's module doc.
 //!

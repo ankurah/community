@@ -770,7 +770,7 @@ mod tests {
     /// every restart. A private adjustment also cannot reach the two client
     /// queries that sort by `timestamp` inside the query. One stored number
     /// that stands still answers all of it, so the second half of this test —
-    /// that the healed value does not move again — carries as much weight as
+    /// that the settled value does not move again — carries as much weight as
     /// the first.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_future_dated_dm_is_rewritten_to_the_server_clock_on_the_row() {
@@ -813,7 +813,7 @@ mod tests {
         assert_eq!(
             ctx.get::<DmMessageView>(future_row).await.unwrap().timestamp().unwrap(),
             stored,
-            "the healed value stands still: seeing the row again writes nothing"
+            "the settled value stands still: seeing the row again writes nothing"
         );
     }
 

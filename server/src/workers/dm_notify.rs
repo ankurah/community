@@ -212,7 +212,7 @@ async fn thread_participants(ctx: &Context, thread: EntityId) -> Option<(EntityI
 /// brand-new unread row — announcing last month's DM again, on every restart.
 /// A row created at or after the message's own timestamp is proof that message
 /// was already delivered. This leg only holds up because the stored timestamp
-/// stands still: `dm_timestamp` clamps a future-dated row once and persists
+/// stands still: `dm_timestamp` settles a future-dated row once and persists
 /// it, so the same message answers this probe the same way on every boot.
 ///
 /// The two legs cannot be collapsed into "any row at all": that would make the

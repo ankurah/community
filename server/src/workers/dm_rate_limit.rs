@@ -110,7 +110,7 @@
 //! the fan-out, and the client queries that sort inside the query — gets the
 //! same honest number. The local `min(now)` in [`Limiter::observe`] survives
 //! only as cover for the commit-wide window before that write lands; on a
-//! healed row it does nothing. What it must not become again is the whole
+//! settled row it does nothing. What it must not become again is the whole
 //! defence: a clamp recomputed against the current clock moves every time it
 //! is evaluated, and the boot sweep evaluates it on every restart, which
 //! collapsed six gradually-opened future-dated threads into one window and
@@ -259,8 +259,8 @@ impl Limiter {
     ///
     /// `now` is the server clock: the right edge of the window, and a floor
     /// under `client_ts` for the one case that floor still has to cover — a
-    /// future-dated row seen before `dm_timestamp`'s healing write has landed.
-    /// On every healed row the floor is inert, which is the point: the number
+    /// future-dated row seen before `dm_timestamp`'s settling write has landed.
+    /// On every settled row the floor is inert, which is the point: the number
     /// this limiter counts by has to be the same number after a restart.
     pub fn observe(
         &mut self,
@@ -275,7 +275,7 @@ impl Limiter {
             return Verdict::Allow;
         }
         let pair = canonical_pair(participants.0, participants.1);
-        // Inert on a healed row (see the parameter doc); load-bearing only in
+        // Inert on a settled row (see the parameter doc); load-bearing only in
         // the window before `dm_timestamp` commits, where without it a single
         // future-dated opener would stamp its initiation past every cutoff and
         // hold one of the sender's five slots for good.
