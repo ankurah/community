@@ -6,8 +6,11 @@
 //! Architecture: a tiny always-mounted launcher pill (this module) toggles the
 //! feature. All observation machinery (query taps, connection-state log,
 //! event fetches) is created lazily on enable and dropped on disable — x-ray
-//! costs nothing while off. Sibling modules:
-//! - [`bus`]: app-side LiveQuery registry + bounded live event feed
+//! costs nothing while off. The app's live queries reach x-ray through the
+//! generic query registry (`crate::query_registry`), which x-ray attaches to
+//! at startup ([`attach`]) as one observer among however many the app wants;
+//! no component knows x-ray exists. Sibling modules:
+//! - [`bus`]: the query-registry observer + bounded live event feed
 //! - [`system_panel`]: the L2 slide-over (node / connection / queries cards)
 //! - [`feed`]: the live changeset feed card
 //! - [`inspector`]: the L1 per-entity drawer (event DAG)
@@ -22,12 +25,31 @@ pub mod inspector;
 pub mod system_panel;
 
 use leptos::prelude::*;
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use ankurah::proto::{CollectionId, EntityId};
 
 use inspector::XRayInspector;
 use system_panel::SystemPanel;
+
+/// Whether [`attach`] has already run.
+static ATTACHED: AtomicBool = AtomicBool::new(false);
+
+/// Subscribe x-ray to the queries the app's components hold. Call during
+/// startup, before mounting: the query registry retains nothing registered
+/// while no observer is attached, so a query registered before this call
+/// would never appear in the panel.
+///
+/// A second call is a no-op. Two bus observers would file every registration
+/// twice — a duplicate row in the queries card and a duplicate line in the
+/// feed for every changeset.
+pub fn attach() {
+    if ATTACHED.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    crate::query_registry::attach_observer(Arc::new(bus::BusObserver));
+}
 
 /// What the L1 inspector drawer is pointed at.
 #[derive(Clone, Debug, PartialEq)]

@@ -16,6 +16,7 @@ use community_model::{MessageView, RoomView};
 use super::bus::{bus, QuerySnapshot};
 use super::feed::FeedCard;
 use super::state;
+use crate::query_registry::{QueryRegistration, RegisteredQuery};
 use crate::{ctx, ws_client};
 
 /// How many recent messages the panel's own demo query follows. Bounded so
@@ -124,11 +125,16 @@ pub fn SystemPanel() -> impl IntoView {
     }
 }
 
-/// The panel's own registered queries, bundled as one drop guard: on drop it
-/// unregisters first (taps hold LiveQuery clones), then releases the queries
-/// themselves (dropping the last LiveQuery clone unsubscribes remotely).
+/// The panel's own queries, bundled as one drop guard. Field order is load
+/// bearing: the registrations drop first, which is what makes the bus release
+/// the `RegisteredQuery` it kept — the LiveQuery clone behind the tap lives in
+/// there — and only then do the queries themselves drop. Dropping the last
+/// clone unsubscribes remotely.
+///
+/// The panel registers through the same generic hook every other component
+/// uses; x-ray gets no private path to its own bus.
 struct PanelQueries {
-    regs: Vec<super::bus::RegistrationId>,
+    _regs: [QueryRegistration; 2],
     _messages: ankurah::LiveQuery<MessageView>,
     _rooms: ankurah::LiveQuery<RoomView>,
 }
@@ -140,19 +146,11 @@ impl PanelQueries {
             .map_err(|e| e.to_string())?;
         let rooms = ctx().query::<RoomView>("true ORDER BY name ASC").map_err(|e| e.to_string())?;
 
-        let handle = bus();
-        let reg_messages = handle.register("x-ray · recent messages", &messages);
-        let reg_rooms = handle.register("x-ray · rooms", &rooms);
-        Ok(PanelQueries { regs: vec![reg_messages, reg_rooms], _messages: messages, _rooms: rooms })
-    }
-}
-
-impl Drop for PanelQueries {
-    fn drop(&mut self) {
-        let handle = bus();
-        for reg in self.regs.drain(..) {
-            handle.unregister(reg);
-        }
+        let regs = [
+            crate::query_registry::register("x-ray · recent messages", &messages),
+            crate::query_registry::register("x-ray · rooms", &rooms),
+        ];
+        Ok(PanelQueries { _regs: regs, _messages: messages, _rooms: rooms })
     }
 }
 
@@ -347,8 +345,9 @@ fn ConnectionCard() -> impl IntoView {
 }
 
 /// Card 3: the LiveQuery registry. Honestly labeled: these are the queries
-/// this client registered with the x-ray bus, not the node's full reactor
-/// table (which is `pub(crate)` in ankurah 0.9.0 — design doc ask A4).
+/// this client's components registered with the query registry, not the
+/// node's full reactor table (which is `pub(crate)` in ankurah 0.9.0 —
+/// design doc ask A4).
 #[component]
 fn QueriesCard() -> impl IntoView {
     let handle = bus();
@@ -362,15 +361,16 @@ fn QueriesCard() -> impl IntoView {
     view! {
         <section class="xrayCard">
             <h3 class="xrayCardTitle">"Live queries"</h3>
-            <p class="xrayCardSub">"queries this client holds and registered with x-ray"</p>
+            <p class="xrayCardSub">"queries this client holds and registered with the query registry"</p>
             <Show when=move || snapshot_for_empty().is_empty()>
                 <p class="xrayStateNote">"No queries registered."</p>
             </Show>
             <For
                 each=snapshot
-                key=|q: &QuerySnapshot| q.id
+                key=|q: &QuerySnapshot| q.query.id
                 children=move |q: QuerySnapshot| {
-                    let QuerySnapshot { label, query_id, collection, selection, resultset, error, changes_seen, .. } = q;
+                    let QuerySnapshot { query, changes_seen } = q;
+                    let RegisteredQuery { label, query_id, collection, selection, resultset, error, .. } = query;
                     let resultset_len = resultset.clone();
                     let loaded = resultset;
                     let selection_text = {

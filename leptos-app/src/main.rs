@@ -42,6 +42,7 @@ mod panels;
 mod profile_popover;
 mod qr_code_modal;
 mod queries;
+mod query_registry;
 mod reactions;
 mod read_state;
 mod room_list;
@@ -153,6 +154,10 @@ async fn initialize() {
     // Install the ReactiveGraphObserver at the base of the Ankurah observer stack
     // so that Leptos components can observe Ankurah signals via reactive_graph.
     CurrentObserver::set(ReactiveGraphObserver::new());
+
+    // Community's choice of query-registry observer is x-ray. It has to be
+    // attached before any component registers a query — see `xray::attach`.
+    xray::attach();
 
     leptos::mount::mount_to_body(App);
 }
@@ -357,10 +362,15 @@ pub fn ChatApp() -> impl IntoView {
     // remount as the reader switches between them.
     let users = ctx().query::<UserView>("true").expect("failed to create UserView LiveQuery");
 
-    // App-lifetime queries surfaced in the X-ray queries card (id discarded).
-    xray::bus::bus().register("rooms (app)", &rooms);
-    xray::bus::bus().register("users (app)", &users);
-    xray::bus::bus().register("dm threads (app)", &dm_threads);
+    // App-lifetime queries, named for whatever observer the app attached.
+    // The guards are parked in the cleanup closure so they live exactly as
+    // long as ChatApp does.
+    let query_regs = [
+        query_registry::register("rooms (app)", &rooms),
+        query_registry::register("users (app)", &users),
+        query_registry::register("dm threads (app)", &dm_threads),
+    ];
+    on_cleanup(move || drop(query_regs));
 
     view! {
         <xray::XRayLauncher />

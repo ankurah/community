@@ -29,17 +29,13 @@ pub fn MembersPanel(on_close: impl Fn() + Clone + 'static) -> impl IntoView {
     // holding the lowercase role keys minted into their latest session token.
     let user_roles = ctx().query::<UserRolesView>("true").expect("failed to create UserRolesView LiveQuery");
 
-    // Surface the panel's queries in the X-ray queries card for as long as
-    // the panel is open (transient registrations, dropped on close).
-    let xray_regs = (
-        crate::xray::bus::bus().register("users (members panel)", &users),
-        crate::xray::bus::bus().register("userroles (members panel)", &user_roles),
-    );
-    on_cleanup(move || {
-        let bus = crate::xray::bus::bus();
-        bus.unregister(xray_regs.0);
-        bus.unregister(xray_regs.1);
-    });
+    // Name the panel's queries for the app's query-registry observer for as
+    // long as the panel is open (transient registrations, dropped on close).
+    let query_regs = [
+        crate::query_registry::register("users (members panel)", &users),
+        crate::query_registry::register("userroles (members panel)", &user_roles),
+    ];
+    on_cleanup(move || drop(query_regs));
 
     // Active bans, live. What this returns depends on who asks — moderators
     // get every row (their `moderate` privilege bypasses the read scope),
