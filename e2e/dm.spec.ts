@@ -135,8 +135,10 @@ test.describe.skip('Direct messages (#30)', () => {
     // canonical.
     //
     // WHAT WOULD PIN IT, for whoever rewrites these against OIDC (issue #1):
-    // count the pair's `dmthread` rows and assert every message hangs off the
-    // lowest id — either by querying the store from the page, or by putting the
+    // count the pair's `dmthread` rows and assert the SETTLED messages — the
+    // ones sent after both tabs see each other — hang off the lowest id
+    // (messages sent during the race window may legitimately remain on a twin;
+    // resolution is per send). Either query the store from the page, or put the
     // thread ref on the row's DOM (a `data-thread-id` beside `data-msg-id`)
     // so a locator can see it. Until then, canonical write routing is pinned by
     // the server-side convergence tests and by reading the code, not by this.
