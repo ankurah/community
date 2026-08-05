@@ -43,6 +43,45 @@ use crate::{ctx, queries};
 /// This client's clock, in the project's ms-since-epoch unit.
 fn now_ms() -> i64 { js_sys::Date::now() as i64 }
 
+/// The newest instant a read cursor in one thread can honestly stand at: this
+/// client's own clock, or the newest send time that thread itself shows,
+/// whichever is later.
+///
+/// Both halves are load-bearing, and in opposite directions.
+///
+/// THE CLOCK ALONE IS NOT THE CEILING, which is what it used to be. A cursor
+/// holds the timestamp of a message, and a message's timestamp is the SERVER's
+/// clock — the server settles it and stores it (see [`stamp_of`]). So a reader
+/// whose browser runs five minutes slow, reading the tail of a thread, had
+/// their cursor pinned at their own now while every message they had just read
+/// stamped later than it: the badge relit immediately, and no later read could
+/// walk the cursor forward, because each one pinned it again.
+///
+/// THE THREAD'S NEWEST MESSAGE ALONE IS NOT THE CEILING EITHER. A conversation
+/// spread over the twin rows of a first-DM race gets ONE cursor written across
+/// every one of its rows (`crate::dm_chat`), so a twin legitimately holds a
+/// cursor newer than anything in that row. Hold it down to its own newest
+/// message and the sidebar's badge starts counting messages the reader read in
+/// the other row.
+///
+/// What the pair of them still refuses is a cursor with nothing behind it: a
+/// message its sender dated in 2100, read in the moment before the server
+/// settles it (`server/src/workers/dm_timestamp.rs`), would otherwise leave a
+/// cursor no real message can ever pass, silencing the thread for good. Such a
+/// cursor is justified only while the message it came from still shows 2100 —
+/// the instant the settling write arrives this drops back to the clock, and
+/// [`DmReadStateManager::recompute_thread`] walks the cursor back with it.
+///
+/// Walking one back lands it HERE rather than on the thread's newest message,
+/// and that is what keeps the repair from fighting the next read: a cursor set
+/// from a settled message can never exceed this, so nothing re-raises it and
+/// nothing writes the row twice. The cost, stated because it is a choice: on a
+/// client whose clock runs ahead, a walked-back cursor sits that far ahead of
+/// real time, so a message arriving in the minutes after the repair counts as
+/// read. It applies only to a thread someone has aimed a future-dated message
+/// at, and it expires as the clock catches up.
+fn ceiling(newest_in_thread: i64) -> i64 { now_ms().max(newest_in_thread) }
+
 /// A message's timestamp as the badges and the sidebar order use it: exactly
 /// as stored, with no adjustment here.
 ///
@@ -61,7 +100,10 @@ fn now_ms() -> i64 { js_sys::Date::now() as i64 }
 ///
 /// Between a future-dated message arriving and the server settling it, this
 /// client renders the claimed value. That transient is the accepted cost of
-/// the server owning the number; see that worker's module doc.
+/// the server owning the number; see that worker's module doc. What must not
+/// outlive it is a read cursor set from the claimed value, and
+/// [`DmReadStateManager::recompute_thread`] walks one back when the settled
+/// value arrives.
 fn stamp_of(message: &DmMessageView) -> Option<i64> { message.timestamp().ok() }
 
 #[derive(Clone)]
@@ -71,10 +113,13 @@ struct Inner {
     user_id: EntityId,
     /// The viewer's own DmReadState rows, live.
     cursors: LiveQuery<DmReadStateView>,
-    /// thread id (base64) → effective read cursor (server rows merged with
-    /// optimistic local advances; always the max of the two).
+    /// thread id (base64) → effective read cursor: persisted rows and this
+    /// session's own advances, merged by taking the later of the two, then held
+    /// down to what the thread's messages justify (see [`ceiling`]).
     last_read: Mut<HashMap<String, i64>>,
-    /// thread id → newest cursor value confirmed written to a row.
+    /// thread id → newest cursor value confirmed written to a row. Comes back
+    /// down with the cursor when one is walked back, so `flush` is never told a
+    /// row holds something the cursor no longer claims.
     flushed: Mutex<HashMap<String, i64>>,
     /// Threads with an upsert in flight (coalesces write bursts).
     in_flight: Mutex<HashSet<String>>,
@@ -180,17 +225,24 @@ impl DmReadStateManager {
     /// ordering. Zero for a thread with no messages in its window.
     pub fn newest_ts(&self, thread_id: &str) -> i64 { self.0.newest.get().get(thread_id).copied().unwrap_or(0) }
 
-    /// Record that the viewer has seen this thread up to `ts`. No-ops unless
-    /// the cursor advances; otherwise the local map updates immediately
+    /// Record that the viewer has seen this thread up to `ts` — the stamp of
+    /// the newest message they actually read, stored as it stands. No-ops
+    /// unless the cursor advances; otherwise the local map updates immediately
     /// (badges clear instantly) and a row upsert is flushed in the background.
+    ///
+    /// This client's clock is not consulted. `ts` is a message timestamp, and
+    /// so is everything the cursor is ever compared against
+    /// ([`Self::recompute_thread`]) — both of them the server's number, not this
+    /// browser's. Pinning the cursor to the reader's own clock, which is what
+    /// this used to do, meant a browser running minutes behind the server stored
+    /// a cursor OLDER than the messages it was meant to cover and relit the
+    /// badge for every one of them.
+    ///
+    /// The ceiling that stops a cursor running away has not gone; it lives in
+    /// `recompute_thread`, called on the next line and again on every change to
+    /// the thread's window, which is where the thread's own messages are in hand
+    /// to judge against (see [`ceiling`]).
     pub fn mark_read(&self, thread_id: &str, ts: i64) {
-        // Never let a cursor run past now. `ts` comes from a message, and the
-        // server settles a future-dated message's timestamp on the row — but
-        // this client can be looking at one in the window before that write
-        // lands, and a cursor parked in 2100 outlives the window: it silences
-        // the thread's badge for every real message after it, and `mark_read`
-        // only ever advances, so nothing here could walk it back.
-        let ts = ts.min(now_ms());
         let inner: &Arc<Inner> = &self.0;
         {
             let cursors = inner.last_read.peek();
@@ -214,50 +266,48 @@ impl DmReadStateManager {
         });
     }
 
-    /// Fold the viewer's persisted cursor rows into the local map, repairing
-    /// any that are dated in the future on the way through.
+    /// Fold the viewer's persisted cursor rows into the local map.
     ///
-    /// A cursor ahead of now silences a thread's badge completely — every
-    /// message stamps at most today, so nothing is ever newer than the cursor —
-    /// and `mark_read` cannot undo it, because `mark_read` only ever advances.
-    /// Clamping what is read here fixes this session and nothing else: the row
-    /// still says 2100, and the next session starts from the same bad number.
-    /// So the clamped value is written back as well. Nobody else can write this
-    /// row — `dmreadstate`'s scope is `user = $jwt.sub` — so if the owner's
-    /// client does not correct it, nothing will.
+    /// Persisted rows and this session's own advances are merged by taking the
+    /// later of the two, because either can be ahead of the other: a row written
+    /// on the viewer's other device, or a `mark_read` here whose write has not
+    /// landed yet.
+    ///
+    /// NO CEILING IS APPLIED HERE, deliberately, and this is the function it was
+    /// taken out of. Judging a stored cursor needs the thread's own messages to
+    /// judge against ([`ceiling`]), and this function has none: it runs from the
+    /// cursor subscription, which at startup fires before any thread window has
+    /// delivered a message, so the only ceiling available to it would be the
+    /// reader's clock — which is exactly the comparison that relit every badge
+    /// on a slow machine. [`Self::recompute_thread`] holds the cursors down
+    /// instead; the subscription that calls this calls it for every thread
+    /// immediately afterwards, so a stored value that cannot be justified is
+    /// walked back before it is ever counted with.
     fn rebuild_cursors(inner: &Arc<Inner>) {
-        let now = now_ms();
         let mut cursors = inner.last_read.peek().clone();
         let mut flushed = inner.flushed.lock().unwrap();
-        let mut dated_ahead: Vec<DmReadStateView> = Vec::new();
         for row in inner.cursors.peek() {
             let (Ok(thread), Ok(stored)) = (row.thread(), row.last_read_ts()) else { continue };
-            if stored > now {
-                dated_ahead.push(row.clone());
-            }
-            let ts = stored.min(now);
             let key = thread.id().to_base64();
             let entry = cursors.entry(key.clone()).or_insert(0);
-            *entry = (*entry).max(ts);
+            *entry = (*entry).max(stored);
             // The watermark is what stops `flush` rewriting a row it has
-            // already written, so it takes the clamped value too: parked in the
-            // future it would tell `flush` there is nothing left to write.
+            // already written.
             let watermark = flushed.entry(key).or_insert(0);
-            *watermark = (*watermark).max(ts);
+            *watermark = (*watermark).max(stored);
         }
         drop(flushed);
         inner.last_read.set(cursors);
-        for row in dated_ahead {
-            Self::heal_cursor(inner, row, now);
-        }
     }
 
-    /// Write today's date over a cursor row dated in the future.
+    /// Write the ceiling over a cursor row that has run past it.
     ///
     /// One repair per row at a time: the repair commits, the cursors LiveQuery
     /// delivers the change, and this function runs again on a row that now
-    /// reads at most now — so the guard is what keeps the burst between those
-    /// two moments from becoming a write per changeset.
+    /// reads at most the ceiling — so the guard is what keeps the burst between
+    /// those two moments from becoming a write per changeset. Nobody else can
+    /// write this row — `dmreadstate`'s scope is `user = $jwt.sub` — so if the
+    /// owner's client does not correct it, nothing will.
     fn heal_cursor(inner: &Arc<Inner>, row: DmReadStateView, ts: i64) {
         let row_id = row.id();
         if !inner.healing.lock().unwrap().insert(row_id) {
@@ -266,7 +316,7 @@ impl DmReadStateManager {
         let inner = Arc::clone(inner);
         spawn_local(async move {
             if let Err(e) = write_cursor(&row, ts).await {
-                tracing::error!("Failed to repair a DM read cursor dated in the future ({}): {}", row_id.to_base64(), e);
+                tracing::error!("Failed to repair a DM read cursor that had run past its thread ({}): {}", row_id.to_base64(), e);
             }
             inner.healing.lock().unwrap().remove(&row_id);
         });
@@ -301,9 +351,17 @@ impl DmReadStateManager {
     }
 
     /// Unread for one thread = messages in its window newer than the cursor and
-    /// authored by the other participant. Also refreshes the ordering key.
+    /// authored by the other participant. Also refreshes the ordering key — and
+    /// walks the cursor back first if it has run past what the thread can
+    /// justify, which is the one place in this file that judges a cursor at all.
     fn recompute_thread(inner: &Arc<Inner>, thread_id: &str) {
-        let Some(items) = inner.windows.lock().unwrap().get(thread_id).map(|w| w.query.peek()) else { return };
+        let Some((thread_eid, items)) = inner.windows.lock().unwrap().get(thread_id).map(|w| (w.thread_id, w.query.peek()))
+        else {
+            return;
+        };
+        let newest_ts = items.iter().filter_map(stamp_of).max().unwrap_or(0);
+        Self::hold_cursor_down(inner, thread_id, thread_eid, ceiling(newest_ts));
+
         let cursor = inner.last_read.peek().get(thread_id).copied().unwrap_or(0);
         let count = items
             .iter()
@@ -321,11 +379,54 @@ impl DmReadStateManager {
             inner.unread.set(unread);
         }
 
-        let newest_ts = items.iter().filter_map(stamp_of).max().unwrap_or(0);
         let mut newest = inner.newest.peek().clone();
         if newest.get(thread_id).copied().unwrap_or(0) != newest_ts {
             newest.insert(thread_id.to_string(), newest_ts);
             inner.newest.set(newest);
+        }
+    }
+
+    /// Walk one thread's cursor back to `ceiling` if it has run past it — in
+    /// memory, and on the row it came from.
+    ///
+    /// A cursor above the ceiling silences the thread's badge completely:
+    /// nothing that arrives afterwards is newer than it, and `mark_read` only
+    /// ever advances, so nothing else in this file could undo it. The one way to
+    /// get one is a message read in the moment before the server settled its
+    /// send time; see [`ceiling`] for why that is the only case this fires on,
+    /// and in particular why a raced pair's shared cursor is not.
+    ///
+    /// The row is repaired too, not just this session's copy, because the row is
+    /// what the next session starts from. The `healing` guard in
+    /// [`Self::heal_cursor`] is what stops the changesets between the write and
+    /// its delivery from starting a second one.
+    fn hold_cursor_down(inner: &Arc<Inner>, thread_id: &str, thread_eid: EntityId, ceiling: i64) {
+        {
+            let cursors = inner.last_read.peek();
+            if cursors.get(thread_id).copied().unwrap_or(0) <= ceiling {
+                return;
+            }
+        }
+        let mut cursors = inner.last_read.peek().clone();
+        cursors.insert(thread_id.to_string(), ceiling);
+        inner.last_read.set(cursors);
+        {
+            // The watermark comes down with the cursor. Left where it was, it
+            // would tell `flush` the row already holds something newer than
+            // anything the reader could read next — so neither this repair nor
+            // the next genuine read below the old value would ever be written.
+            let mut flushed = inner.flushed.lock().unwrap();
+            let watermark = flushed.entry(thread_id.to_string()).or_insert(0);
+            *watermark = (*watermark).min(ceiling);
+        }
+
+        // And the row, if one has been written yet. Nothing persisted means the
+        // walk-back above is already the whole repair.
+        let stored = inner.cursors.peek().into_iter().find(|r| r.thread().map(|t| t.id() == thread_eid).unwrap_or(false));
+        if let Some(row) = stored
+            && row.last_read_ts().map(|ts| ts > ceiling).unwrap_or(false)
+        {
+            Self::heal_cursor(inner, row, ceiling);
         }
     }
 
