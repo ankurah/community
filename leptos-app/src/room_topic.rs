@@ -12,12 +12,20 @@
 use leptos::prelude::*;
 use web_sys::KeyboardEvent;
 
-use community_model::RoomView;
+use ankurah::EntityId;
+use ankurah_signals::Get as AnkurahGet;
 
 use crate::{can_moderate, ctx, current_user_id};
 
 #[component]
-pub fn RoomTopic(room: RwSignal<Option<RoomView>>) -> impl IntoView {
+pub fn RoomTopic(room_id: RwSignal<Option<EntityId>>) -> impl IntoView {
+    // The row behind the id, from the chat handshake's rooms query — the same
+    // rows the selector lists, so the topic here and the name there can never
+    // be one refresh apart.
+    let room = Signal::derive(move || {
+        let id = room_id.get()?;
+        ankurah_chat_leptos::chat().rooms()?.get().into_iter().find(|r| r.id() == id)
+    });
     let editing = RwSignal::new(false);
     let draft = RwSignal::new(String::new());
 

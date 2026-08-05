@@ -26,7 +26,7 @@ pub fn UserDetailPanel(
     user_id: EntityId,
     /// The app's open-DM signal, so "Message" can open the conversation with
     /// this member (#30). Threaded from `ChatApp` through the panel host.
-    selected_dm: RwSignal<Option<community_model::DmThreadView>>,
+    selected_dm: RwSignal<Option<EntityId>>,
     on_close: impl Fn() + Clone + 'static,
 ) -> impl IntoView {
     // Opening a conversation is a write, and the chat handshake resolves only

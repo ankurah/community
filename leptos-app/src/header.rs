@@ -2,8 +2,9 @@ use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 use web_sys::window;
 
+use ankurah::EntityId;
 use ankurah_signals::Get as AnkurahGet;
-use community_model::{RoomView, UserView};
+use community_model::UserView;
 
 use crate::{
     ctx, editable_text_field::EditableTextField, fmt, members_panel::MembersPanel, mod_log_panel::ModLogPanel,
@@ -20,10 +21,10 @@ use crate::{
 #[component]
 pub fn Header(
     current_user: RwSignal<Option<UserView>>,
-    selected_room: RwSignal<Option<RoomView>>,
+    selected_room: RwSignal<Option<EntityId>>,
     /// The open DM thread, threaded through to the notification inbox so a
     /// kind="dm" row can deep-link into the conversation it announces.
-    selected_dm: RwSignal<Option<community_model::DmThreadView>>,
+    selected_dm: RwSignal<Option<EntityId>>,
 ) -> impl IntoView {
     // Escape closes the open surface — one window-level listener for every
     // surface, instead of a per-panel handler. Layering: nested dismissables
@@ -97,7 +98,7 @@ pub fn Header(
                 // in the header would caption a private conversation with an
                 // unrelated room's description.
                 <Show when=move || selected_dm.get().is_none()>
-                    <RoomTopic room=selected_room />
+                    <RoomTopic room_id=selected_room />
                 </Show>
                 <div class="headerRight">
                     <div class=move || {
