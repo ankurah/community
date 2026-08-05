@@ -22,7 +22,9 @@ issuer        = https://id.idp.to          # note: id.  (not admin.)
 discovery     = https://id.idp.to/.well-known/openid-configuration
 client_id     = app_HsW5XyYWbr0KQrHZb5iejw
 redirect_uris = https://community.ankurah.org/auth/callback
-                http://localhost:5173/auth/callback     # local dev
+                http://127.0.0.1/auth/callback          # local dev — loopback IP literals
+                                                        # match ANY port; localhost does not,
+                                                        # so browse dev via 127.0.0.1
 scopes        = openid profile email
 ```
 
@@ -92,7 +94,7 @@ Federate-and-remint is wired and deployed:
   and the token endpoint sends permissive CORS, so the in-browser exchange works.
 
 Follow-ups: dev redirect-URI mismatch (issue #4 — the trunk dev server's randomized
-port vs the registered `localhost:5173`); OIDC-aware e2e (the anonymous specs are
+port vs the registration — now the port-agnostic `127.0.0.1`); OIDC-aware e2e (the anonymous specs are
 skipped for now); policy hardening (issue #3 — e.g. scope `user` writes to self).
 
 ## Status — sign-out + robustness pass (2026-07-10, idp lane)

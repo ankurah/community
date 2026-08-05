@@ -180,3 +180,17 @@
   line-height: 1.5;
   color: var(--text-faint);
 }
+
+/* Start-DM entry (came from DirectMessages.css, which moved out with the
+ * components; this button is community's own panel chrome). */
+.userDetailMessageBtn svg {
+  width: 15px;
+  height: 15px;
+}
+
+.userDetailMessageNote {
+  margin: 8px 0 0;
+  font-size: var(--fs-xs);
+  line-height: 1.5;
+  color: var(--text-dim);
+}

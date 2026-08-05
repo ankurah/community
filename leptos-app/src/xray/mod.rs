@@ -10,6 +10,9 @@
 //! generic query registry (`crate::query_registry`), which x-ray attaches to
 //! at startup ([`attach`]) as one observer among however many the app wants;
 //! no component knows x-ray exists. Sibling modules:
+//! - [`inspect`]: the click-to-inspect handler and the concurrency outline,
+//!   installed over the `data-entity-id` attribute the chat components leave
+//!   on every message bubble
 //! - [`bus`]: the query-registry observer + bounded live event feed
 //! - [`system_panel`]: the L2 slide-over (node / connection / queries cards)
 //! - [`feed`]: the live changeset feed card
@@ -21,6 +24,7 @@ pub mod bus;
 pub mod dag;
 pub mod decode;
 pub mod feed;
+pub mod inspect;
 pub mod inspector;
 pub mod system_panel;
 
@@ -63,10 +67,10 @@ pub struct InspectTarget {
 /// be reached from anywhere — the same global-accessor style the app already
 /// uses for `ctx()` / `ws_client()`.
 ///
-/// Post-merge integration points read/write exactly these signals:
+/// Integration points read/write exactly these signals:
 /// - header toggle: `xray::state().toggle()`
-/// - message bubble head chips: `xray::state().enabled.get()`
-/// - context-menu "Inspect": `xray::state().open_inspector(collection, id)`
+/// - the click-to-inspect handler and the concurrency outline, which
+///   [`inspect`] installs over `data-entity-id` while the mode is on
 #[derive(Clone)]
 pub struct XRayState {
     /// Master switch. Persisted to `localStorage["xray"]`; `?xray=1` sets it on load.
@@ -100,11 +104,13 @@ impl XRayState {
         if on {
             bus::bus().set_tapping(true);
             bus::start_connection_log();
+            inspect::install();
         } else {
             self.inspect.set(None);
             bus::bus().set_tapping(false);
             bus::stop_connection_log();
             bus::bus().clear_history();
+            inspect::uninstall();
         }
         persist_enabled(on);
     }

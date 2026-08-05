@@ -8,6 +8,15 @@ leptos = { version = "0.8.12", features = ["csr"] }
 console_error_panic_hook = "0.1"
 ankurah = { version = "=0.9.0", features = ["derive", "wasm"] }
 community-model = { path = "../model", features = ["wasm"] }
+# The chat surfaces themselves: the room selector, the room log with its
+# timeline and composer, and the direct-message views. Community is the
+# reference embedder — it hands the components an ankurah Context and layers
+# its own chrome (header, panels, moderation, notifications, x-ray) on top.
+#
+# Pinned to the same rev as ankurah-chat-model above, and for the same reason:
+# these crates are one tree, and a components rev that disagreed with the model
+# rev would resolve two copies of the collections.
+ankurah-chat-leptos = { git = "https://github.com/ankurah/ankurah-chat", rev = "d2dd4902670852b07380fe6ca94009444e9240f2" }
 ankurah-storage-indexeddb-wasm = "=0.9.0"
 ankurah-signals = { version = "=0.9.0", features = ["reactive-graph"] }
 # JWT auth on wasm: client only calls parse_claims_unverified + JwtContext::from_claims
@@ -15,7 +24,6 @@ ankurah-signals = { version = "=0.9.0", features = ["reactive-graph"] }
 ankurah-jwt-auth = "=0.9.0"
 wasm-bindgen-futures = "=0.4.55"
 ankurah-websocket-client-wasm = "=0.9.0"
-ankurah-virtual-scroll = "0.9.0"
 web-sys = { version = "=0.3.82", features = [
     "Window", "Location", "UrlSearchParams", "Url", "History", "Element", "DomRect", "Node", "NodeList", "EventTarget", "HtmlElement", "Storage",
     "AudioContext", "AudioBuffer", "AudioBufferSourceNode", "GainNode", "AudioParam", "AudioNode",
@@ -23,14 +31,9 @@ web-sys = { version = "=0.3.82", features = [
     "Request", "RequestInit", "Headers", "RequestMode",
     # X-ray node card: raw IndexedDB entity/event counts (no ankurah storage-stats API yet).
     "Event", "IdbFactory", "IdbOpenDbRequest", "IdbRequest", "IdbDatabase", "IdbTransaction", "IdbTransactionMode", "IdbObjectStore",
-    # Multiline composer (#50): textarea autosize + caret access.
-    "HtmlTextAreaElement", "CssStyleDeclaration",
-    # Tail pinning through async row growth (chat.rs auto-scroll).
-    "ResizeObserver",
-    # Reply preview jump-to-original (#23): smooth scroll + highlight class.
-    "ScrollIntoViewOptions", "ScrollBehavior", "ScrollLogicalPosition", "DomTokenList",
-    # Emoji shortcodes (#54): isComposing guard on inline `:name:` completion.
-    "InputEvent"
+    # X-ray's own affordances over the chat components: a delegated click
+    # listener, and a MutationObserver watching for bubbles as they mount.
+    "MutationObserver", "MutationObserverInit", "MutationRecord", "DomTokenList",
 ] }
 js-sys = "=0.3.82"
 tracing-wasm = "0.2.1"
@@ -42,11 +45,6 @@ send_wrapper = "0.6.0"
 # projects resolve fresh and would otherwise pick an incompatible version.
 wasm-bindgen = "=0.2.105"
 qrcode = "0.14.1"
-# Markdown subset for message rendering (#9). Events are mapped to typed leptos
-# view nodes (never innerHTML); default features (html renderer, getopts) are
-# deliberately off — we only use the pull parser.
-pulldown-cmark = { version = "=0.13.4", default-features = false }
-
 # X-ray inspector: decode ankurah's yrs backend diffs (encode_diff_v2) into
 # "+n/−n" summaries. Pinned to the exact version ankurah-core 0.9.0 resolves
 # to (see Cargo.lock) so the graph carries a single yrs copy — no skew.

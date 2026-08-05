@@ -1,17 +1,18 @@
 //! Community's data model, in two halves.
 //!
 //! The chat half — `Message`, `Room`, `User`, `Reaction`, `ReadState`, the DM
-//! trio (`DmThread`, `DmMessage`, `DmReadState`) with their pair helpers, and
-//! the `text` scanner module behind [`parse_mentions`] / [`extract_urls`] — is
-//! defined in `ankurah-chat-model` and re-exported from here. Community shares
-//! it with every other Ankurah chat surface, so a chat panel embedded in
-//! someone else's page reads these rows through the same definitions the
+//! trio (`DmThread`, `DmMessage`, `DmReadState`) with their pair helpers, the
+//! `text` scanner module behind [`parse_mentions`] / [`extract_urls`], and the
+//! `mention_display` composer codec that mirrors that scanner's token rules —
+//! is defined in `ankurah-chat-model` and re-exported from here. Community
+//! shares it with every other Ankurah chat surface, so a chat panel embedded
+//! in someone else's page reads these rows through the same definitions the
 //! server writes them with, and neither side can drift from the other.
 //!
 //! The community half is defined below: `UserRoles`, `Ban`, `ModAction`,
 //! `Notification`, `LinkPreview`, `NotificationPref` — moderation, the
-//! notification inbox, the link-preview cache — plus the [`mention_display`]
-//! composer codec. These reference the shared types freely.
+//! notification inbox, the link-preview cache. These reference the shared
+//! types freely.
 //!
 //! The re-export is a glob on purpose. ankurah's derive emits a family of
 //! types per collection (`MessageView`, `MessageMut`, `MessageResultSet`,
@@ -21,8 +22,6 @@
 
 use ankurah::{property::Json, Model, Ref};
 use serde::{Deserialize, Serialize};
-
-pub mod mention_display;
 
 pub use ankurah_chat_model::*;
 

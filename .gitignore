@@ -44,3 +44,4 @@ yarn-error.log*
 # any local key material regardless.
 *.pem
 signing-key*
+leptos-app/Trunk.dev.toml

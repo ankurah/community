@@ -1,0 +1,112 @@
+/* Community's palette, handed to the chat components.
+ *
+ * ankurah-chat-leptos styles itself entirely from `--akchat-*` custom
+ * properties and ships neutral greys as defaults, so that a page embedding a
+ * chat panel gets something presentable without doing anything. This file is
+ * how community says "use ours instead": one declaration per token, mapping
+ * each to the design-system variable index.css already defines.
+ *
+ * WHY IT MUST BE `.ankurah-chat` AND NOT `:root`. The crate declares its
+ * defaults on the component root itself. A value inherited from an ancestor
+ * loses to any declaration on the element, whatever its specificity — so
+ * mapping these on `:root` would be inherited down and then overwritten by the
+ * crate's own defaults. Declared here on the same element, at one class
+ * against the crate's zero (it uses `:where`), community's values win.
+ *
+ * Every mapping is to the variable that stylesheet used before the components
+ * moved out, so the rendered result is what it was. */
+
+.ankurah-chat {
+  --akchat-font-sans: var(--font-sans);
+  --akchat-font-mono: var(--font-mono);
+
+  --akchat-fs-xs: var(--fs-xs);
+  --akchat-fs-sm: var(--fs-sm);
+  --akchat-fs-md: var(--fs-md);
+  --akchat-fs-base: var(--fs-base);
+
+  --akchat-sp-1: var(--sp-1);
+  --akchat-sp-2: var(--sp-2);
+  --akchat-sp-3: var(--sp-3);
+  --akchat-sp-4: var(--sp-4);
+  --akchat-sp-5: var(--sp-5);
+  --akchat-sp-6: var(--sp-6);
+  --akchat-sp-8: var(--sp-8);
+
+  --akchat-r-sm: var(--r-sm);
+  --akchat-r-md: var(--r-md);
+  --akchat-r-lg: var(--r-lg);
+  --akchat-r-full: var(--r-full);
+
+  --akchat-ease: var(--ease);
+  --akchat-t-fast: var(--t-fast);
+  --akchat-t-med: var(--t-med);
+
+  --akchat-hue-0: var(--hue-0);
+  --akchat-hue-1: var(--hue-1);
+  --akchat-hue-2: var(--hue-2);
+  --akchat-hue-3: var(--hue-3);
+  --akchat-hue-4: var(--hue-4);
+  --akchat-hue-5: var(--hue-5);
+  --akchat-hue-6: var(--hue-6);
+  --akchat-hue-7: var(--hue-7);
+
+  --akchat-bg: var(--bg);
+  --akchat-surface: var(--surface);
+  --akchat-surface-2: var(--surface-2);
+  --akchat-surface-3: var(--surface-3);
+
+  --akchat-border: var(--border);
+  --akchat-border-strong: var(--border-strong);
+
+  --akchat-text: var(--text);
+  --akchat-text-2: var(--text-2);
+  --akchat-text-3: var(--text-3);
+  --akchat-text-faint: var(--text-faint);
+  /* `--text-dim` has never been defined in index.css, so this resolves to
+     nothing and the two DM labels that use it inherit their colour — which is
+     what they did before the move. Kept as-is deliberately: defining it now
+     would be a visual change smuggled in under an extraction. */
+  --akchat-text-dim: var(--text-dim);
+
+  --akchat-accent: var(--accent);
+  --akchat-accent-hover: var(--accent-hover);
+  --akchat-on-accent: var(--on-accent);
+
+  --akchat-primary: var(--primary);
+  --akchat-primary-hover: var(--primary-hover);
+  --akchat-primary-active: var(--primary-active);
+  --akchat-on-primary: var(--on-primary);
+
+  --akchat-link: var(--link);
+  --akchat-ok: var(--ok);
+  --akchat-ok-dot: var(--ok-dot);
+  --akchat-danger: var(--danger);
+  --akchat-danger-bg: var(--danger-bg);
+  --akchat-danger-dot: var(--danger-dot);
+
+  --akchat-unread-bg: var(--unread-bg);
+  --akchat-unread-text: var(--unread-text);
+
+  --akchat-chrome-bg: var(--chrome-bg);
+  --akchat-chrome-text: var(--chrome-text);
+  --akchat-chrome-text-dim: var(--chrome-text-dim);
+  --akchat-chrome-border: var(--chrome-border);
+  --akchat-chrome-hover: var(--chrome-hover);
+  --akchat-chrome-active: var(--chrome-active);
+  --akchat-chrome-scrollbar: var(--chrome-scrollbar);
+  --akchat-evergreen-deep: var(--evergreen-deep);
+
+  --akchat-bubble-other-bg: var(--bubble-other-bg);
+  --akchat-bubble-other-border: var(--bubble-other-border);
+  --akchat-bubble-own-bg: var(--bubble-own-bg);
+  --akchat-bubble-own-text: var(--bubble-own-text);
+  --akchat-edit-ring: var(--edit-ring);
+  --akchat-edit-glow: var(--edit-glow);
+
+  --akchat-scrollbar: var(--scrollbar);
+
+  --akchat-shadow-1: var(--shadow-1);
+  --akchat-shadow-2: var(--shadow-2);
+  --akchat-shadow-3: var(--shadow-3);
+}

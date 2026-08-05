@@ -15,35 +15,55 @@
   font-size: var(--fs-xs);
 }
 
-/* ---- X-ray on: the message itself is the inspect target ------------------ */
+/* ---- X-ray on: every message bubble is an inspect target ------------------
+   The chat components carry no x-ray wiring. What they leave is
+   `data-entity-id` + `data-collection` on each bubble, and `.xrayOn` on the
+   document root while the mode is on (xray/inspect.rs sets both ends). These
+   rules are the whole of the app-side hover treatment.
 
-.messageBubble.xrayInspectable {
+   The attribute pair is doing double duty here: it names the bubble AND it
+   buys the specificity to beat the components' own `.ankurah-chat
+   .messageBubble` rules, which are injected after this stylesheet loads. */
+
+.xrayOn [data-entity-id][data-collection] {
   cursor: zoom-in;
 }
 
-/* The prose cursor (#59) yields while x-ray is on: the WHOLE bubble is the
-   inspect target, and zoom-in is the mode's affordance. Cursor is inherited,
-   so the explicit cursors inside the bubble (.messageText's text, and the
-   default on the (edited) suffix and co-edit badge — spans, so the bubble's
-   button/a click exemption doesn't apply to them) need x-ray-scoped
-   overrides. */
-.messageBubble.xrayInspectable .messageText,
-.messageBubble.xrayInspectable .messageEdited,
-.messageBubble.xrayInspectable .coEditBadge {
+/* The prose cursor yields while x-ray is on: the WHOLE bubble is the inspect
+   target, and zoom-in is the mode's affordance. Cursor is inherited, so the
+   explicit cursors inside the bubble (.messageText's text, and the default on
+   the (edited) suffix and co-edit badge — spans, so the bubble's button/a
+   click exemption doesn't apply to them) need x-ray-scoped overrides. */
+.xrayOn [data-entity-id][data-collection] .messageText,
+.xrayOn [data-entity-id][data-collection] .messageEdited,
+.xrayOn [data-entity-id][data-collection] .coEditBadge {
   cursor: zoom-in;
 }
 
 /* Hover = a translucent amber wash over the whole bubble. The inset shadow
    composites OVER the bubble's own background, so it reads as a highlight
-   in both themes rather than replacing the theme color. */
-.messageBubble.xrayInspectable:hover {
+   in both themes rather than replacing the theme color.
+   Carries `.messageBubble` for the same reason the outline below does: the
+   components set a box-shadow on an own bubble being edited, at four classes,
+   from a sheet injected after this one — so four here would lose the wash on
+   exactly the message a reader is most likely to be hovering. */
+.xrayOn .messageBubble[data-entity-id][data-collection]:hover {
   box-shadow: inset 0 0 0 999px color-mix(in srgb, var(--unread-bg) 22%, transparent);
 }
 
 /* Multi-tip head = live concurrency: a persistent dashed amber outline —
-   outline vs wash keeps "concurrent" and "hovered" visually distinct. */
-.messageBubble.xrayConcurrent,
-.messageBubble.xrayConcurrent:hover {
+   outline vs wash keeps "concurrent" and "hovered" visually distinct. The
+   class is put on and taken off by xray/inspect.rs, which follows each
+   visible entity's head clock.
+   THE SELECTOR IS LONG ON PURPOSE. The components set a SOLID outline while a
+   message is being edited, in two rules — one for any bubble and one for the
+   reader's OWN, which is four classes — and their sheet is injected after this
+   file loads, so a tie goes to them. A message that is both being edited and
+   concurrent would then show the wrong outline, and on own messages the longer
+   of the two rules made the first attempt at this tie as well. Five carries
+   both. */
+.xrayOn .messageBubble[data-entity-id][data-collection].xrayConcurrent,
+.xrayOn .messageBubble[data-entity-id][data-collection].xrayConcurrent:hover {
   outline: 1.5px dashed var(--unread-bg);
   outline-offset: 2px;
 }
