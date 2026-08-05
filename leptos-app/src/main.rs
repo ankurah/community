@@ -17,9 +17,15 @@ mod auth;
 mod ban_lock;
 mod chat;
 mod chat_debug_header;
+mod dm;
+mod dm_chat;
+mod dm_list;
+mod dm_message_list;
+mod dm_read_state;
 mod editable_text_field;
 mod emoji;
 mod fmt;
+mod grouping;
 mod header;
 mod link_preview;
 mod markdown;
@@ -40,10 +46,13 @@ mod reactions;
 mod read_state;
 mod room_list;
 mod room_topic;
+mod scroll_pane;
 mod user_detail_panel;
 mod xray;
 
 use chat::Chat;
+use dm_chat::DmChat;
+use dm_read_state::DmReadStateManager;
 use header::Header;
 use notification_manager::NotificationManager;
 use read_state::ReadStateManager;
@@ -333,8 +342,25 @@ pub fn ChatApp() -> impl IntoView {
     // Persistent per-room read cursors + unread badges (#13).
     let read_state = ReadStateManager::new(rooms.clone(), current_user_id());
 
+    // Direct messages (#30). The thread query is self-shaping: the dm_thread
+    // read scope (`a = $jwt.sub OR b = $jwt.sub`) means this returns exactly
+    // the viewer's own conversations. `converge_selection` keeps an open thread
+    // pointed at the canonical row for its pair, so a concurrent first-DM race
+    // resolves itself under the reader rather than forking the conversation.
+    let dm_threads = dm::threads_query();
+    let selected_dm = RwSignal::new(None::<community_model::DmThreadView>);
+    dm::converge_selection(dm_threads.clone(), selected_dm);
+    let dm_read_state = DmReadStateManager::new(dm_threads.clone(), current_user_id());
+
+    // One app-lifetime users query, shared by the room timeline, the DM
+    // timeline and the DM sidebar. Owned here because the two timelines
+    // remount as the reader switches between them.
+    let users = ctx().query::<UserView>("true").expect("failed to create UserView LiveQuery");
+
     // App-lifetime queries surfaced in the X-ray queries card (id discarded).
     xray::bus::bus().register("rooms (app)", &rooms);
+    xray::bus::bus().register("users (app)", &users);
+    xray::bus::bus().register("dm threads (app)", &dm_threads);
 
     view! {
         <xray::XRayLauncher />
@@ -342,11 +368,50 @@ pub fn ChatApp() -> impl IntoView {
             // Banned-client self-lock: watches the viewer's own active bans and
             // replaces the UI with a lockout + delayed sign-out (see ban_lock.rs).
             <ban_lock::BanLock />
-            <Header current_user selected_room />
+            <Header current_user selected_room selected_dm />
 
             <div class="mainContent">
-                <RoomList rooms selected_room read_state=read_state.clone() />
-                <Chat room=selected_room current_user=current_user read_state=read_state />
+                <RoomList
+                    rooms
+                    selected_room
+                    read_state=read_state.clone()
+                    dm_threads=dm_threads.clone()
+                    users=users.clone()
+                    selected_dm
+                    dm_read_state=dm_read_state.clone()
+                />
+                // One timeline at a time. Switching rebuilds the pane's
+                // ScrollManager, which is what a room switch already does.
+                {
+                    let users = users.clone();
+                    let read_state = read_state.clone();
+                    let dm_read_state = dm_read_state.clone();
+                    let dm_threads = dm_threads.clone();
+                    move || {
+                        if selected_dm.get().is_some() {
+                            view! {
+                                <DmChat
+                                    thread=selected_dm
+                                    threads=dm_threads.clone()
+                                    current_user=current_user
+                                    users=users.clone()
+                                    read_state=dm_read_state.clone()
+                                />
+                            }
+                            .into_any()
+                        } else {
+                            view! {
+                                <Chat
+                                    room=selected_room
+                                    current_user=current_user
+                                    users=users.clone()
+                                    read_state=read_state.clone()
+                                />
+                            }
+                            .into_any()
+                        }
+                    }
+                }
             </div>
         </div>
     }

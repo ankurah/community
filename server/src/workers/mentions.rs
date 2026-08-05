@@ -166,13 +166,17 @@ async fn mention_notification_exists(ctx: &Context, recipient: EntityId, message
 /// `kind` for an event in `room`. Runs under Root, which bypasses the
 /// pref collection's owner-only scope. No pref row means default-allow.
 ///
+/// Shared with the DM worker (`dm_notify`), which passes an empty `room_b64`:
+/// a DM happens in no room, so the mute leg cannot match, while the
+/// `mentions_only` leg applies to `kind="dm"` like any other non-mention kind.
+///
 /// Duplicate rows can exist (two devices racing their first-ever write; rows
 /// are not deletable in ankurah 0.9.0). The client pins the LOWEST id — by
 /// base64, its exact comparator — as THE row for display and edits, so this
 /// evaluates only that row: honoring a twin the UI neither shows nor edits
 /// would suppress a room's notifications forever with no user-reachable
 /// repair.
-async fn pref_allows_delivery(ctx: &Context, recipient: EntityId, kind: &str, room_b64: &str) -> Result<bool> {
+pub(super) async fn pref_allows_delivery(ctx: &Context, recipient: EntityId, kind: &str, room_b64: &str) -> Result<bool> {
     let predicate = parse_selection("user = ?")?.predicate.populate([Expr::from(&recipient)])?;
     let Some(pref) = ctx.fetch::<NotificationPrefView>(predicate).await?.into_iter().min_by_key(|p| p.id().to_base64()) else {
         return Ok(true);
@@ -184,8 +188,8 @@ async fn pref_allows_delivery(ctx: &Context, recipient: EntityId, kind: &str, ro
 
 /// Pure pref policy, factored out for testing:
 /// - a muted room suppresses EVERY kind, mentions included;
-/// - `mentions_only` suppresses every kind EXCEPT mentions (a no-op today,
-///   load-bearing the moment a second kind ships).
+/// - `mentions_only` suppresses every kind EXCEPT mentions — which since the
+///   DM lane (#30) means it suppresses `dm` (`dm_notify::DM_KIND`) in full.
 fn pref_allows(kind: &str, mentions_only: bool, muted_rooms: &serde_json::Value, room_b64: &str) -> bool {
     if let Some(rooms) = muted_rooms.as_array() {
         if rooms.iter().any(|r| r.as_str() == Some(room_b64)) {

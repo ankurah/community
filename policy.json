@@ -72,6 +72,28 @@
       "scope": [
         { "filter": "user = $jwt.sub" }
       ]
+    },
+    "dmthread": {
+      "read": "view",
+      "write": "post",
+      "scope": [
+        { "filter": "a = $jwt.sub OR b = $jwt.sub" }
+      ]
+    },
+    "dmmessage": {
+      "read": "view",
+      "write": "post",
+      "scope": [
+        { "filter": "a = $jwt.sub OR b = $jwt.sub" },
+        { "filter": "user = $jwt.sub", "applies_to": "write" }
+      ]
+    },
+    "dmreadstate": {
+      "read": "view",
+      "write": "post",
+      "scope": [
+        { "filter": "user = $jwt.sub" }
+      ]
     }
   }
 }

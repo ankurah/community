@@ -6,16 +6,12 @@ use ankurah::LiveQuery;
 use ankurah_signals::Get as AnkurahGet;
 use community_model::{LinkPreviewView, MessageView, ReactionView, UserView};
 
-use crate::fmt;
 use crate::message_row::MessageRow;
 use crate::reactions::{picker_index, ReactionChip};
 
-/// Consecutive messages by the same author are visually grouped. A group breaks
-/// when the author changes, the local calendar day changes, or the gap between
-/// two messages exceeds this many milliseconds (keeps timestamps honest).
-const GROUP_GAP_MS: i64 = 5 * 60 * 1000;
-
-/// One renderable row: a message plus its computed grouping context.
+/// One renderable row: a message plus its computed grouping context. The
+/// grouping RULE is shared with the DM thread list (see `crate::grouping`) so
+/// the two timelines lay out identically.
 #[derive(Clone)]
 struct RowCtx {
     message: MessageView,
@@ -25,43 +21,19 @@ struct RowCtx {
     day_label: Option<String>,
 }
 
-fn author_id(m: &MessageView) -> String { m.user().map(|r| r.id().to_base64()).unwrap_or_default() }
-
-fn ts(m: &MessageView) -> i64 { m.timestamp().unwrap_or(0) }
-
-/// Compute grouping flags for an oldest-first message list.
 fn group_rows(msgs: &[MessageView]) -> Vec<RowCtx> {
-    let n = msgs.len();
-    (0..n)
-        .map(|i| {
-            let t = ts(&msgs[i]);
-            let author = author_id(&msgs[i]);
-
-            let new_day = match i.checked_sub(1).map(|p| &msgs[p]) {
-                Some(prev) => fmt::day_key(ts(prev)) != fmt::day_key(t),
-                None => true,
-            };
-            let first_in_group = new_day
-                || match i.checked_sub(1).map(|p| &msgs[p]) {
-                    Some(prev) => author_id(prev) != author || t.saturating_sub(ts(prev)) > GROUP_GAP_MS,
-                    None => true,
-                };
-            let last_in_group = match msgs.get(i + 1) {
-                Some(next) => {
-                    let nt = ts(next);
-                    author_id(next) != author
-                        || fmt::day_key(nt) != fmt::day_key(t)
-                        || nt.saturating_sub(t) > GROUP_GAP_MS
-                }
-                None => true,
-            };
-
-            RowCtx {
-                message: msgs[i].clone(),
-                first_in_group,
-                last_in_group,
-                day_label: new_day.then(|| fmt::day_label(t)),
-            }
+    let keys: Vec<(String, i64)> = msgs
+        .iter()
+        .map(|m| (m.user().map(|r| r.id().to_base64()).unwrap_or_default(), m.timestamp().unwrap_or(0)))
+        .collect();
+    crate::grouping::group_flags(&keys)
+        .into_iter()
+        .zip(msgs.iter().cloned())
+        .map(|(flags, message)| RowCtx {
+            message,
+            first_in_group: flags.first_in_group,
+            last_in_group: flags.last_in_group,
+            day_label: flags.day_label,
         })
         .collect()
 }

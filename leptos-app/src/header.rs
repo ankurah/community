@@ -18,7 +18,13 @@ use crate::{
 /// open — one at a time, via the panel manager (#58) — and the app-wide
 /// Escape that closes the open one.
 #[component]
-pub fn Header(current_user: RwSignal<Option<UserView>>, selected_room: RwSignal<Option<RoomView>>) -> impl IntoView {
+pub fn Header(
+    current_user: RwSignal<Option<UserView>>,
+    selected_room: RwSignal<Option<RoomView>>,
+    /// The open DM thread, threaded through to the notification inbox so a
+    /// kind="dm" row can deep-link into the conversation it announces.
+    selected_dm: RwSignal<Option<community_model::DmThreadView>>,
+) -> impl IntoView {
     // Escape closes the open surface — one window-level listener for every
     // surface, instead of a per-panel handler. Layering: nested dismissables
     // (context menus, popovers, the composer's edit/mention states) consume
@@ -85,7 +91,14 @@ pub fn Header(current_user: RwSignal<Option<UserView>>, selected_room: RwSignal<
                     </div>
                     <h1 class="title">"Ankurah Community"</h1>
                 </div>
-                <RoomTopic room=selected_room />
+                // The room topic belongs to the room you are LOOKING at. While
+                // a DM thread is open the room is still selected underneath
+                // (so closing the DM returns you to it), and leaving its topic
+                // in the header would caption a private conversation with an
+                // unrelated room's description.
+                <Show when=move || selected_dm.get().is_none()>
+                    <RoomTopic room=selected_room />
+                </Show>
                 <div class="headerRight">
                     <div class=move || {
                         let status = connection_status();
@@ -191,7 +204,7 @@ pub fn Header(current_user: RwSignal<Option<UserView>>, selected_room: RwSignal<
                         </button>
                         {move || {
                             (panels().current() == Some(Surface::Inbox)).then(|| {
-                                view! { <NotificationInbox selected_room on_close=move || panels().close() /> }
+                                view! { <NotificationInbox selected_room selected_dm on_close=move || panels().close() /> }
                             })
                         }}
                     </div>
@@ -264,7 +277,7 @@ pub fn Header(current_user: RwSignal<Option<UserView>>, selected_room: RwSignal<
                 // presentation can anchor with pure CSS (#55).
                 Some(Surface::Inbox) => ().into_any(),
                 Some(Surface::UserDetail(user_id)) => {
-                    view! { <UserDetailPanel user_id on_close=move || panels().close() /> }.into_any()
+                    view! { <UserDetailPanel user_id selected_dm on_close=move || panels().close() /> }.into_any()
                 }
                 None => ().into_any(),
             }}

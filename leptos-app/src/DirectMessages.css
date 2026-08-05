@@ -1,0 +1,116 @@
+/* Direct messages (#30): the sidebar section and the thread header.
+ *
+ * Rows reuse .roomItem and .unreadBadge so a conversation reads as a sibling
+ * of a room rather than a different kind of object; only the leading glyph
+ * differs (an initials disc instead of the # hash). */
+
+.dmSectionHeader {
+  padding-top: 12px;
+  border-top: 1px solid var(--chrome-border);
+}
+
+/* The room list keeps the elastic space; conversations take what they need up
+ * to a ceiling, then scroll. Without the ceiling a busy DM list would push the
+ * rooms out of view — and rooms are the shared, primary surface. */
+.dmList {
+  flex: 0 1 auto;
+  max-height: 42%;
+}
+
+.dmAvatar {
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  border-radius: var(--r-full);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  font-weight: 750;
+  color: var(--on-accent);
+  background: var(--chrome-hover);
+}
+
+.dmAvatar.hue-0 { background: var(--hue-0); }
+.dmAvatar.hue-1 { background: var(--hue-1); }
+.dmAvatar.hue-2 { background: var(--hue-2); }
+.dmAvatar.hue-3 { background: var(--hue-3); }
+.dmAvatar.hue-4 { background: var(--hue-4); }
+.dmAvatar.hue-5 { background: var(--hue-5); }
+.dmAvatar.hue-6 { background: var(--hue-6); }
+.dmAvatar.hue-7 { background: var(--hue-7); }
+
+/* Thread header: who you are talking to, and the one fact about DMs a reader
+ * should not have to look up — that nobody else can read this, moderators
+ * included. */
+.dmThreadHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.dmThreadWith {
+  font-weight: 700;
+  font-size: var(--fs-md);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dmThreadPrivacy {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+  font-size: var(--fs-xs);
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.dmThreadPrivacy svg {
+  width: 13px;
+  height: 13px;
+}
+
+/* Start-DM entry on the member sidebar (#57's panel). */
+.userDetailMessageBtn svg {
+  width: 15px;
+  height: 15px;
+}
+
+.userDetailMessageNote {
+  margin: 8px 0 0;
+  font-size: var(--fs-xs);
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+
+/* Mobile: the sidebar is a horizontal chip strip (RoomList.css). A second
+ * section needs a second strip, so the sidebar grows to hold both. This is a
+ * workable stopgap, not the mobile design — the mobile layout pass is its own
+ * roadmap item (2.9) and will want a tab or drawer here rather than two
+ * stacked strips eating a third of a phone screen. */
+@media (max-width: 768px) {
+  .sidebar {
+    max-height: 200px;
+  }
+
+  .dmSectionHeader {
+    padding: 8px 12px 4px;
+  }
+
+  .dmList {
+    max-height: none;
+    padding: 2px 10px 8px;
+  }
+
+  .dmThreadHeader {
+    padding: 8px 12px;
+  }
+}
