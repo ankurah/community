@@ -127,10 +127,13 @@ async fn process_dm(ctx: &Context, msg: &DmMessageView, delivered: &mut HashSet<
         debug!(message = %msg.id(), "DM notification suppressed by recipient's notification prefs");
         return Ok(());
     }
-    // Clamped like the rate limiter clamps: a client that dates its message in
-    // the year 2100 must not be able to make every probe below miss and mint a
-    // row per message.
-    let sent_at = msg.timestamp().context("read DM timestamp")?.min(now_ms());
+    // Read as stored, deliberately not compensated here. `dm_timestamp` has
+    // already rewritten a future-dated row to the server clock, so this number
+    // is honest and, crucially, the SAME number on the next restart. Taking
+    // `min(now)` here instead is what made a year-2100 message re-clamp to a
+    // later instant on every boot, miss the probe below, and mint a fresh
+    // unread row each time.
+    let sent_at = msg.timestamp().context("read DM timestamp")?;
     if dm_notification_exists(ctx, recipient, sender, sent_at).await? {
         remember(delivered, recipient, msg.id());
         return Ok(());
@@ -208,7 +211,9 @@ async fn thread_participants(ctx: &Context, thread: EntityId) -> Option<(EntityI
 /// restarts, the unseen leg no longer matches and the old message would mint a
 /// brand-new unread row — announcing last month's DM again, on every restart.
 /// A row created at or after the message's own timestamp is proof that message
-/// was already delivered.
+/// was already delivered. This leg only holds up because the stored timestamp
+/// stands still: `dm_timestamp` clamps a future-dated row once and persists
+/// it, so the same message answers this probe the same way on every boot.
 ///
 /// The two legs cannot be collapsed into "any row at all": that would make the
 /// FIRST notification from a correspondent the last one they could ever send.
@@ -225,6 +230,19 @@ async fn dm_notification_exists(ctx: &Context, recipient: EntityId, sender: Enti
         if n.kind()? != DM_KIND {
             continue;
         }
+        // ACCEPTED, NOT OVERLOOKED: the two sides of this comparison come from
+        // different clocks. `created_at` is the server's at delivery; `sent_at`
+        // is the sender's own, clamped down by `dm_timestamp` but never raised.
+        // A sender whose clock runs a minute behind, replying within a minute
+        // of the recipient marking the previous row seen, produces
+        // `created_at(previous) >= sent_at(new)` and gets no inbox row for a
+        // genuinely new message. It is silent and it costs the inbox row only:
+        // the unread badge is derived from the same sender's timestamps and
+        // still lights. Closing it honestly needs a typed DM slot on
+        // `Notification` so the probe can key on the message the way
+        // `mentions.rs` does — see the note at [`dm_notification_exists`] for
+        // why no existing slot fits — which is a model change this lane is not
+        // taking. A better timestamp heuristic here would not close it.
         if !n.seen()? || n.created_at()? >= sent_at {
             return Ok(true);
         }

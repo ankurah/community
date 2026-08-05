@@ -43,15 +43,26 @@ use crate::{ctx, queries};
 /// This client's clock, in the project's ms-since-epoch unit.
 fn now_ms() -> i64 { js_sys::Date::now() as i64 }
 
-/// A message's timestamp as the badges and the sidebar order may use it:
-/// never later than now.
+/// A message's timestamp as the badges and the sidebar order use it: exactly
+/// as stored, with no adjustment here.
 ///
-/// Timestamps are written by whichever client sent the message, so "newest"
-/// is a claim, not a fact. A single future-dated message would otherwise pin
-/// its conversation to the top of the sidebar forever and, once the reader
-/// opened the thread, push their cursor past every message that followed.
-/// Clamping keeps a bad clock (or a bad actor) inside today.
-fn stamp_of(message: &DmMessageView) -> Option<i64> { message.timestamp().ok().map(|ts| ts.min(now_ms())) }
+/// Timestamps are written by whichever client sent the message, so "newest" is
+/// a claim — but it is a claim the server has already settled. A row dated
+/// later than the server's clock is rewritten to that clock and committed
+/// (`server/src/workers/dm_timestamp.rs`), so what arrives here is honest.
+///
+/// This must NOT go back to `min(now_ms())`. That version was recomputed on
+/// every render, so a future-dated message evaluated to the current instant
+/// every time: its conversation held the top of the sidebar permanently, and
+/// its unread badge relit after every read, because `mark_read` pins the
+/// cursor at the moment of reading and the message stamped later than that on
+/// the next recompute. It also could not reach the ordering at all — the
+/// window query below sorts by `timestamp` inside the query.
+///
+/// Between a future-dated message arriving and the server healing it, this
+/// client renders the claimed value. That transient is the accepted cost of
+/// the server owning the number; see the sibling worker's module doc.
+fn stamp_of(message: &DmMessageView) -> Option<i64> { message.timestamp().ok() }
 
 #[derive(Clone)]
 pub struct DmReadStateManager(SendWrapper<Arc<Inner>>);

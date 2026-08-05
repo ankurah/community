@@ -42,6 +42,7 @@
 
 pub mod dm_notify;
 pub mod dm_rate_limit;
+pub mod dm_timestamp;
 pub mod mentions;
 pub mod og;
 pub mod ssrf;
@@ -79,8 +80,15 @@ pub fn start(ctx: Context) {
 }
 
 /// The DM half of the worker subsystem (#30): one standing `dm_message`
-/// LiveQuery feeding two consumers, exactly the shape [`watch_messages`] uses
-/// for room messages.
+/// LiveQuery feeding three consumers, the shape [`watch_messages`] uses for
+/// room messages with one more consumer on it.
+///
+/// The third is [`dm_timestamp`], which rewrites a future-dated `timestamp` to
+/// the server clock and commits it. It is a consumer rather than a step the
+/// other two wait on, because making it a gate would put a storage commit in
+/// front of every notification; what that costs instead is a one-commit window
+/// in which the other two can see the unhealed row, which they converge out of
+/// (see that module's doc).
 ///
 /// It is a SEPARATE query and separate consumers on purpose, not a branch
 /// inside the room-message pipeline. The mention fan-out must never run on DM
@@ -100,6 +108,12 @@ async fn watch_dms(ctx: Context) -> Result<()> {
     // The limiter's channel carries the boot sweep's end marker as well as the
     // rows: it counts the backlog but does not judge it (see dm_rate_limit).
     let (limit_tx, limit_rx) = tokio::sync::mpsc::unbounded_channel::<dm_rate_limit::Traffic>();
+    // The timestamp worker's channel. It is fed first everywhere below, which
+    // gives the healing write a head start but guarantees nothing: the three
+    // consumers are independent tasks, and the one-commit window in which the
+    // other two can see an unhealed row is the accepted transient documented
+    // in dm_timestamp.
+    let (stamp_tx, stamp_rx) = tokio::sync::mpsc::unbounded_channel::<DmMessageView>();
 
     // Tombstoned DMs produce no notifications, and the limiter treats them as
     // history — the predicate keeps them out of the stream entirely. Note the
@@ -108,12 +122,14 @@ async fn watch_dms(ctx: Context) -> Result<()> {
     let live: LiveQuery<DmMessageView> = ctx.query("deleted = false")?;
 
     let subscription_guard = {
+        let stamp_tx = stamp_tx.clone();
         let notify_tx = notify_tx.clone();
         let limit_tx = limit_tx.clone();
         live.subscribe(move |changeset: ChangeSet<DmMessageView>| {
             for change in &changeset.changes {
                 match change {
                     ItemChange::Add { item, .. } | ItemChange::Update { item, .. } => {
+                        let _ = stamp_tx.send(item.clone());
                         let _ = notify_tx.send(item.clone());
                         let _ = limit_tx.send(dm_rate_limit::Traffic::Message(item.clone()));
                     }
@@ -123,6 +139,10 @@ async fn watch_dms(ctx: Context) -> Result<()> {
         })
     };
 
+    {
+        let ctx = ctx.clone();
+        supervise("DM timestamp", stamp_rx, move |rx| dm_timestamp::run(ctx.clone(), rx).boxed());
+    }
     {
         let ctx = ctx.clone();
         supervise("DM notification", notify_rx, move |rx| dm_notify::run(ctx.clone(), rx).boxed());
@@ -141,6 +161,7 @@ async fn watch_dms(ctx: Context) -> Result<()> {
     let backlog: Vec<DmMessageView> = live.resultset().peek();
     info!(messages = backlog.len(), "DM workers: standing dm_message LiveQuery initialized; sweeping backlog");
     for msg in backlog {
+        let _ = stamp_tx.send(msg.clone());
         let _ = notify_tx.send(msg.clone());
         let _ = limit_tx.send(dm_rate_limit::Traffic::Message(msg));
     }
@@ -672,5 +693,160 @@ mod tests {
         for partner in &partners {
             assert!(!reason.contains(&partner.to_base64()), "the public log must never name who was messaged");
         }
+    }
+
+    /// Two users and a thread between them, for the DM timestamp tests below.
+    async fn a_thread_between_two_members(ctx: &Context) -> (EntityId, EntityId, EntityId) {
+        let trx = ctx.begin();
+        let alice = trx.create(&User { display_name: "Alice".into(), oidc_sub: None }).await.unwrap().id();
+        let bob = trx.create(&User { display_name: "Bob".into(), oidc_sub: None }).await.unwrap().id();
+        trx.commit().await.unwrap();
+
+        let (a, b) = canonical_pair(alice, bob);
+        let trx = ctx.begin();
+        let thread = trx.create(&DmThread { a: a.into(), b: b.into(), created_at: now_ms(), deleted: false }).await.unwrap().id();
+        trx.commit().await.unwrap();
+        (alice, bob, thread)
+    }
+
+    async fn send_dm_at(ctx: &Context, thread: EntityId, sender: EntityId, partner: EntityId, timestamp: i64) -> EntityId {
+        let (a, b) = canonical_pair(sender, partner);
+        let trx = ctx.begin();
+        let id = trx
+            .create(&DmMessage {
+                thread: thread.into(),
+                a: a.into(),
+                b: b.into(),
+                user: sender.into(),
+                text: "hello".into(),
+                timestamp,
+                deleted: false,
+                edited_at: None,
+            })
+            .await
+            .unwrap()
+            .id();
+        trx.commit().await.unwrap();
+        id
+    }
+
+    /// Hand one row to one worker and let it run to the end of its channel —
+    /// how these tests stand in for a boot, and for the boot after it.
+    async fn deliver(ctx: &Context, message: EntityId) -> (DmMessageView, tokio::sync::mpsc::UnboundedReceiver<DmMessageView>) {
+        let view = ctx.get::<DmMessageView>(message).await.unwrap();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<DmMessageView>();
+        tx.send(view.clone()).unwrap();
+        drop(tx);
+        (view, rx)
+    }
+
+    /// A message dated after the server's clock has its timestamp rewritten ON
+    /// THE ROW, and a message dated in the past is left exactly as sent.
+    ///
+    /// Persisting is the whole point, and it is what the earlier version of
+    /// this lane did not do. Each reader compensating privately with
+    /// `min(stored, now)` recomputes against the current clock, so the value
+    /// moves every time anyone looks: the conversation holds the top of the
+    /// recipient's sidebar forever, the unread badge relights after every read,
+    /// and the rate limiter re-dates the initiation into the current window on
+    /// every restart. A private adjustment also cannot reach the two client
+    /// queries that sort by `timestamp` inside the query. One stored number
+    /// that stands still answers all of it, so the second half of this test —
+    /// that the healed value does not move again — carries as much weight as
+    /// the first.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_future_dated_dm_is_rewritten_to_the_server_clock_on_the_row() {
+        let ctx = test_context().await;
+        start(ctx.clone());
+
+        let (alice, bob, thread) = a_thread_between_two_members(&ctx).await;
+
+        const YEAR_MS: i64 = 365 * 24 * 60 * 60 * 1000;
+        let dated_in_2126 = now_ms() + 100 * YEAR_MS;
+        let dated_a_minute_ago = now_ms() - 60_000;
+        let future_row = send_dm_at(&ctx, thread, alice, bob, dated_in_2126).await;
+        let honest_row = send_dm_at(&ctx, thread, alice, bob, dated_a_minute_ago).await;
+
+        let mut stored = dated_in_2126;
+        for _ in 0..200 {
+            stored = ctx.get::<DmMessageView>(future_row).await.unwrap().timestamp().unwrap();
+            if stored <= now_ms() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(stored <= now_ms(), "a timestamp the server clock has not reached is rewritten to the server clock");
+        assert!(
+            stored >= dated_a_minute_ago,
+            "and it is rewritten to WHEN THE SERVER SAW IT, not to zero or to the sender's other messages"
+        );
+
+        assert_eq!(
+            ctx.get::<DmMessageView>(honest_row).await.unwrap().timestamp().unwrap(),
+            dated_a_minute_ago,
+            "a timestamp the server clock has already passed is left exactly as sent — back-dating is accepted, not repaired"
+        );
+
+        // Every later sight of the row — the worker's own write coming back as
+        // an Update, and the fan-out's and limiter's re-deliveries — must write
+        // nothing. A value that moved on re-observation would be the same
+        // defect one layer down.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(
+            ctx.get::<DmMessageView>(future_row).await.unwrap().timestamp().unwrap(),
+            stored,
+            "the healed value stands still: seeing the row again writes nothing"
+        );
+    }
+
+    /// A DM notification the recipient has already read is not reissued when
+    /// the server restarts, even for a message its sender dated in the future.
+    ///
+    /// The fan-out has no message id to key on (`Notification` carries no DM
+    /// slot), so its restart probe asks whether a row exists that is at least
+    /// as new as the message. That test only holds if the message's timestamp
+    /// is the same number on the second boot as on the first — which is what
+    /// storing the clamped value buys. When the fan-out clamped privately
+    /// instead, the message re-dated itself to the new "now" on every boot, no
+    /// stored `created_at` could satisfy the probe, and last month's
+    /// conversation announced itself again on every restart.
+    ///
+    /// The workers are driven by hand here rather than through [`start`],
+    /// because a second `run` with a fresh delivered-cache IS what a process
+    /// restart looks like from the fan-out's seat.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_restart_does_not_reissue_a_seen_notification_for_a_future_dated_dm() {
+        let ctx = test_context().await;
+        let (alice, bob, thread) = a_thread_between_two_members(&ctx).await;
+
+        const YEAR_MS: i64 = 365 * 24 * 60 * 60 * 1000;
+        let message = send_dm_at(&ctx, thread, alice, bob, now_ms() + 10 * YEAR_MS).await;
+
+        // First boot: the timestamp worker settles the row, then the fan-out
+        // tells Bob about it.
+        let (_, mut rx) = deliver(&ctx, message).await;
+        dm_timestamp::run(ctx.clone(), &mut rx).await;
+        let stored = ctx.get::<DmMessageView>(message).await.unwrap().timestamp().unwrap();
+        assert!(stored <= now_ms(), "the row is honest before the fan-out reads it");
+
+        let (_, mut rx) = deliver(&ctx, message).await;
+        dm_notify::run(ctx.clone(), &mut rx).await;
+        let inbox = ctx.fetch::<NotificationView>("true").await.unwrap();
+        assert_eq!(inbox.len(), 1, "Bob is told once");
+        assert_eq!(inbox[0].recipient().unwrap().id(), bob);
+
+        // Bob reads it.
+        let trx = ctx.begin();
+        inbox[0].edit(&trx).unwrap().seen().set(&true).unwrap();
+        trx.commit().await.unwrap();
+
+        // Second boot: the whole backlog replays, this message included.
+        let (_, mut rx) = deliver(&ctx, message).await;
+        dm_notify::run(ctx.clone(), &mut rx).await;
+        assert_eq!(
+            ctx.fetch::<NotificationView>("true").await.unwrap().len(),
+            1,
+            "a restart must not announce a DM the recipient has already read"
+        );
     }
 }

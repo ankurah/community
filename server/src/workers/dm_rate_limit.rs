@@ -90,7 +90,17 @@
 //! could future-date messages to jump the timeline or back-date them to slip
 //! out of the window. Future-dating is the move that pays (a message dated
 //! next year sits at the top of every "newest first" list forever) and it is
-//! neutralized: timestamps are clamped to the server's clock on arrival.
+//! neutralized in `dm_timestamp`, a sibling worker that rewrites such a
+//! timestamp to the server clock and COMMITS it, so every reader — this one,
+//! the fan-out, and the client queries that sort inside the query — gets the
+//! same honest number. The local `min(now)` in [`Limiter::observe`] survives
+//! only as cover for the commit-wide window before that write lands; on a
+//! healed row it does nothing. What it must not become again is the whole
+//! defence: a clamp recomputed against the current clock moves every time it
+//! is evaluated, and the boot sweep evaluates it on every restart, which
+//! collapsed six gradually-opened future-dated threads into one window and
+//! tombstoned the sender's next message.
+//!
 //! Back-dating is self-defeating — a back-dated message buries itself in the
 //! recipient's history — so it is accepted rather than defended against. That
 //! acceptance now covers one more move: back-dating the first message of a
@@ -211,8 +221,11 @@ impl Limiter {
     /// account) rewrite a conversation's facts: one such row makes a
     /// monologue look answered, which switches the unanswered limit off.
     ///
-    /// `now` is the server clock, used both to clamp a client-supplied
-    /// timestamp and as the right edge of the window.
+    /// `now` is the server clock: the right edge of the window, and a floor
+    /// under `client_ts` for the one case that floor still has to cover — a
+    /// future-dated row seen before `dm_timestamp`'s healing write has landed.
+    /// On every healed row the floor is inert, which is the point: the number
+    /// this limiter counts by has to be the same number after a restart.
     pub fn observe(
         &mut self,
         message: EntityId,
@@ -225,6 +238,10 @@ impl Limiter {
         if sender != participants.0 && sender != participants.1 {
             return Verdict::Allow;
         }
+        // Inert on a healed row (see the parameter doc); load-bearing only in
+        // the window before `dm_timestamp` commits, where without it a single
+        // future-dated opener would stamp its initiation past every cutoff and
+        // hold one of the sender's five slots for good.
         let ts = client_ts.min(now);
 
         let facts = self.threads.entry(thread).or_default();

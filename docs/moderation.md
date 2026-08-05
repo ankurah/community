@@ -157,11 +157,17 @@ to the caller by the policy's sender-binding rule, so "who started this
 conversation" derived from the oldest message is the one attribution a client
 cannot lie about.
 
-**Timestamps are client-supplied and the window lives with that.** They are
-clamped to the server clock on arrival, which kills future-dating (a message
-dated next year would otherwise sit at the top of every newest-first list
-forever). Back-dating to slip out of the window is possible and is accepted:
-a back-dated message buries itself in the recipient's history, so the evasion
+**Timestamps are client-supplied and the window lives with that.** A message
+dated later than the server's clock is rewritten to the server's clock, and the
+rewrite is *committed* to the row, by `server/src/workers/dm_timestamp.rs`, the
+first time the server sees it. That kills future-dating — a message dated next
+year would otherwise sit at the top of every newest-first list forever, relight
+an unread badge the reader cannot clear, and re-enter the rate limiter's window
+on every restart. Persisting the clamped value matters as much as computing it:
+a number each reader compensates for privately is recomputed against the
+current clock, so it moves between readings, which is what produced all three
+of those. Back-dating to slip out of the window is possible and is accepted: a
+back-dated message buries itself in the recipient's history, so the evasion
 costs the sender the visibility they wanted.
 
 **What a breach does — and what it deliberately does not.** Either limit
