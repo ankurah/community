@@ -4,8 +4,8 @@
 //! The bus does not know the app's queries first-hand — it is one observer of
 //! the generic query registry (`crate::query_registry`), which components
 //! register with and which x-ray attaches to at startup (`xray::attach`).
-//! Every registration lands here as a [`QueryEntry`]; when the component drops
-//! its registration, the entry goes with it.
+//! Every registration lands here as an entry; when the component drops its
+//! registration, the entry goes with it.
 //!
 //! Honesty note: ankurah 0.9.0 keeps the reactor's subscription table
 //! `pub(crate)` (`ankurah-core/src/node.rs`), so a client cannot enumerate
