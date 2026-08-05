@@ -46,16 +46,24 @@
 //! stored time is very nearly the real one. For rows that were already future-
 //! dated before this worker existed, first sight is the boot that finds them,
 //! so a batch of them all land at that one instant — there is no earlier
-//! honest observation to use. From that boot on, the value never moves again.
+//! honest observation to use, and the rate limiter reads that batch as
+//! conversations opened at once. It counts them during the phase where it does
+//! not judge, so nothing is tombstoned for it on that boot, and from that boot
+//! on the values never move again.
 //!
-//! THE TRANSIENT, AND WHY IT IS ACCEPTABLE. This worker is one consumer of the
-//! shared DM stream, so the rate limiter, the fan-out and a recipient's open
-//! client can all see a row before the healing write lands. The window is one
-//! commit wide and every consumer converges when the write comes back as an
-//! Update: the limiter takes a running minimum of the timestamps it sees, the
-//! fan-out re-probes, and a client re-renders. The limiter additionally keeps
-//! its own local `min(now)` for that window, which is inert on a healed row —
-//! see [`super::dm_rate_limit::Limiter::observe`].
+//! TWO ENTRY POINTS, AND WHY. On the boot sweep, `workers::watch_dms` calls
+//! [`settle`] on every backlog row itself and hands the backlog to the other
+//! two consumers only afterwards — so the picture the rate limiter rebuilds on
+//! each restart is built entirely from settled values, which is what its whole
+//! window rests on. For live traffic, [`run`] is one consumer of the shared
+//! stream alongside the other two, so they can see a row in the one commit
+//! before the settling write lands. That transient is accepted: each consumer
+//! converges when the write comes back as an Update — the limiter takes a
+//! running minimum of the timestamps it sees, the fan-out re-probes, a client
+//! re-renders — and the limiter additionally keeps its own local `min(now)`,
+//! inert on a settled row, so a future-dated opener cannot hold one of its
+//! sender's slots even for that window. See
+//! [`super::dm_rate_limit::Limiter::observe`].
 
 use ankurah::Context;
 use anyhow::{Context as _, Result};
@@ -65,15 +73,15 @@ use tracing::{info, warn};
 
 use super::now_ms;
 
-/// Consumer loop. The receiver is borrowed from the supervisor
+/// Consumer loop for live traffic. The receiver is borrowed from the supervisor
 /// (`workers::supervise`), which respawns this loop if it ever panics; a row
-/// missed during that pause is healed by the message's next change or the next
+/// missed during that pause is settled by the message's next change or the next
 /// boot sweep.
 pub async fn run(ctx: Context, rx: &mut UnboundedReceiver<DmMessageView>) {
     info!("DM timestamp worker started (a dm_message dated after the server clock is rewritten to it)");
     while let Some(msg) = rx.recv().await {
         let message_id = msg.id();
-        if let Err(e) = clamp_to_server_clock(&ctx, &msg).await {
+        if let Err(e) = settle(&ctx, &msg).await {
             warn!(message = %message_id, "DM timestamp clamp failed (retries on the message's next change): {e:#}");
         }
     }
@@ -82,8 +90,8 @@ pub async fn run(ctx: Context, rx: &mut UnboundedReceiver<DmMessageView>) {
 
 /// Rewrite this message's `timestamp` to the server clock if it claims a time
 /// the server has not reached yet. A no-op otherwise, which is the common case
-/// and every case once a row has been healed.
-async fn clamp_to_server_clock(ctx: &Context, msg: &DmMessageView) -> Result<()> {
+/// and every case once a row has been settled.
+pub(super) async fn settle(ctx: &Context, msg: &DmMessageView) -> Result<()> {
     let claimed = msg.timestamp().context("read DM timestamp")?;
     let now = now_ms();
     if claimed <= now {

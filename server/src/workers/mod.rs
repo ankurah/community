@@ -59,7 +59,7 @@ use community_model::{DmMessageView, MessageView};
 use futures_util::future::BoxFuture;
 use futures_util::FutureExt;
 use tokio::sync::mpsc::UnboundedReceiver;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 /// Start the worker subsystem on the durable node's privileged (Root)
 /// context. Fire-and-forget from `main`: failures to start are fatal-logged
@@ -84,11 +84,13 @@ pub fn start(ctx: Context) {
 /// room messages with one more consumer on it.
 ///
 /// The third is [`dm_timestamp`], which rewrites a future-dated `timestamp` to
-/// the server clock and commits it. It is a consumer rather than a step the
-/// other two wait on, because making it a gate would put a storage commit in
-/// front of every notification; what that costs instead is a one-commit window
-/// in which the other two can see the unhealed row, which they converge out of
-/// (see that module's doc).
+/// the server clock and commits it. For live rows it is a consumer rather than
+/// a step the other two wait on, because making it a gate would put a storage
+/// commit in front of every notification; what that costs instead is a
+/// one-commit window in which the other two can see the unsettled row, which
+/// they converge out of (see that module's doc). The boot backlog is settled
+/// inline before either of the others is handed it, for the reason stated at
+/// that loop.
 ///
 /// It is a SEPARATE query and separate consumers on purpose, not a branch
 /// inside the room-message pipeline. The mention fan-out must never run on DM
@@ -108,10 +110,12 @@ async fn watch_dms(ctx: Context) -> Result<()> {
     // The limiter's channel carries the boot sweep's end marker as well as the
     // rows: it counts the backlog but does not judge it (see dm_rate_limit).
     let (limit_tx, limit_rx) = tokio::sync::mpsc::unbounded_channel::<dm_rate_limit::Traffic>();
-    // The timestamp worker's channel. It is fed first everywhere below, which
-    // gives the healing write a head start but guarantees nothing: the three
+    // The timestamp worker's channel, for LIVE rows only — the boot sweep
+    // settles its backlog inline further down, so that the limiter's window is
+    // rebuilt from values that will not move. This channel is fed first, which
+    // gives the settling write a head start but guarantees nothing: the three
     // consumers are independent tasks, and the one-commit window in which the
-    // other two can see an unhealed row is the accepted transient documented
+    // other two can see an unsettled row is the accepted transient documented
     // in dm_timestamp.
     let (stamp_tx, stamp_rx) = tokio::sync::mpsc::unbounded_channel::<DmMessageView>();
 
@@ -160,8 +164,22 @@ async fn watch_dms(ctx: Context) -> Result<()> {
     live.wait_initialized().await;
     let backlog: Vec<DmMessageView> = live.resultset().peek();
     info!(messages = backlog.len(), "DM workers: standing dm_message LiveQuery initialized; sweeping backlog");
+    // Settle every backlog row's timestamp BEFORE either of the other two
+    // consumers is told about it, rather than by handing the backlog to the
+    // timestamp worker alongside them. The rate limiter rebuilds its whole
+    // window from this sweep on every restart, and that window is only worth
+    // anything if it is built from values that will not move afterwards: a row
+    // counted at its claimed year-2100 date and settled a moment later would
+    // enter the window twice, once at each value. Doing it inline is nearly
+    // free — a row already at or before the server clock costs one field read
+    // and no write, which is every row after the first boot that sees it.
+    for msg in &backlog {
+        if let Err(e) = dm_timestamp::settle(&ctx, msg).await {
+            warn!(message = %msg.id(), "DM boot sweep: could not settle this message's timestamp; counting it as it stands: {e:#}");
+        }
+    }
+
     for msg in backlog {
-        let _ = stamp_tx.send(msg.clone());
         let _ = notify_tx.send(msg.clone());
         let _ = limit_tx.send(dm_rate_limit::Traffic::Message(msg));
     }
