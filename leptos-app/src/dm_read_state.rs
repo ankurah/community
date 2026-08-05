@@ -73,13 +73,34 @@ fn now_ms() -> i64 { js_sys::Date::now() as i64 }
 /// [`DmReadStateManager::recompute_thread`] walks the cursor back with it.
 ///
 /// Walking one back lands it HERE rather than on the thread's newest message,
-/// and that is what keeps the repair from fighting the next read: a cursor set
-/// from a settled message can never exceed this, so nothing re-raises it and
-/// nothing writes the row twice. The cost, stated because it is a choice: on a
-/// client whose clock runs ahead, a walked-back cursor sits that far ahead of
-/// real time, so a message arriving in the minutes after the repair counts as
-/// read. It applies only to a thread someone has aimed a future-dated message
-/// at, and it expires as the clock catches up.
+/// which is what keeps the repair from fighting the next read in the ordinary
+/// case: a cursor taken from a message this window can see, on a client whose
+/// clock is not behind the server's, does not exceed this, so nothing re-raises
+/// it and no row is rewritten.
+///
+/// TWO CASES DO CHURN AGAINST IT, accepted rather than overlooked. Both need a
+/// reader whose clock trails the server, and neither produces a wrong badge —
+/// a walk-back lands at or above the newest message the window shows, so it can
+/// never light a badge for anything already there.
+///
+/// - The thread view's timeline reads the pair's rows with no `deleted = false`
+///   on it (`crate::dm_chat`), while the window below filters tombstones out. So
+///   when the newest message in a thread has been tombstoned, `mark_read` is
+///   handed its stamp and this ceiling cannot see it.
+/// - A conversation spread over race twins shares one cursor across its rows,
+///   so the stamp `mark_read` is handed for row A can come from row B and be
+///   newer than anything A holds.
+///
+/// In both, the cursor is walked back and the next read at the tail raises it
+/// again, so the pair of them trade places until the reader's clock passes the
+/// stamp — costing a row write each time the ceiling has moved since the last
+/// one. Bounded by the clock skew, and silent.
+///
+/// The other cost, stated because it is a choice: on a client whose clock runs
+/// AHEAD, a walked-back cursor sits that far ahead of real time, so a message
+/// arriving in the minutes after the repair counts as read. That one applies
+/// only to a thread someone has aimed a future-dated message at, and it expires
+/// as the clock catches up.
 fn ceiling(newest_in_thread: i64) -> i64 { now_ms().max(newest_in_thread) }
 
 /// A message's timestamp as the badges and the sidebar order use it: exactly
@@ -346,21 +367,47 @@ impl DmReadStateManager {
 
         inner.windows.lock().unwrap().insert(key.clone(), ThreadWindow { thread_id, query, _guard: guard });
         // If the window's initial changeset fired before the map insert above,
-        // that recompute found no window and skipped; run once now (idempotent).
+        // that recompute found no window and skipped; run once now. Repeating a
+        // recompute costs nothing: it recounts and, if the window has already
+        // delivered, re-applies a ceiling the cursor is by then already under.
+        // The usual case here is a window that has not delivered at all, which
+        // recomputes an empty thread and touches no cursor.
         Self::recompute_thread(inner, &key);
     }
 
     /// Unread for one thread = messages in its window newer than the cursor and
-    /// authored by the other participant. Also refreshes the ordering key — and
-    /// walks the cursor back first if it has run past what the thread can
-    /// justify, which is the one place in this file that judges a cursor at all.
+    /// authored by the other participant. Also refreshes the ordering key — and,
+    /// once the window has delivered, walks the cursor back first if it has run
+    /// past what the thread can justify, which is the one place in this file
+    /// that judges a cursor at all.
     fn recompute_thread(inner: &Arc<Inner>, thread_id: &str) {
-        let Some((thread_eid, items)) = inner.windows.lock().unwrap().get(thread_id).map(|w| (w.thread_id, w.query.peek()))
+        let Some((thread_eid, loaded, items)) =
+            inner.windows.lock().unwrap().get(thread_id).map(|w| (w.thread_id, w.query.loaded(), w.query.peek()))
         else {
             return;
         };
         let newest_ts = items.iter().filter_map(stamp_of).max().unwrap_or(0);
-        Self::hold_cursor_down(inner, thread_id, thread_eid, ceiling(newest_ts));
+        // ONLY JUDGE A CURSOR AGAINST A WINDOW THAT HAS ACTUALLY DELIVERED. An
+        // empty `peek()` means one of two completely different things, and
+        // `loaded()` is what tells them apart — the same distinction
+        // `members_panel`, `notification_inbox` and `mod_log_panel` draw before
+        // they render "nothing here". Ungated, the wrong reading is the ruinous
+        // one: the cursor subscription resolves before any of these per-thread
+        // windows has populated, so at every page load `newest_ts` would read 0,
+        // the ceiling would collapse to the reader's clock alone, and a reader
+        // whose clock trails the server would have every good cursor walked back
+        // to their own now AND written to the row — this file's original defect,
+        // re-created on each load and now with a destructive write behind it.
+        //
+        // Waiting costs nothing. The walk-back exists for a cursor taken from a
+        // message dated far in the future, and that message is IN the window
+        // once the window loads, so the ceiling is meaningful exactly when the
+        // repair fires. The unread count below runs either way: it is display
+        // only, and an unloaded window shows zero unread until its first
+        // changeset says otherwise.
+        if loaded {
+            Self::hold_cursor_down(inner, thread_id, thread_eid, ceiling(newest_ts));
+        }
 
         let cursor = inner.last_read.peek().get(thread_id).copied().unwrap_or(0);
         let count = items
@@ -389,17 +436,26 @@ impl DmReadStateManager {
     /// Walk one thread's cursor back to `ceiling` if it has run past it — in
     /// memory, and on the row it came from.
     ///
-    /// A cursor above the ceiling silences the thread's badge completely:
-    /// nothing that arrives afterwards is newer than it, and `mark_read` only
-    /// ever advances, so nothing else in this file could undo it. The one way to
-    /// get one is a message read in the moment before the server settled its
-    /// send time; see [`ceiling`] for why that is the only case this fires on,
-    /// and in particular why a raced pair's shared cursor is not.
+    /// What this is for is a cursor that has run past every message there is,
+    /// which silences the thread's badge completely: nothing arriving afterwards
+    /// is newer than it, and `mark_read` only ever advances, so nothing else in
+    /// this file could undo it. The way to get one is to read a message in the
+    /// moment before the server settles its send time.
+    ///
+    /// It also fires on two harmless mismatches — a tombstoned newest message,
+    /// and a cursor shared across race twins — where it walks a cursor back that
+    /// the next read raises again. [`ceiling`] sets out both, and why the trade
+    /// is worth taking: a walk-back never lights a badge for a message already
+    /// in the window.
     ///
     /// The row is repaired too, not just this session's copy, because the row is
     /// what the next session starts from. The `healing` guard in
     /// [`Self::heal_cursor`] is what stops the changesets between the write and
     /// its delivery from starting a second one.
+    ///
+    /// The caller decides WHEN this may run — only against a window that has
+    /// delivered, see [`Self::recompute_thread`] — because the ceiling is
+    /// meaningless before then.
     fn hold_cursor_down(inner: &Arc<Inner>, thread_id: &str, thread_eid: EntityId, ceiling: i64) {
         {
             let cursors = inner.last_read.peek();
