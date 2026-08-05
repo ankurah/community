@@ -36,7 +36,13 @@ container).
 
 ## Architecture
 
-- **model/** — shared data models (`User`, `Room`, `Message`), used by every client
+- **model/** — the data models every client uses. The chat ones (`User`,
+  `Room`, `Message`, `Reaction`, `ReadState`, the DM trio) and the mention/URL
+  scanner are defined in
+  [ankurah-chat-model](https://github.com/ankurah/ankurah-chat) and re-exported
+  from here, so an embedded chat surface elsewhere reads the same rows through
+  the same definitions; community's own collections (moderation, notifications,
+  link previews) are defined in this crate
 - **server/** — the durable node: `ankurah-websocket-server` + Postgres storage
 - **leptos-app/** — Leptos (CSR) web client, compiled to WASM with [trunk](https://trunkrs.dev/)
 

@@ -121,6 +121,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ankurah-chat-model"
+version = "0.1.0"
+source = "git+https://github.com/ankurah/ankurah-chat?rev=0a0cedd47fad0509d790c82c05eec4d3cdb4769b#0a0cedd47fad0509d790c82c05eec4d3cdb4769b"
+dependencies = [
+ "ankurah",
+ "getrandom 0.2.17",
+ "getrandom 0.3.4",
+ "serde",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "ankurah-core"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -870,6 +882,7 @@ name = "community-model"
 version = "0.6.0"
 dependencies = [
  "ankurah",
+ "ankurah-chat-model",
  "chrono",
  "getrandom 0.3.4",
  "serde",
