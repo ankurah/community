@@ -126,9 +126,10 @@ pub fn SystemPanel() -> impl IntoView {
 }
 
 /// The panel's own queries, bundled as one drop guard. Field order is load
-/// bearing: the registrations drop first (a registration holds a LiveQuery
-/// clone for its tap), then the queries themselves — and dropping the last
-/// LiveQuery clone unsubscribes remotely.
+/// bearing: the registrations drop first, which is what makes the bus release
+/// the `RegisteredQuery` it kept — the LiveQuery clone behind the tap lives in
+/// there — and only then do the queries themselves drop. Dropping the last
+/// clone unsubscribes remotely.
 ///
 /// The panel registers through the same generic hook every other component
 /// uses; x-ray gets no private path to its own bus.
@@ -360,7 +361,7 @@ fn QueriesCard() -> impl IntoView {
     view! {
         <section class="xrayCard">
             <h3 class="xrayCardTitle">"Live queries"</h3>
-            <p class="xrayCardSub">"queries this client holds and registered with x-ray"</p>
+            <p class="xrayCardSub">"queries this client holds and registered with the query registry"</p>
             <Show when=move || snapshot_for_empty().is_empty()>
                 <p class="xrayStateNote">"No queries registered."</p>
             </Show>

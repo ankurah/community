@@ -62,6 +62,12 @@ pub type ChangeListener = Box<dyn Fn(&[QueryChange]) + Send + Sync>;
 /// A live query a component holds, as an observer sees it. Every field is a
 /// handle it may keep and read as often as it likes: `selection`, `resultset`
 /// and `error` track reactively.
+///
+/// Keeping the whole struct past `query_unregistered` keeps the query itself
+/// running: the tap closes over a strong `LiveQuery` clone, and that clone
+/// holds the remote subscription open. The `selection` / `resultset` / `error`
+/// handles are independent and pin nothing, so an observer that wants a
+/// post-mortem record should keep those rather than the struct.
 #[derive(Clone)]
 pub struct RegisteredQuery {
     pub id: RegistrationId,
@@ -91,6 +97,12 @@ impl RegisteredQuery {
 
 /// The application's window onto the queries its components hold. Implemented
 /// by the application, never by a component.
+///
+/// The pairing is exact: an observer hears about the registrations made while
+/// it was attached and no others, and hears the matching unregistration for
+/// each of them exactly once, when the component drops its guard. An id it was
+/// never told about never reaches `query_unregistered`, so an observer may
+/// treat an unknown id as a defect.
 pub trait QueryObserver: Send + Sync + 'static {
     /// A component has begun holding `query`.
     fn query_registered(&self, query: &RegisteredQuery);
@@ -99,15 +111,26 @@ pub trait QueryObserver: Send + Sync + 'static {
 }
 
 /// Held by the component for as long as it holds the query; dropping it tells
-/// the attached observers the query is gone.
+/// the observers the query is gone.
+///
+/// It carries the observers it was announced to rather than looking them up
+/// again on drop, which is what keeps the pairing exact: an observer that
+/// attached after this registration was made never hears about its end,
+/// because it never heard about its beginning.
 #[must_use = "the registration lasts only as long as this guard"]
-pub struct QueryRegistration(Option<RegistrationId>);
+pub struct QueryRegistration(Option<Announced>);
+
+/// One registration and the observers that were told about it.
+struct Announced {
+    id: RegistrationId,
+    observers: Vec<Arc<dyn QueryObserver>>,
+}
 
 impl Drop for QueryRegistration {
     fn drop(&mut self) {
-        if let Some(id) = self.0.take() {
-            for observer in observers() {
-                observer.query_unregistered(id);
+        if let Some(announced) = self.0.take() {
+            for observer in &announced.observers {
+                observer.query_unregistered(announced.id);
             }
         }
     }
@@ -140,6 +163,10 @@ fn observers() -> Vec<Arc<dyn QueryObserver>> {
 /// Do this during application startup: registrations made while nothing is
 /// attached are not retained, so an observer attached later starts blind to
 /// the queries the tree already holds.
+///
+/// Attachment lasts for the life of the process. There is no detach, and the
+/// `Arc` handed over here is held until teardown — an observer that wants to
+/// stop doing work should stop in its own callbacks.
 pub fn attach_observer(observer: Arc<dyn QueryObserver>) {
     registry().observers.write().unwrap_or_else(|e| e.into_inner()).push(observer);
     ATTACHED.store(true, Ordering::Relaxed);
@@ -179,10 +206,10 @@ where R: View + Clone + Send + Sync + 'static {
         tap,
     };
 
-    for observer in observers {
+    for observer in &observers {
         observer.query_registered(&registered);
     }
-    QueryRegistration(Some(registered.id))
+    QueryRegistration(Some(Announced { id: registered.id, observers }))
 }
 
 /// Flatten one typed change into the untyped record observers see.

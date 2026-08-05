@@ -25,6 +25,7 @@ pub mod inspector;
 pub mod system_panel;
 
 use leptos::prelude::*;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use ankurah::proto::{CollectionId, EntityId};
@@ -32,11 +33,23 @@ use ankurah::proto::{CollectionId, EntityId};
 use inspector::XRayInspector;
 use system_panel::SystemPanel;
 
-/// Subscribe x-ray to the queries the app's components hold. Call once during
+/// Whether [`attach`] has already run.
+static ATTACHED: AtomicBool = AtomicBool::new(false);
+
+/// Subscribe x-ray to the queries the app's components hold. Call during
 /// startup, before mounting: the query registry retains nothing registered
 /// while no observer is attached, so a query registered before this call
 /// would never appear in the panel.
-pub fn attach() { crate::query_registry::attach_observer(Arc::new(bus::BusObserver)); }
+///
+/// A second call is a no-op. Two bus observers would file every registration
+/// twice — a duplicate row in the queries card and a duplicate line in the
+/// feed for every changeset.
+pub fn attach() {
+    if ATTACHED.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    crate::query_registry::attach_observer(Arc::new(bus::BusObserver));
+}
 
 /// What the L1 inspector drawer is pointed at.
 #[derive(Clone, Debug, PartialEq)]
