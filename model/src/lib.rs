@@ -500,7 +500,19 @@ pub struct DmMessage {
     /// to be the same active type as room text or the composer, the markdown
     /// renderer and the x-ray decoder would all need a second code path.
     pub text: String,
-    /// ms since epoch (same unit as `Message.timestamp`).
+    /// ms since epoch (same unit as `Message.timestamp`), written by the
+    /// sending client — and, unlike `Message.timestamp`, REWRITTEN BY THE
+    /// SERVER when it claims a time the server clock has not reached yet.
+    /// `server/src/workers/dm_timestamp.rs` settles it once, on first sight,
+    /// and the whole DM lane sorts, counts, windows and compares on the settled
+    /// value.
+    ///
+    /// So read it here as honest, and do not add a second correction
+    /// downstream. A correction recomputed against the current clock moves
+    /// every time it is evaluated, which is what put a future-dated message
+    /// permanently at the top of a sidebar, relit a badge its reader could not
+    /// clear, and re-dated a rate-limit window on every restart. It also could
+    /// not reach the queries that sort by this field inside the query.
     pub timestamp: i64,
     /// Soft delete, like `Message.deleted`: rows are never removed (entity
     /// deletion does not exist in ankurah 0.9.0), they become tombstones.

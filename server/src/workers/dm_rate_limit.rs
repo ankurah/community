@@ -1141,8 +1141,16 @@ mod tests {
         }
     }
 
-    /// A future-dated message cannot buy itself a fresh window: the timestamp
-    /// is clamped to the server clock before it is counted.
+    /// A future-dated message cannot buy itself a fresh window: this limiter
+    /// counts it at no later than the server clock it is handed.
+    ///
+    /// This is the local floor, not the lane's answer to future-dating —
+    /// `dm_timestamp` settles the row itself, so in practice `client_ts`
+    /// arrives already at or below `now` and the floor does nothing. What the
+    /// floor covers is the one commit between a live message arriving and that
+    /// write landing, which is exactly the case below: without it a single
+    /// future-dated opener would stamp its initiation past every cutoff and
+    /// hold one of the sender's five slots for good.
     #[test]
     fn future_dated_timestamps_are_clamped_to_the_server_clock() {
         let mut limiter = Limiter::default();
