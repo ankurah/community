@@ -123,7 +123,7 @@ dependencies = [
 [[package]]
 name = "ankurah-chat-model"
 version = "0.1.0"
-source = "git+https://github.com/ankurah/ankurah-chat?rev=0a0cedd47fad0509d790c82c05eec4d3cdb4769b#0a0cedd47fad0509d790c82c05eec4d3cdb4769b"
+source = "git+https://github.com/ankurah/ankurah-chat?rev=16ff012814fd7fa4ca561d66ab796edada94050f#16ff012814fd7fa4ca561d66ab796edada94050f"
 dependencies = [
  "ankurah",
  "getrandom 0.2.17",
