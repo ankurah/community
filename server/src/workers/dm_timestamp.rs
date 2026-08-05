@@ -58,18 +58,22 @@
 //! and earns them a world-readable `dm-rate-limit` row saying they started six
 //! conversations. Nobody started anything at that moment; the batch is an
 //! artifact of when this worker first looked. What buys it is that it happens
-//! ONCE EVER rather than on every restart — the values never move again after
-//! that boot, which is exactly what the recompute-on-read version it replaced
-//! could not say.
+//! ONCE EVER rather than on every restart — the stored values never move again
+//! after that boot, which is exactly what the recompute-on-read version it
+//! replaced could not say. The one exception is a row whose settling write
+//! keeps failing: its stored value stays put, and the limiter re-dates it under
+//! its own ceiling at each boot until a settle lands (the failure branch on
+//! [`forward`]).
 //!
 //! THE FAN-OUT IS DOWNSTREAM OF THIS ONE, AND ONLY EVER SEES SETTLED ROWS.
 //! `workers::watch_dms` does not fan the DM stream out three ways. It feeds this
 //! worker alone, and [`run`] hands each row on to the fan-out and to the rate
 //! limiter itself, once it has settled it ([`forward`]). The boot sweep is that
 //! same order written out inline: it calls [`settle`] on every backlog row and
-//! forwards the backlog only afterwards. When a settle FAILS, the row still goes
-//! to the limiter — which counts by a clock it is handed and is idempotent — and
-//! is withheld from the fan-out until a later settle succeeds. So the fan-out's
+//! forwards the backlog only afterwards. When a settle FAILS, the row is still
+//! ROUTED to the limiter — whether it is then counted is the limiter's own
+//! judgement, and re-observation is idempotent — and it is withheld from the
+//! fan-out until a later settle succeeds. So the fan-out's
 //! guarantee is absolute on both paths, with no "unless a write failed" hiding
 //! in it.
 //!
@@ -144,8 +148,10 @@ pub async fn run(
 /// `settled = false`, MEANING THE FAN-OUT DOES NOT GET IT. What reaches this
 /// branch is narrower than "some write failed": [`settle`] returns `Ok` WITHOUT
 /// writing anything when the claimed time is at or before the server clock, so
-/// an honest row cannot fail to settle. A row here is therefore either dated in
-/// the future — which is the one shape that hurts the fan-out, because it would
+/// a row claiming a time at or before the server clock cannot fail to settle. A
+/// row here is therefore either dated in the future — by a modified client, or
+/// by an honestly fast browser clock whose sender's inbox row then waits with
+/// it — which is the one shape that hurts the fan-out, because it would
 /// stamp `created_at` from its own clock against a send time still claiming next
 /// century, and its delivered cache means nothing in the process ever revisits
 /// that row — or so broken that its `timestamp` cannot be read at all, which the
@@ -156,9 +162,10 @@ pub async fn run(
 ///
 /// The limiter still gets it, because withholding traffic from the limiter is
 /// the expensive mistake: an uncounted message is budget a bulk sender did not
-/// spend. It counts by the clock it is handed and keeps its own ceiling under
-/// that clock, so an unsettled row costs it nothing, and re-observing the row
-/// later is inert.
+/// spend. Routed is not always counted — the limiter re-reads the row and skips
+/// one whose timestamp it cannot read, as it skips a message naming no thread —
+/// but a readable row is counted under the limiter's own ceiling, so an
+/// unsettled value costs it nothing, and re-observing the row later is inert.
 pub(super) fn forward(
     msg: &DmMessageView,
     settled: bool,

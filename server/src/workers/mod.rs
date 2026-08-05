@@ -80,9 +80,9 @@ pub fn start(ctx: Context) {
 }
 
 /// The DM half of the worker subsystem (#30): one standing `dm_message`
-/// LiveQuery feeding a short PIPELINE. [`dm_timestamp`] settles every row's
-/// send time first and passes the settled row on to [`dm_notify`] and
-/// [`dm_rate_limit`] itself. Compare [`watch_messages`], where the two
+/// LiveQuery feeding a short PIPELINE. [`dm_timestamp`] tries to settle every
+/// row's send time first, then passes a settled row on to [`dm_notify`] and
+/// [`dm_rate_limit`] both, and a row it could not settle to the limiter alone. Compare [`watch_messages`], where the two
 /// room-message consumers really do run in parallel — neither of them writes
 /// anything the other reads.
 ///
@@ -122,8 +122,8 @@ async fn watch_dms(ctx: Context) -> Result<()> {
     // rows: it counts the backlog but does not judge it (see dm_rate_limit).
     let (limit_tx, limit_rx) = tokio::sync::mpsc::unbounded_channel::<dm_rate_limit::Traffic>();
     // The head of the pipeline, and for live rows the ONLY way in: the two
-    // channels above are fed by the timestamp worker once it has settled a row,
-    // and by the boot sweep below once it has done the same inline.
+    // channels above are fed by the timestamp worker after its settle attempt —
+    // the fan-out's only on success — and by the boot sweep below the same way.
     let (stamp_tx, stamp_rx) = tokio::sync::mpsc::unbounded_channel::<DmMessageView>();
 
     // Every dm_message row, tombstoned or not. A tombstone does not settle a
@@ -1159,9 +1159,12 @@ mod tests {
     /// The forward step is called directly here because nothing in this test
     /// setup can make a commit fail: the workers run on a Root context over a
     /// local sled node, and there is no fault-injection seam to reach through.
-    /// So the decision is pinned where it is made.
+    /// So the decision is pinned where it is made — and what it pins is the
+    /// ROUTING. Whether a routed row is then counted still passes the limiter's
+    /// own read of the row: one whose timestamp cannot be read is skipped
+    /// there, like a message naming no thread.
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_row_that_could_not_be_settled_is_counted_but_not_announced() {
+    async fn a_row_that_could_not_be_settled_reaches_the_limiter_but_not_the_fan_out() {
         let ctx = test_context().await;
         let (alice, bob, thread) = a_thread_between_two_members(&ctx).await;
         let view = ctx.get::<DmMessageView>(send_dm_at(&ctx, thread, alice, bob, now_ms()).await).await.unwrap();
@@ -1173,7 +1176,7 @@ mod tests {
         assert!(notify_rx.try_recv().is_err(), "a row nobody could settle must not be announced to its recipient");
         assert!(
             matches!(limit_rx.try_recv(), Ok(dm_rate_limit::Traffic::Message(m)) if m.id() == view.id()),
-            "but it is still traffic, and the limiter counts it"
+            "but it is still traffic, and it reaches the limiter"
         );
 
         // And the ordinary case, so the assertions above are read as a

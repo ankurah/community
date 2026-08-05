@@ -210,10 +210,12 @@ async fn thread_participants(ctx: &Context, thread: EntityId) -> Option<(EntityI
         // difference is worth naming. That function propagates a storage error to
         // its caller and this one returns `None` for both legs, so a caller here
         // cannot tell a message naming no thread from a message whose thread
-        // could not be read. Neither shape retries in-process — `mentions::run`
-        // logs what it is handed and moves to the next message — so what the
-        // return type costs is the log line's precision, which is why the two
-        // legs are worded differently, and nothing else.
+        // could not be read. Neither shape retries in-process, and both end in
+        // the same place: the propagated error there withholds the delivered-
+        // cache entry so the message's next change retries, and this function's
+        // caller matches that by returning before `remember`. So what the return
+        // type costs is the log line's precision, which is why the two legs are
+        // worded differently, and nothing else.
         Err(RetrievalError::EntityNotFound(_)) | Err(RetrievalError::CollectionNotFound(_)) => {
             debug!(thread = %thread, "DM fan-out: no thread row to resolve participants from");
             return None;

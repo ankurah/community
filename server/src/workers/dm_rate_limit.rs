@@ -282,9 +282,10 @@ impl Limiter {
     /// monologue look answered, which switches the unanswered limit off.
     ///
     /// `now` is the server clock: the right edge of the window, and a ceiling
-    /// over `client_ts`. That ceiling is inert on every row the worker actually
-    /// hands over — `dm_timestamp` settles a row before it forwards it — and it
-    /// is kept because it belongs to this type rather than to that pipeline: a
+    /// over `client_ts`. That ceiling is inert on every settled row — which is
+    /// every row the worker forwards except one whose settling write failed
+    /// (`dm_timestamp::forward`) — and it is kept because it belongs to this
+    /// type rather than to that pipeline: a
     /// message is counted at no later than the clock the caller supplies,
     /// whoever the caller is. The number itself must be the stored one, so that
     /// it is the same number after a restart.
@@ -301,9 +302,9 @@ impl Limiter {
             return Verdict::Allow;
         }
         let pair = canonical_pair(participants.0, participants.1);
-        // Inert on a settled row, which is every row the worker forwards (see
-        // the parameter doc). Kept so that the type's own rule holds for any
-        // caller: without it a single future-dated opener stamps its initiation
+        // Inert on a settled row; live exactly when a settle failed upstream
+        // (see the parameter doc). Kept so that the type's own rule holds for
+        // any caller: without it a single future-dated opener stamps its initiation
         // past every cutoff and holds one of the sender's five slots for good.
         let ts = client_ts.min(now);
 
