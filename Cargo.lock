@@ -121,9 +121,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "ankurah-chat-leptos"
+version = "0.1.0"
+source = "git+https://github.com/ankurah/ankurah-chat?rev=eaa7bc4a5714f7f201664a5973e510cbce5b4857#eaa7bc4a5714f7f201664a5973e510cbce5b4857"
+dependencies = [
+ "ankurah",
+ "ankurah-chat-model",
+ "ankurah-signals",
+ "ankurah-virtual-scroll",
+ "getrandom 0.2.17",
+ "getrandom 0.3.4",
+ "js-sys",
+ "leptos",
+ "pulldown-cmark",
+ "send_wrapper 0.6.0",
+ "tracing",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+]
+
+[[package]]
 name = "ankurah-chat-model"
 version = "0.1.0"
-source = "git+https://github.com/ankurah/ankurah-chat?rev=16ff012814fd7fa4ca561d66ab796edada94050f#16ff012814fd7fa4ca561d66ab796edada94050f"
+source = "git+https://github.com/ankurah/ankurah-chat?rev=eaa7bc4a5714f7f201664a5973e510cbce5b4857#eaa7bc4a5714f7f201664a5973e510cbce5b4857"
 dependencies = [
  "ankurah",
  "getrandom 0.2.17",
@@ -1347,7 +1368,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2359,10 +2380,10 @@ name = "leptos-app"
 version = "0.1.0"
 dependencies = [
  "ankurah",
+ "ankurah-chat-leptos",
  "ankurah-jwt-auth",
  "ankurah-signals",
  "ankurah-storage-indexeddb-wasm",
- "ankurah-virtual-scroll",
  "ankurah-websocket-client-wasm",
  "base64",
  "community-model",
@@ -2372,7 +2393,6 @@ dependencies = [
  "js-sys",
  "lazy_static",
  "leptos",
- "pulldown-cmark",
  "qrcode",
  "send_wrapper 0.6.0",
  "serde",
@@ -3249,7 +3269,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4978,7 +4998,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

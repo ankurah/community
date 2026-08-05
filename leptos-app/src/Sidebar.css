@@ -1,0 +1,38 @@
+/* The sidebar shell: the rail the room selector and the direct-messages
+ * section are mounted into.
+ *
+ * The rail itself is community's, because community decides that rooms and
+ * conversations share one column — a page embedding a single room log has no
+ * rail at all. What goes INSIDE it (the headers, the lists, the rows, the
+ * badges) is styled by ankurah-chat-leptos, which carries those rules with the
+ * components that render them. */
+
+.sidebar {
+  width: 260px;
+  min-width: 0;
+  max-width: 260px;
+  background-color: var(--chrome-bg);
+  color: var(--chrome-text);
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--chrome-border);
+  flex-shrink: 0;
+  overflow: hidden;
+}
+
+/* Mobile: the rail becomes a horizontal chip strip, and it holds two of them —
+ * rooms and conversations — so it is taller than one strip needs. A workable
+ * stopgap rather than the mobile design; the mobile pass will want a tab or a
+ * drawer here instead of two stacked strips eating a third of a phone screen. */
+@media (max-width: 768px) {
+  .sidebar {
+    width: 100%;
+    max-width: 100%;
+    min-width: 100%;
+    max-height: 200px;
+    border-right: none;
+    border-bottom: 1px solid var(--chrome-border);
+    flex-shrink: 0;
+    overflow: hidden;
+  }
+}

@@ -1,11 +1,14 @@
 use leptos::prelude::*;
 
+use std::collections::HashMap;
+
 use ankurah::{Context, EntityId, Node};
+use ankurah_chat_leptos::{ChatContext, DmReadStateManager, DmThread, ReadStateManager, RoomLog};
 use ankurah_jwt_auth::{parse_claims_unverified, JwtAgent, JwtContext};
-use ankurah_signals::{CurrentObserver, ReactiveGraphObserver};
+use ankurah_signals::{CurrentObserver, Get as AnkurahGet, ReactiveGraphObserver};
 use ankurah_storage_indexeddb_wasm::IndexedDBStorageEngine;
 use ankurah_websocket_client_wasm::WebsocketClient;
-use community_model::{RoomView, UserView};
+use community_model::{LinkPreviewView, RoomView, UserView};
 use lazy_static::lazy_static;
 use send_wrapper::SendWrapper;
 use std::sync::{Arc, OnceLock, RwLock};
@@ -15,49 +18,33 @@ use web_sys::window;
 
 mod auth;
 mod ban_lock;
-mod chat;
-mod chat_debug_header;
-mod dm;
-mod dm_chat;
-mod dm_list;
-mod dm_message_list;
-mod dm_read_state;
+mod chat_hooks;
 mod editable_text_field;
-mod emoji;
-mod fmt;
-mod grouping;
 mod header;
 mod link_preview;
-mod markdown;
 mod members_panel;
-mod mentions;
-mod message_context_menu;
-mod message_input;
-mod message_list;
-mod message_row;
 mod mod_log_panel;
 mod notification_inbox;
 mod notification_manager;
 mod panels;
 mod profile_popover;
 mod qr_code_modal;
-mod queries;
-mod query_registry;
-mod reactions;
-mod read_state;
-mod room_list;
 mod room_topic;
-mod scroll_pane;
+mod sidebar;
 mod user_detail_panel;
 mod xray;
 
-use chat::Chat;
-use dm_chat::DmChat;
-use dm_read_state::DmReadStateManager;
+// The chat surfaces bring these with them, and community's own chrome uses
+// them too: a member row in the panels has to colour the same person the same
+// way a message row does, and everything that builds an AnkQL predicate should
+// build it the one safe way. Re-exported at the crate root so `crate::fmt`,
+// `crate::queries`, `crate::query_registry` and `crate::dm` keep resolving.
+pub use ankurah_chat_leptos::{dm, fmt, queries, query_registry};
+
 use header::Header;
 use notification_manager::NotificationManager;
-use read_state::ReadStateManager;
-use room_list::RoomList;
+use profile_popover::ProfilePopover;
+use sidebar::Sidebar;
 
 lazy_static! {
     static ref NODE: OnceLock<Node<IndexedDBStorageEngine, JwtAgent>> = OnceLock::new();
@@ -158,6 +145,11 @@ async fn initialize() {
     // Community's choice of query-registry observer is x-ray. It has to be
     // attached before any component registers a query — see `xray::attach`.
     xray::attach();
+
+    // The chat components carry their own stylesheet; put it in the document
+    // before anything mounts. ChatTheme.css is where community hands it this
+    // palette.
+    ankurah_chat_leptos::install_styles();
 
     leptos::mount::mount_to_body(App);
 }
@@ -309,6 +301,36 @@ pub fn SignIn() -> impl IntoView {
 /// so `ctx()` is always valid here.
 #[component]
 pub fn ChatApp() -> impl IntoView {
+    // Where the profile popover opens, when a message row's avatar or author
+    // name is clicked. Owned here rather than by the row: the popover is
+    // community's chrome (it reads the `userroles` cache, which is community's
+    // collection), and a row that unmounts under the virtual scroller must not
+    // take an open popover with it.
+    let profile = RwSignal::new(None::<(EntityId, i32, i32)>);
+
+    // Link previews: one standing LiveQuery for every timeline, grouped by
+    // url. `LinkPreview` rows are keyed by url with no room ref, and a query
+    // per row would churn with the virtual scroller. `ok = false` rows are
+    // excluded — a failed unfurl renders as the plain link that is already in
+    // the bubble. The chat components render this into the slot they leave
+    // under each bubble; see chat_hooks.
+    let link_previews = ctx().query::<LinkPreviewView>("ok = true").expect("failed to create LinkPreviewView LiveQuery");
+    let previews_by_url = Memo::new(move |_| {
+        link_previews.get().into_iter().filter_map(|p| p.url().ok().map(|u| (u, p))).collect::<HashMap<String, LinkPreviewView>>()
+    });
+
+    // The handshake the chat components read everything host-shaped through.
+    // Community is always signed in by the time this mounts (`App` gates on
+    // it), so the viewer is known at build time and the session is never
+    // swapped; the read-only path exists for embedders that open anonymous.
+    ChatContext::new(ctx())
+        .viewer(Some(current_user_id()))
+        .online(|| ws_client().connection_state().get().to_string() == "Connected")
+        .moderator(can_moderate)
+        .on_auth_demand(|| tracing::warn!("a chat write was attempted while signed out"))
+        .hooks(chat_hooks::chat_hooks(previews_by_url, profile))
+        .provide();
+
     // Build the rooms LiveQuery from the global authenticated context.
     let rooms = ctx().query::<RoomView>("true ORDER BY name ASC").expect("failed to create RoomView LiveQuery");
 
@@ -381,7 +403,7 @@ pub fn ChatApp() -> impl IntoView {
             <Header current_user selected_room selected_dm />
 
             <div class="mainContent">
-                <RoomList
+                <Sidebar
                     rooms
                     selected_room
                     read_state=read_state.clone()
@@ -400,7 +422,7 @@ pub fn ChatApp() -> impl IntoView {
                     move || {
                         if selected_dm.get().is_some() {
                             view! {
-                                <DmChat
+                                <DmThread
                                     thread=selected_dm
                                     threads=dm_threads.clone()
                                     current_user=current_user
@@ -411,11 +433,12 @@ pub fn ChatApp() -> impl IntoView {
                             .into_any()
                         } else {
                             view! {
-                                <Chat
+                                <RoomLog
                                     room=selected_room
                                     current_user=current_user
                                     users=users.clone()
                                     read_state=read_state.clone()
+                                    debug_header=true
                                 />
                             }
                             .into_any()
@@ -423,6 +446,31 @@ pub fn ChatApp() -> impl IntoView {
                     }
                 }
             </div>
+            // The profile popover, opened from any message row's avatar or
+            // author name. It positions itself from the coordinates the row
+            // reported, so rendering it here rather than inside the row costs
+            // nothing and outlives a row the scroller unmounts.
+            {
+                let users = users.clone();
+                move || {
+                profile.get().map(|(user_id, x, y)| {
+                    users
+                        .get()
+                        .into_iter()
+                        .find(|u| u.id() == user_id)
+                        .map(|user| {
+                            view! {
+                                <ProfilePopover
+                                    user=user
+                                    x=x
+                                    y=y
+                                    on_close=move || profile.set(None)
+                                />
+                            }
+                        })
+                })
+                }
+            }
         </div>
     }
 }
