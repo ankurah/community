@@ -49,8 +49,18 @@
 //! so a batch of them all land at that one instant — there is no earlier
 //! honest observation to use, and the rate limiter reads that batch as
 //! conversations opened at once. It counts them during the phase where it does
-//! not judge, so nothing is tombstoned for it on that boot, and from that boot
-//! on the values never move again.
+//! not judge, so nothing is tombstoned on that boot.
+//!
+//! The hour after that boot is not free, though, and this is the sentence that
+//! says so. A member who had six or more future-dated openers sitting in
+//! storage now has six conversations stamped as started at that one instant, so
+//! their next message into any of those threads inside the window is tombstoned
+//! and earns them a world-readable `dm-rate-limit` row saying they started six
+//! conversations. Nobody started anything at that moment; the batch is an
+//! artifact of when this worker first looked. What buys it is that it happens
+//! ONCE EVER rather than on every restart — the values never move again after
+//! that boot, which is exactly what the recompute-on-read version it replaced
+//! could not say.
 //!
 //! EVERY OTHER DM CONSUMER IS DOWNSTREAM OF THIS ONE. `workers::watch_dms` does
 //! not fan the DM stream out three ways. It feeds this worker alone, and [`run`]

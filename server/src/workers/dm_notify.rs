@@ -43,6 +43,7 @@
 use std::collections::HashSet;
 
 use ankurah::ankql::{ast::Expr, parser::parse_selection};
+use ankurah::error::RetrievalError;
 use ankurah::{Context, EntityId};
 use anyhow::{Context as _, Result};
 use community_model::{dm_partner, DmMessageView, DmThreadView, Notification, NotificationView};
@@ -194,8 +195,16 @@ fn remember(cache: &mut HashSet<(EntityId, EntityId)>, recipient: EntityId, mess
 async fn thread_participants(ctx: &Context, thread: EntityId) -> Option<(EntityId, EntityId)> {
     let view = match ctx.get::<DmThreadView>(thread).await {
         Ok(view) => view,
+        // Split the same way the limiter's twin of this function splits it, and
+        // for the same reason: no such row is expected traffic and stays quiet,
+        // while a storage failure costs the recipient a notification and has to
+        // be visible. Same split again as `mentions::deliver`.
+        Err(RetrievalError::EntityNotFound(_)) | Err(RetrievalError::CollectionNotFound(_)) => {
+            debug!(thread = %thread, "DM fan-out: no thread row to resolve participants from");
+            return None;
+        }
         Err(e) => {
-            debug!(thread = %thread, "DM fan-out: no thread row to resolve participants from: {e:#}");
+            warn!(thread = %thread, "DM fan-out: could not read this message's thread row, so nobody is notified of it: {e:#}");
             return None;
         }
     };

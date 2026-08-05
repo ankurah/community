@@ -419,11 +419,17 @@ pub struct DmThread {
     /// No code path edits it after creation. Nothing enforces that: the write
     /// scope only asks whether the writer is one of `a`/`b`, so a participant's
     /// client could in principle rewrite the OTHER seat and hand the
-    /// conversation, and its history, to a third person. Closing that needs a
-    /// write gate the policy grammar cannot express today (a field pinned
-    /// immutable after creation); it is recorded here rather than papered over,
-    /// and it is a reason to be suspicious of any future client code that
-    /// edits a thread row at all.
+    /// conversation to a third person. What goes with it is the thread row and
+    /// every DM notification the fan-out sends afterwards — not the history:
+    /// each `DmMessage` carries its own copy of the pair (see that type's doc)
+    /// and the read scope reads that copy off the row, so the messages already
+    /// in the thread stay unreadable to the newcomer. The reseater can hand over
+    /// the ones they wrote by rewriting `a`/`b` on those rows too, which their
+    /// write scope permits; the other participant's are pinned to a sender they
+    /// are not. Closing the rewrite itself needs a write gate the policy grammar
+    /// cannot express today (a field pinned immutable after creation); it is
+    /// recorded here rather than papered over, and it is a reason to be
+    /// suspicious of any future client code that edits a thread row at all.
     #[active_type(LWW)]
     pub a: Ref<User>,
     /// The higher-ordered participant, on the same terms.

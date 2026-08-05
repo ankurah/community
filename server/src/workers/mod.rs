@@ -851,7 +851,12 @@ mod tests {
     /// While the limiter cached the pair, a reseated thread went on looking
     /// like a conversation between the original two, opened a month ago and
     /// answered — so it cost nothing — while the newly named member began
-    /// receiving the fan-out's notifications and could read the history.
+    /// receiving the fan-out's notifications for it. The history does not travel
+    /// with the row: every message already in the thread carries its own copy of
+    /// the old pair and the read scope reads that copy off the row, so the
+    /// newcomer opens an empty conversation. What the reseater can also hand
+    /// over is the messages they wrote themselves, by rewriting `a`/`b` on those
+    /// rows too — never the other participant's.
     ///
     /// The limiter is driven by hand here: everything before
     /// `Traffic::BacklogComplete` is counted and not judged, which is the boot

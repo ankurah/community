@@ -97,9 +97,19 @@
 //! rewrite the other seat. Remembering the first answer made that rewrite
 //! free: the thread went on counting as a conversation between its original
 //! two, opened long ago and answered, while the newly named member started
-//! receiving notifications and could read the history. A thread that now names
-//! a different pair is treated as the new conversation it is — see
+//! receiving the fan-out's notifications for it. A thread that now names a
+//! different pair is treated as the new conversation it is — see
 //! [`Limiter::reseat`].
+//!
+//! WHAT A RESEAT ACTUALLY HANDS OVER, since it is easy to overstate. The thread
+//! row, and every notification the fan-out sends into it afterwards. NOT the
+//! history: each `dm_message` carries its own copy of the pair and the read
+//! scope reads that copy off the row, so messages written before the rewrite
+//! still name the old pair and stay unreadable to the newcomer. The reseater can
+//! hand over the messages THEY wrote, by rewriting `a`/`b` on those rows too —
+//! the write scope permits it, asking only that the writer is the sender and one
+//! of the pair — but not the other participant's, which are pinned to a sender
+//! the reseater is not.
 //!
 //! TIMESTAMPS ARE CLIENT-SUPPLIED, AND THE WINDOW LIVES WITH THAT. A sender
 //! could future-date messages to jump the timeline or back-date them to slip
@@ -131,6 +141,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use ankurah::error::RetrievalError;
 use ankurah::{Context, EntityId};
 use anyhow::{Context as _, Result};
 use community_model::{canonical_pair, DmMessageView, DmThreadView, ModAction};
@@ -572,7 +583,8 @@ async fn process(ctx: &Context, state: &mut State, msg: &DmMessageView) -> Resul
 /// and short-circuiting on it meant a reseated thread stayed, in this worker's
 /// picture, a conversation between its original two members that was opened
 /// long ago and answered — which is to say it cost nothing, while the newly
-/// named member started receiving notifications and could read the history.
+/// named member started receiving the fan-out's notifications for it (not its
+/// history; the module doc says what a reseat does and does not hand over).
 /// The cost of asking every time is one local read per message, including
 /// during the boot sweep; the thing it buys is that the pair the limiter counts
 /// by is the pair the row actually names.
@@ -585,8 +597,18 @@ async fn process(ctx: &Context, state: &mut State, msg: &DmMessageView) -> Resul
 async fn thread_participants(ctx: &Context, state: &mut State, thread: EntityId) -> Option<Pair> {
     let view = match ctx.get::<DmThreadView>(thread).await {
         Ok(view) => view,
+        // No such row is ordinary traffic and stays at debug — messages naming a
+        // thread nobody created are an accepted residual, and logging each one
+        // would be noise. A storage failure is a different thing wearing the
+        // same shape: this lookup runs for EVERY message, and a failed one drops
+        // that message out of the window and the unanswered count with nothing
+        // to show for it. Same split as `mentions::deliver`.
+        Err(RetrievalError::EntityNotFound(_)) | Err(RetrievalError::CollectionNotFound(_)) => {
+            debug!(thread = %thread, "DM rate limit: no thread row for this message, so nothing to count");
+            return None;
+        }
         Err(e) => {
-            debug!(thread = %thread, "DM rate limit: no thread row for this message, so nothing to count: {e:#}");
+            warn!(thread = %thread, "DM rate limit: could not read this message's thread row, so the message goes uncounted: {e:#}");
             return None;
         }
     };
