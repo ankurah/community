@@ -78,8 +78,10 @@ pub fn Sidebar(
     /// Which correspondent's conversation is open, by id.
     selected_dm: RwSignal<Option<EntityId>>,
 ) -> impl IntoView {
-    // Resolved in the body and handed to the effect, so nothing looks the
-    // handshake up from a context that may not have an owner.
+    // Resolved in the body and handed to the effect. An effect does carry an
+    // owner, so this is not a fix for a panic; it is so that the closure below
+    // — which is `'static` and could be installed anywhere — does not depend
+    // on where it ends up being run.
     Effect::new(auto_select_room(ankurah_chat_leptos::chat(), selected_room));
     Effect::new(sync_url_with_room(selected_room));
 

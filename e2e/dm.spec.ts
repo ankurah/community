@@ -121,17 +121,25 @@ test.describe.skip('Direct messages (#30)', () => {
     await expect(B.locator('.messagesContainer')).toContainText(m1, { timeout: 15_000 });
     await expect(B.locator('.messagesContainer')).toContainText(m2, { timeout: 15_000 });
 
-    // AND the write side: every send resolves the pair afresh and picks the
-    // lowest thread id, so once the race has settled both tabs write into the
-    // SAME row. The assertions above would pass with the two tabs writing into
-    // different twins forever — they only read across the pair — so this is
-    // what actually pins canonical routing.
+    // A second exchange, after the race window has closed.
     //
-    // Read the rows off the DOM rather than the store: a bubble carries its
-    // entity id, and a message's thread is not on screen, so the check is that
-    // the newest message from each tab arrives at the recipient under one
-    // conversation AFTER the race window, when neither tab can still be
-    // resolving.
+    // WHAT THIS PINS: cross-tab delivery once things have settled, and that the
+    // recipient still sees exactly one conversation rather than two.
+    //
+    // WHAT IT DOES NOT PIN, said plainly so nobody reads more into it: that the
+    // two tabs write into the SAME thread row. Every assertion here is
+    // satisfied by cross-pair reads — a conversation view reads all of the
+    // pair's rows — so both tabs could go on writing into different twins
+    // forever and this would still pass. Nothing on screen carries the thread a
+    // message belongs to, and nothing observes which of a pair's rows is
+    // canonical.
+    //
+    // WHAT WOULD PIN IT, for whoever rewrites these against OIDC (issue #1):
+    // count the pair's `dmthread` rows and assert every message hangs off the
+    // lowest id — either by querying the store from the page, or by putting the
+    // thread ref on the row's DOM (a `data-thread-id` beside `data-msg-id`)
+    // so a locator can see it. Until then, canonical write routing is pinned by
+    // the server-side convergence tests and by reading the code, not by this.
     const settled1 = `settled tab one ${Date.now()}`;
     const settled2 = `settled tab two ${Date.now()}`;
     await tab1.locator('.input[placeholder="Type a message..."]').fill(settled1);

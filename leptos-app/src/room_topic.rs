@@ -19,10 +19,15 @@ use crate::{can_moderate, ctx, current_user_id};
 
 #[component]
 pub fn RoomTopic(room_id: RwSignal<Option<EntityId>>) -> impl IntoView {
-    // Taken HERE, in the body. The derived signal below is read from click
-    // handlers — start_edit walks can_edit walks room — and a DOM event has no
-    // reactive owner for the handshake to resolve through. Resolving it inside
-    // the closure would panic on the first click.
+    // Taken HERE, in the body, and captured by the derived signal below.
+    //
+    // Not because a click handler could not resolve it — tachys re-enters the
+    // owner it captured when it attached the listener, so it can. The reason
+    // is that a `Signal::derive` closure is `Send + Sync + 'static` and travels
+    // wherever the signal is passed: whether any given read has an owner
+    // becomes a property of every call site rather than of this code. Holding
+    // the handle makes it a property of this line, and saves a context walk on
+    // every evaluation.
     let chat = ankurah_chat_leptos::chat();
 
     // The row behind the id, from the chat handshake's rooms query — the same
