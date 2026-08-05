@@ -39,9 +39,11 @@ pub fn NotificationBadge() -> impl IntoView {
         )
         .expect("failed to create NotificationView LiveQuery");
 
-    // App-lifetime query (the header lives for the whole session), surfaced
-    // in the X-ray queries card like `rooms (app)` — id discarded.
-    crate::xray::bus::bus().register("notifications (bell)", &unseen);
+    // App-lifetime query (the header lives for the whole session), named for
+    // whatever observer the app attached — like `rooms (app)`. The guard is
+    // parked in the cleanup closure so it lives as long as the badge.
+    let query_reg = crate::query_registry::register("notifications (bell)", &unseen);
+    on_cleanup(move || drop(query_reg));
 
     move || {
         let count = unseen.get().iter().filter(|n| is_mine(n, me) && !n.seen().unwrap_or(true)).count();
@@ -94,17 +96,13 @@ pub fn NotificationInbox(
     let users = ctx().query::<UserView>("true").expect("failed to create UserView LiveQuery");
     let rooms = ctx().query::<RoomView>("true ORDER BY name ASC").expect("failed to create RoomView LiveQuery");
 
-    // Surface the panel's own collections in the X-ray queries card while it
-    // is open (transient registrations, dropped on close).
-    let xray_regs = (
-        crate::xray::bus::bus().register("notifications (inbox)", &notifications),
-        crate::xray::bus::bus().register("notificationprefs (inbox)", &prefs),
-    );
-    on_cleanup(move || {
-        let bus = crate::xray::bus::bus();
-        bus.unregister(xray_regs.0);
-        bus.unregister(xray_regs.1);
-    });
+    // Name the panel's own collections for the app's query-registry observer
+    // while the panel is open (transient registrations, dropped on close).
+    let query_regs = [
+        crate::query_registry::register("notifications (inbox)", &notifications),
+        crate::query_registry::register("notificationprefs (inbox)", &prefs),
+    ];
+    on_cleanup(move || drop(query_regs));
 
     let names_by_user = Memo::new(move |_| {
         users.get().iter().map(|u| (u.id().to_base64(), u.display_name().unwrap_or_default())).collect::<HashMap<String, String>>()

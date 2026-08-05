@@ -82,21 +82,14 @@ pub fn UserDetailPanel(
         move || -> Vec<BanView> { bans_query.as_ref().map(|q| q.get().to_vec()).unwrap_or_default() }
     };
 
-    // Surface the sidebar's queries in the X-ray queries card while it's open
-    // (transient registrations, dropped on close — members-panel precedent).
-    let xray_regs = (
-        roles_query.as_ref().map(|q| crate::xray::bus::bus().register("userroles (user detail)", q)),
-        bans_query.as_ref().map(|q| crate::xray::bus::bus().register("bans (user detail)", q)),
-    );
-    on_cleanup(move || {
-        let bus = crate::xray::bus::bus();
-        if let Some(reg) = xray_regs.0 {
-            bus.unregister(reg);
-        }
-        if let Some(reg) = xray_regs.1 {
-            bus.unregister(reg);
-        }
-    });
+    // Name the sidebar's queries for the app's query-registry observer while
+    // it's open (transient registrations, dropped on close — members-panel
+    // precedent).
+    let query_regs = [
+        roles_query.as_ref().map(|q| crate::query_registry::register("userroles (user detail)", q)),
+        bans_query.as_ref().map(|q| crate::query_registry::register("bans (user detail)", q)),
+    ];
+    on_cleanup(move || drop(query_regs));
 
     // Move focus onto the sidebar so screen readers announce it (Escape is
     // window-level — see panels.rs — so it works wherever focus sits).

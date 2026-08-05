@@ -1,21 +1,22 @@
-//! The x-ray bus: an app-side registry of LiveQueries plus a bounded live
+//! The x-ray bus: x-ray's view of the app's LiveQueries plus a bounded live
 //! event feed built from their changesets.
+//!
+//! The bus does not know the app's queries first-hand — it is one observer of
+//! the generic query registry (`crate::query_registry`), which components
+//! register with and which x-ray attaches to at startup (`xray::attach`).
+//! Every registration lands here as a [`QueryEntry`]; when the component drops
+//! its registration, the entry goes with it.
 //!
 //! Honesty note: ankurah 0.9.0 keeps the reactor's subscription table
 //! `pub(crate)` (`ankurah-core/src/node.rs`), so a client cannot enumerate
 //! *all* node subscriptions — only the queries the app itself holds and
-//! chooses to register here. The panel labels itself accordingly.
+//! chooses to register. The panel labels itself accordingly.
 //!
-//! Registration stores cheap introspection handles (`query_id`, the reactive
+//! An entry stores cheap introspection handles (`query_id`, the reactive
 //! selection, the untyped resultset, the error signal). The changeset *tap*
-//! (`LiveQuery::subscribe`, which is what feeds the event stream) is only
-//! installed while x-ray is enabled, and dropped on disable — a registered
-//! query costs nothing while x-ray is off.
-//!
-//! Post-merge integration: call `xray::bus::bus().register("rooms", &query)`
-//! right where the app creates each long-lived query (ChatApp's rooms query,
-//! chat.rs's per-room query, ...). Keep the returned `RegistrationId` and
-//! `unregister` it when the query is dropped (e.g. on room change).
+//! (which is what feeds the event stream) is installed only while x-ray is
+//! enabled, and dropped on disable — a registered query costs nothing while
+//! x-ray is off.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -23,49 +24,26 @@ use std::sync::{Mutex, OnceLock, RwLock};
 
 use leptos::prelude::{ArcRwSignal, Update};
 
-use ankurah::changes::{ChangeSet, ItemChange};
-use ankurah::core::livequery::EntityLiveQuery;
-use ankurah::core::resultset::EntityResultSet;
-use ankurah::error::RetrievalError;
-use ankurah::proto::{Attested, Clock, CollectionId, EntityId, Event, EventId, QueryId};
-use ankurah::{LiveQuery, View};
+use ankurah::changes::ChangeKind;
+use ankurah::proto::{Attested, Clock, CollectionId, EntityId, Event, EventId};
 use ankurah_signals::{Read, Subscribe, SubscriptionGuard};
 
+use crate::query_registry::{QueryChange, QueryObserver, RegisteredQuery, RegistrationId};
 use crate::ws_client;
 
-/// Handle for removing a registry entry (returned by [`BusHandle::register`]).
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub struct RegistrationId(u64);
-
-/// One registered LiveQuery: introspection handles + the deferred tap.
-pub struct QueryEntry {
-    pub id: RegistrationId,
-    pub label: String,
-    pub query_id: QueryId,
-    pub collection: CollectionId,
-    /// Reactive (selection, version) — the version bumps on predicate updates.
-    pub selection: Read<(ankurah::ankql::ast::Selection, u32)>,
-    /// Untyped resultset; `len()` / `is_loaded()` track reactively.
-    pub resultset: EntityResultSet,
-    pub error: Read<Option<RetrievalError>>,
+/// One registered LiveQuery: the registry's handles plus x-ray's own
+/// per-query bookkeeping.
+struct QueryEntry {
+    query: RegisteredQuery,
     /// Changesets seen by the tap since registration (activity indicator).
-    pub changes_seen: ArcRwSignal<u64>,
-    /// Installs the changeset tap. Kept as a factory so taps can be created
-    /// and dropped as x-ray toggles without re-registering.
-    make_tap: Box<dyn Fn() -> SubscriptionGuard + Send + Sync>,
+    changes_seen: ArcRwSignal<u64>,
     tap: Mutex<Option<SubscriptionGuard>>,
 }
 
 /// Renderable clone of one registry entry (see [`BusHandle::snapshot`]).
 #[derive(Clone)]
 pub struct QuerySnapshot {
-    pub id: RegistrationId,
-    pub label: String,
-    pub query_id: QueryId,
-    pub collection: CollectionId,
-    pub selection: Read<(ankurah::ankql::ast::Selection, u32)>,
-    pub resultset: EntityResultSet,
-    pub error: Read<Option<RetrievalError>>,
+    pub query: RegisteredQuery,
     pub changes_seen: ArcRwSignal<u64>,
 }
 
@@ -104,7 +82,6 @@ struct BusInner {
     entries_rev: ArcRwSignal<u64>,
     feed: ArcRwSignal<VecDeque<FeedEntry>>,
     tapping: AtomicBool,
-    next_id: AtomicU64,
     /// Connection-state transition log (timestamp ms, description).
     conn_log: ArcRwSignal<VecDeque<(f64, String)>>,
     conn_guard: Mutex<Option<SubscriptionGuard>>,
@@ -124,65 +101,48 @@ pub fn bus() -> BusHandle {
         entries_rev: ArcRwSignal::new(0),
         feed: ArcRwSignal::new(VecDeque::new()),
         tapping: AtomicBool::new(false),
-        next_id: AtomicU64::new(1),
         conn_log: ArcRwSignal::new(VecDeque::new()),
         conn_guard: Mutex::new(None),
     }))
 }
 
-impl BusHandle {
-    /// Register a LiveQuery under a human label. Introspection is immediate;
-    /// the changeset tap is installed only while x-ray is enabled.
-    pub fn register<R>(&self, label: &str, lq: &LiveQuery<R>) -> RegistrationId
-    where R: View + Clone + Send + Sync + 'static {
-        let id = RegistrationId(self.0.next_id.fetch_add(1, Ordering::Relaxed));
+/// X-ray's attachment to the query registry. Stateless — every registration it
+/// hears about lands in the process-wide bus.
+pub struct BusObserver;
+
+impl QueryObserver for BusObserver {
+    fn query_registered(&self, query: &RegisteredQuery) {
+        let handle = bus();
         let changes_seen = ArcRwSignal::new(0u64);
+        // A query that arrives while x-ray is on starts tapped; `set_tapping`
+        // covers the ones already here when it is switched on.
+        let tap = handle.0.tapping.load(Ordering::Relaxed).then(|| install_tap(query, &changes_seen));
+        let entry = QueryEntry { query: query.clone(), changes_seen, tap: Mutex::new(tap) };
 
-        let make_tap: Box<dyn Fn() -> SubscriptionGuard + Send + Sync> = {
-            let lq = lq.clone();
-            let feed = self.0.feed.clone();
-            let label = label.to_string();
-            let collection = R::collection();
-            let changes_seen = changes_seen.clone();
-            Box::new(move || {
-                let feed = feed.clone();
-                let label = label.clone();
-                let collection = collection.clone();
-                let changes_seen = changes_seen.clone();
-                lq.subscribe(move |cs: ChangeSet<R>| {
-                    changes_seen.update(|n| *n += 1);
-                    push_changeset(&feed, &label, &collection, &cs);
-                })
-            })
-        };
-
-        // Untyped resultset via the EntityLiveQuery deref (the typed
-        // `LiveQuery::resultset` would pin us to R here for no benefit).
-        let elq: &EntityLiveQuery = lq;
-        let entry = QueryEntry {
-            id,
-            label: label.to_string(),
-            query_id: lq.query_id(),
-            collection: R::collection(),
-            selection: lq.selection(),
-            resultset: elq.resultset(),
-            error: lq.error(),
-            changes_seen,
-            tap: Mutex::new(self.0.tapping.load(Ordering::Relaxed).then(&*make_tap)),
-            make_tap,
-        };
-
-        self.0.entries.write().unwrap_or_else(|e| e.into_inner()).push(entry);
-        self.0.entries_rev.update(|r| *r += 1);
-        id
+        handle.0.entries.write().unwrap_or_else(|e| e.into_inner()).push(entry);
+        handle.0.entries_rev.update(|r| *r += 1);
     }
 
-    /// Drop a registry entry (and its tap, if installed).
-    pub fn unregister(&self, id: RegistrationId) {
-        self.0.entries.write().unwrap_or_else(|e| e.into_inner()).retain(|e| e.id != id);
-        self.0.entries_rev.update(|r| *r += 1);
+    fn query_unregistered(&self, id: RegistrationId) {
+        let handle = bus();
+        handle.0.entries.write().unwrap_or_else(|e| e.into_inner()).retain(|e| e.query.id != id);
+        handle.0.entries_rev.update(|r| *r += 1);
     }
+}
 
+/// Start turning one query's changesets into feed rows.
+fn install_tap(query: &RegisteredQuery, changes_seen: &ArcRwSignal<u64>) -> SubscriptionGuard {
+    let feed = bus().0.feed.clone();
+    let label = query.label.clone();
+    let collection = query.collection.clone();
+    let changes_seen = changes_seen.clone();
+    query.watch_changes(move |changes: &[QueryChange]| {
+        changes_seen.update(|n| *n += 1);
+        push_changes(&feed, &label, &collection, changes);
+    })
+}
+
+impl BusHandle {
     /// Install or drop the changeset taps on every registered query.
     /// Called from `XRayState::set_enabled` — not part of the public API.
     pub(crate) fn set_tapping(&self, on: bool) {
@@ -190,7 +150,7 @@ impl BusHandle {
         let entries = self.0.entries.read().unwrap_or_else(|e| e.into_inner());
         for entry in entries.iter() {
             let mut tap = entry.tap.lock().unwrap_or_else(|e| e.into_inner());
-            *tap = on.then(|| (entry.make_tap)());
+            *tap = on.then(|| install_tap(&entry.query, &entry.changes_seen));
         }
     }
 
@@ -201,19 +161,7 @@ impl BusHandle {
     /// (Entries themselves hold the tap and are not `Clone`.)
     pub fn snapshot(&self) -> Vec<QuerySnapshot> {
         let entries = self.0.entries.read().unwrap_or_else(|e| e.into_inner());
-        entries
-            .iter()
-            .map(|e| QuerySnapshot {
-                id: e.id,
-                label: e.label.clone(),
-                query_id: e.query_id,
-                collection: e.collection.clone(),
-                selection: e.selection.clone(),
-                resultset: e.resultset.clone(),
-                error: e.error.clone(),
-                changes_seen: e.changes_seen.clone(),
-            })
-            .collect()
+        entries.iter().map(|e| QuerySnapshot { query: e.query.clone(), changes_seen: e.changes_seen.clone() }).collect()
     }
 
     /// The live feed ring buffer (newest first).
@@ -233,39 +181,37 @@ impl BusHandle {
 /// Convert one changeset into feed rows. Add/Update/Remove get a row each
 /// (with their events); the initial load is coalesced into a single row so
 /// opening a query doesn't flood the feed.
-fn push_changeset<R>(
-    feed: &ArcRwSignal<VecDeque<FeedEntry>>,
-    label: &str,
-    collection: &CollectionId,
-    cs: &ChangeSet<R>,
-) where
-    R: View + Clone,
-{
+fn push_changes(feed: &ArcRwSignal<VecDeque<FeedEntry>>, label: &str, collection: &CollectionId, changes: &[QueryChange]) {
     let now = js_sys::Date::now();
     let mut rows: Vec<FeedEntry> = Vec::new();
     let mut initial_count = 0usize;
 
-    for change in &cs.changes {
-        let kind = match change {
-            ItemChange::Initial { .. } => {
+    for change in changes {
+        let kind = match change.kind {
+            ChangeKind::Initial => {
                 initial_count += 1;
                 continue;
             }
-            ItemChange::Add { .. } => "add",
-            ItemChange::Update { .. } => "update",
-            ItemChange::Remove { .. } => "remove",
+            ChangeKind::Add => "add",
+            ChangeKind::Update => "update",
+            ChangeKind::Remove => "remove",
         };
-        let item = change.entity();
+        // Every non-initial change carries its cause; a row without one still
+        // reports the change, just without head or events.
+        let (head_short, events) = match &change.cause {
+            Some(cause) => (cause.head.to_base64_short(), cause.events.iter().map(summarize_event).collect()),
+            None => (String::new(), Vec::new()),
+        };
         rows.push(FeedEntry {
             seq: FEED_SEQ.fetch_add(1, Ordering::Relaxed),
             at_ms: now,
             query_label: label.to_string(),
             collection: collection.clone(),
-            entity_id: Some(item.id()),
+            entity_id: Some(change.entity_id),
             kind,
             count: 1,
-            head_short: item.entity().head().to_base64_short(),
-            events: change.events().iter().map(summarize_event).collect(),
+            head_short,
+            events,
         });
     }
 
