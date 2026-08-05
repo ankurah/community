@@ -1,10 +1,19 @@
 //! DM fan-out: a `DmMessage` becomes ONE `Notification { kind: "dm" }` for the
 //! other participant (#30).
 //!
-//! Consumes `DmMessageView`s from the standing DM LiveQuery (see
-//! `workers::start`) and creates the recipient's inbox row under the privileged
-//! Root context — the only path that can create rows for another user (the
-//! notification write scope pins client writes to `recipient = $jwt.sub`).
+//! Consumes `DmMessageView`s handed over by `dm_timestamp`, the stage upstream
+//! of this one (see `workers::watch_dms`), and creates the recipient's inbox row
+//! under the privileged Root context — the only path that can create rows for
+//! another user (the notification write scope pins client writes to
+//! `recipient = $jwt.sub`).
+//!
+//! Being downstream is load-bearing, not incidental. Every row that arrives here
+//! has had its send time settled already, so the `created_at` this worker stamps
+//! on an inbox row is never earlier than the `timestamp` the message ends up
+//! with — which is precisely what [`dm_notification_exists`] compares on the
+//! next restart. Nothing in this file would repair that ordering if it were
+//! wrong: the delivered cache below answers for a message already handled and
+//! returns before the probe runs at all.
 //!
 //! THE RULE THAT MAKES THIS A SEPARATE WORKER RATHER THAN A BRANCH IN
 //! `mentions.rs`: **DM text is never scanned for mentions.** A third party
@@ -53,11 +62,14 @@ pub const DM_KIND: &str = "dm";
 pub async fn run(ctx: Context, rx: &mut UnboundedReceiver<DmMessageView>) {
     info!("DM notification worker started (dm_message rows -> kind=\"dm\" notification rows)");
     // (recipient, message) pairs already delivered, so edit-driven Updates
-    // don't re-run storage queries. Purely an optimization: a miss falls back
-    // to the existence probe. Keyed on the pair rather than on a token
-    // signature (the mention worker's shape) because there are no tokens here
-    // to sign — a DM's recipient is whoever its thread names, and this cache
-    // only has to recognize a message it already handled for that person.
+    // don't re-run storage queries. A miss falls back to the existence probe; a
+    // HIT returns without probing at all, which is why the row this worker
+    // writes has to be right the first time — see the module doc, and the stage
+    // upstream that settles the send time before handing the row over. Keyed on
+    // the pair rather than on a token signature (the mention worker's shape)
+    // because there are no tokens here to sign — a DM's recipient is whoever its
+    // thread names, and this cache only has to recognize a message it already
+    // handled for that person.
     let mut delivered: HashSet<(EntityId, EntityId)> = HashSet::new();
     while let Some(msg) = rx.recv().await {
         let message_id = msg.id();
@@ -127,12 +139,13 @@ async fn process_dm(ctx: &Context, msg: &DmMessageView, delivered: &mut HashSet<
         debug!(message = %msg.id(), "DM notification suppressed by recipient's notification prefs");
         return Ok(());
     }
-    // Read as stored, deliberately not compensated here. `dm_timestamp` has
-    // already rewritten a future-dated row to the server clock, so this number
-    // is honest and, crucially, the SAME number on the next restart. Taking
-    // `min(now)` here instead is what made a year-2100 message re-clamp to a
-    // later instant on every boot, miss the probe below, and mint a fresh
-    // unread row each time.
+    // Read as stored, deliberately not compensated here. `dm_timestamp` settled
+    // this row before it forwarded it, so this number is honest, it is at or
+    // below the `created_at` written a few lines down, and — the part the probe
+    // rests on — it is the SAME number on the next restart. Taking `min(now)`
+    // here instead is what made a year-2100 message re-clamp to a later instant
+    // on every boot, miss the probe below, and mint a fresh unread row each
+    // time.
     let sent_at = msg.timestamp().context("read DM timestamp")?;
     if dm_notification_exists(ctx, recipient, sender, sent_at).await? {
         remember(delivered, recipient, msg.id());
@@ -211,9 +224,15 @@ async fn thread_participants(ctx: &Context, thread: EntityId) -> Option<(EntityI
 /// restarts, the unseen leg no longer matches and the old message would mint a
 /// brand-new unread row — announcing last month's DM again, on every restart.
 /// A row created at or after the message's own timestamp is proof that message
-/// was already delivered. This leg only holds up because the stored timestamp
-/// stands still: `dm_timestamp` settles a future-dated row once and persists
-/// it, so the same message answers this probe the same way on every boot.
+/// was already delivered. This leg rests on two things the pipeline gives it.
+/// The stored timestamp stands still — `dm_timestamp` settles a future-dated
+/// row once and persists it, so the same message answers this probe the same
+/// way on every boot. And the row this worker writes really is proof, because
+/// the settling write happened before this worker was handed the message: its
+/// `created_at` cannot be earlier than the timestamp the message ended up with.
+/// While the two ran in parallel that second half was not true, and the
+/// notification a recipient had already read stopped answering for its own
+/// message after a restart.
 ///
 /// The two legs cannot be collapsed into "any row at all": that would make the
 /// FIRST notification from a correspondent the last one they could ever send.

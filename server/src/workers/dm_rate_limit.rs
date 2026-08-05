@@ -105,16 +105,21 @@
 //! could future-date messages to jump the timeline or back-date them to slip
 //! out of the window. Future-dating is the move that pays (a message dated
 //! next year sits at the top of every "newest first" list forever) and it is
-//! neutralized in `dm_timestamp`, a sibling worker that rewrites such a
-//! timestamp to the server clock and COMMITS it, so every reader — this one,
-//! the fan-out, and the client queries that sort inside the query — gets the
-//! same honest number. The local `min(now)` in [`Limiter::observe`] survives
-//! only as cover for the commit-wide window before that write lands; on a
-//! settled row it does nothing. What it must not become again is the whole
-//! defence: a clamp recomputed against the current clock moves every time it
-//! is evaluated, and the boot sweep evaluates it on every restart, which
-//! collapsed six gradually-opened future-dated threads into one window and
-//! tombstoned the sender's next message.
+//! neutralized in `dm_timestamp`, the stage this worker is fed FROM: it
+//! rewrites such a timestamp to the server clock, COMMITS it, and only then
+//! passes the row on, so every reader — this one, the fan-out, and the client
+//! queries that sort inside the query — gets the same honest number, and this
+//! worker is never handed an unsettled one.
+//!
+//! The local `min(now)` in [`Limiter::observe`] is therefore no longer covering
+//! a window; it is kept as a property of the counting rule itself. [`Limiter`]
+//! is a plain type with its own tests and no knowledge of who feeds it, and
+//! "count a message at no later than the clock you are handed" should be true
+//! of the type rather than of one caller's pipeline. What it must not become
+//! again is the whole defence: a clamp recomputed against the current clock
+//! moves every time it is evaluated, and the boot sweep evaluates it on every
+//! restart, which collapsed six gradually-opened future-dated threads into one
+//! window and tombstoned the sender's next message.
 //!
 //! Back-dating is self-defeating — a back-dated message buries itself in the
 //! recipient's history — so it is accepted rather than defended against. That
@@ -257,11 +262,13 @@ impl Limiter {
     /// account) rewrite a conversation's facts: one such row makes a
     /// monologue look answered, which switches the unanswered limit off.
     ///
-    /// `now` is the server clock: the right edge of the window, and a floor
-    /// under `client_ts` for the one case that floor still has to cover — a
-    /// future-dated row seen before `dm_timestamp`'s settling write has landed.
-    /// On every settled row the floor is inert, which is the point: the number
-    /// this limiter counts by has to be the same number after a restart.
+    /// `now` is the server clock: the right edge of the window, and a ceiling
+    /// over `client_ts`. That ceiling is inert on every row the worker actually
+    /// hands over — `dm_timestamp` settles a row before it forwards it — and it
+    /// is kept because it belongs to this type rather than to that pipeline: a
+    /// message is counted at no later than the clock the caller supplies,
+    /// whoever the caller is. The number itself must be the stored one, so that
+    /// it is the same number after a restart.
     pub fn observe(
         &mut self,
         message: EntityId,
@@ -275,10 +282,10 @@ impl Limiter {
             return Verdict::Allow;
         }
         let pair = canonical_pair(participants.0, participants.1);
-        // Inert on a settled row (see the parameter doc); load-bearing only in
-        // the window before `dm_timestamp` commits, where without it a single
-        // future-dated opener would stamp its initiation past every cutoff and
-        // hold one of the sender's five slots for good.
+        // Inert on a settled row, which is every row the worker forwards (see
+        // the parameter doc). Kept so that the type's own rule holds for any
+        // caller: without it a single future-dated opener stamps its initiation
+        // past every cutoff and holds one of the sender's five slots for good.
         let ts = client_ts.min(now);
 
         // Who this thread's oldest message belonged to BEFORE this one joined
@@ -1144,13 +1151,13 @@ mod tests {
     /// A future-dated message cannot buy itself a fresh window: this limiter
     /// counts it at no later than the server clock it is handed.
     ///
-    /// This is the local floor, not the lane's answer to future-dating —
-    /// `dm_timestamp` settles the row itself, so in practice `client_ts`
-    /// arrives already at or below `now` and the floor does nothing. What the
-    /// floor covers is the one commit between a live message arriving and that
-    /// write landing, which is exactly the case below: without it a single
-    /// future-dated opener would stamp its initiation past every cutoff and
-    /// hold one of the sender's five slots for good.
+    /// This is the type's own rule, not the lane's answer to future-dating —
+    /// `dm_timestamp` settles a row before it forwards it, so the worker's
+    /// `client_ts` arrives at or below `now` and the ceiling does nothing there.
+    /// It is pinned here because [`Limiter`] does not know who feeds it, and
+    /// what it costs to drop is exactly the case below: a single future-dated
+    /// opener stamping its initiation past every cutoff and holding one of the
+    /// sender's five slots for good.
     #[test]
     fn future_dated_timestamps_are_clamped_to_the_server_clock() {
         let mut limiter = Limiter::default();

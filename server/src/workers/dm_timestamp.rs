@@ -1,4 +1,5 @@
-//! Makes a DM's stored send time honest, once, on first sight (#30).
+//! Makes a DM's stored send time honest, once, on first sight (#30), and is the
+//! stage every other DM consumer is fed from.
 //!
 //! WHAT THIS IS FOR. `DmMessage.timestamp` is written by whichever client sent
 //! the message, so it is a claim about when the message was sent, not a fact.
@@ -51,41 +52,92 @@
 //! not judge, so nothing is tombstoned for it on that boot, and from that boot
 //! on the values never move again.
 //!
-//! TWO ENTRY POINTS, AND WHY. On the boot sweep, `workers::watch_dms` calls
-//! [`settle`] on every backlog row itself and hands the backlog to the other
-//! two consumers only afterwards — so the picture the rate limiter rebuilds on
-//! each restart is built entirely from settled values, which is what its whole
-//! window rests on. For live traffic, [`run`] is one consumer of the shared
-//! stream alongside the other two, so they can see a row in the one commit
-//! before the settling write lands. That transient is accepted: each consumer
-//! converges when the write comes back as an Update — the limiter takes a
-//! running minimum of the timestamps it sees, the fan-out re-probes, a client
-//! re-renders — and the limiter additionally keeps its own local `min(now)`,
-//! inert on a settled row, so a future-dated opener cannot hold one of its
-//! sender's slots even for that window. See
-//! [`super::dm_rate_limit::Limiter::observe`].
+//! EVERY OTHER DM CONSUMER IS DOWNSTREAM OF THIS ONE. `workers::watch_dms` does
+//! not fan the DM stream out three ways. It feeds this worker alone, and [`run`]
+//! hands each row on to the fan-out and to the rate limiter itself, after it has
+//! settled it ([`forward`]). The boot sweep is that same order written out
+//! inline: it calls [`settle`] on every backlog row and forwards the backlog
+//! only afterwards. So no server-side reader of a DM ever sees a send time that
+//! is about to change, on either path.
+//!
+//! That is a structural guarantee, and it replaces a convergence argument that
+//! did not hold. While the three ran in parallel, the fan-out could sample its
+//! own clock for a new inbox row's `created_at` before this worker sampled its
+//! clock and wrote — storing a notification dated EARLIER than the message it
+//! announced. The settling write came back as an Update, but the fan-out
+//! recognizes a message it has already delivered and returns before it re-probes
+//! (`dm_notify`'s delivered cache), so no stored row was ever rewritten: once
+//! the recipient read that notification and the server restarted, the restart
+//! probe found neither an unseen row nor a `created_at` at or after the message,
+//! and minted one duplicate unread row.
+//!
+//! TOMBSTONED ROWS ARE SETTLED TOO, AND GO NO FURTHER. The standing query is
+//! every `dm_message` row rather than the live ones, because a tombstone does
+//! not make a future-dated send time harmless: `leptos-app/src/dm_chat.rs` keeps
+//! tombstones in the timeline and orders by `timestamp`, so an unsettled one
+//! would sit at the top of the conversation for good — and a sender can still
+//! write the timestamp of a row that is already tombstoned, their write scope
+//! being unchanged by the flag. [`forward`] then drops them, so what the fan-out
+//! and the limiter are handed is exactly what they were handed before: live rows
+//! only.
 
 use ankurah::Context;
 use anyhow::{Context as _, Result};
 use community_model::DmMessageView;
-use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tracing::{info, warn};
 
+use super::dm_rate_limit::Traffic;
 use super::now_ms;
 
-/// Consumer loop for live traffic. The receiver is borrowed from the supervisor
-/// (`workers::supervise`), which respawns this loop if it ever panics; a row
-/// missed during that pause is settled by the message's next change or the next
-/// boot sweep.
-pub async fn run(ctx: Context, rx: &mut UnboundedReceiver<DmMessageView>) {
-    info!("DM timestamp worker started (a dm_message dated after the server clock is rewritten to it)");
+/// The pipeline's live stage: settle each row's send time, then hand it to the
+/// fan-out and the rate limiter.
+///
+/// The receiver is borrowed from the supervisor (`workers::supervise`), which
+/// respawns this loop if it ever panics; a row missed during that pause is
+/// settled and forwarded by the message's next change or the next boot sweep.
+/// The two senders are the supervisor's own clones, remade per attempt, so a
+/// respawn resumes forwarding rather than talking into a dropped channel.
+pub async fn run(
+    ctx: Context,
+    rx: &mut UnboundedReceiver<DmMessageView>,
+    notify_tx: UnboundedSender<DmMessageView>,
+    limit_tx: UnboundedSender<Traffic>,
+) {
+    info!("DM timestamp worker started (a dm_message dated after the server clock is rewritten to it, then passed on)");
     while let Some(msg) = rx.recv().await {
         let message_id = msg.id();
         if let Err(e) = settle(&ctx, &msg).await {
-            warn!(message = %message_id, "DM timestamp clamp failed (retries on the message's next change): {e:#}");
+            // Forwarded anyway, on the boot sweep's terms: a row nobody could
+            // settle is still traffic, and holding it back would cost the
+            // recipient their notification over a failed write.
+            warn!(message = %message_id, "DM timestamp clamp failed (retries on the message's next change); passing the row on as it stands: {e:#}");
         }
+        forward(&msg, &notify_tx, &limit_tx);
     }
     warn!("DM timestamp worker: message stream closed; exiting");
+}
+
+/// Hand one settled row to the fan-out and the rate limiter — unless it is
+/// tombstoned, which is where the widened query is narrowed back down.
+///
+/// A tombstoned DM notifies nobody and is history to the limiter, which is the
+/// job the old `deleted = false` predicate did before this worker needed to see
+/// tombstones at all (see the module doc). A row whose `deleted` cannot be read
+/// is dropped for the same reason it used to be: a predicate excludes rows
+/// missing the property it names, so this is the behaviour those two consumers
+/// have always had for such a row, not a new judgement about it.
+pub(super) fn forward(msg: &DmMessageView, notify_tx: &UnboundedSender<DmMessageView>, limit_tx: &UnboundedSender<Traffic>) {
+    match msg.deleted() {
+        Ok(false) => {
+            // send() fails only at process teardown: the supervisor owns each
+            // receiver for the process lifetime.
+            let _ = notify_tx.send(msg.clone());
+            let _ = limit_tx.send(Traffic::Message(msg.clone()));
+        }
+        Ok(true) => {}
+        Err(e) => warn!(message = %msg.id(), "DM row does not say whether it is tombstoned; not passing it on: {e:#}"),
+    }
 }
 
 /// Rewrite this message's `timestamp` to the server clock if it claims a time
