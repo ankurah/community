@@ -51,12 +51,15 @@
    outline vs wash keeps "concurrent" and "hovered" visually distinct. The
    class is put on and taken off by xray/inspect.rs, which follows each
    visible entity's head clock.
-   The `[data-collection]` is not redundant. Without it this ties with the
-   components' own `.messageBubble.editing` rule, which sets a SOLID outline —
-   and the components' sheet is injected after this file loads, so a
-   collaborative edit with concurrent heads would show the wrong one. */
-.xrayOn [data-entity-id][data-collection].xrayConcurrent,
-.xrayOn [data-entity-id][data-collection].xrayConcurrent:hover {
+   THE SELECTOR IS LONG ON PURPOSE. The components set a SOLID outline while a
+   message is being edited, in two rules — one for any bubble and one for the
+   reader's OWN, which is four classes — and their sheet is injected after this
+   file loads, so a tie goes to them. A message that is both being edited and
+   concurrent would then show the wrong outline, and on own messages the longer
+   of the two rules made the first attempt at this tie as well. Five carries
+   both. */
+.xrayOn .messageBubble[data-entity-id][data-collection].xrayConcurrent,
+.xrayOn .messageBubble[data-entity-id][data-collection].xrayConcurrent:hover {
   outline: 1.5px dashed var(--unread-bg);
   outline-offset: 2px;
 }

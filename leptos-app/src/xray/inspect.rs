@@ -17,7 +17,7 @@
 //! answer "which collection is this entity in" from the id alone. When
 //! ankurah/ankurah#362 lands, the attribute and the branch below it both go.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
@@ -45,6 +45,9 @@ const CONCURRENT_CLASS: &str = "xrayConcurrent";
 /// starting a second watcher for an entity already being watched.
 static GENERATION: AtomicU64 = AtomicU64::new(0);
 
+/// Bumped for every entity watch started. See [`Installed::watched`].
+static INCARNATIONS: AtomicU64 = AtomicU64::new(0);
+
 /// What the affordances need to exist, and to be taken apart again.
 struct Installed {
     /// Which install this is. See [`GENERATION`].
@@ -52,14 +55,32 @@ struct Installed {
     click: Closure<dyn FnMut(web_sys::MouseEvent)>,
     observer: web_sys::MutationObserver,
     _mutations: Closure<dyn FnMut(js_sys::Array)>,
-    /// Owns the per-entity effects that watch head clocks. Dropping x-ray
-    /// disposes it, and every one of them with it.
+    /// Parent of every per-entity owner below. Uninstalling disposes it, and
+    /// all of them with it.
     owner: Owner,
-    /// Entity ids already being watched, so a bubble that remounts under the
-    /// virtual scroller does not start a second watcher.
-    watched: HashSet<String>,
+    /// Entity ids being watched, each with the owner its effect lives under
+    /// and which incarnation of that watch it is.
+    ///
+    /// AN OWNER PER ENTITY, not one shared owner, because forgetting an id is
+    /// not the same as stopping the work behind it: a leptos `Effect` has no
+    /// cancelling `Drop`, so an effect started for a bubble that has since
+    /// scrolled away would keep its view alive and keep re-running for the
+    /// rest of the session. Pruning cleans that entity's owner, which is what
+    /// actually disposes the effect.
+    ///
+    /// The counter is for the resolve that is still in flight when its bubble
+    /// leaves and comes back: two pending resolves for one id must not both
+    /// attach, so each checks that it is still the incarnation the map holds.
+    watched: HashMap<String, WatchedEntity>,
     /// Entity ids currently showing concurrent heads.
     concurrent: HashSet<String>,
+}
+
+/// One entity's watch: the owner its effect lives under, and which time round
+/// this is.
+struct WatchedEntity {
+    owner: Owner,
+    incarnation: u64,
 }
 
 static INSTALLED: OnceLock<Mutex<Option<SendWrapper<Installed>>>> = OnceLock::new();
@@ -125,7 +146,7 @@ pub fn install() {
         observer,
         _mutations: mutations,
         owner: Owner::new(),
-        watched: HashSet::new(),
+        watched: HashMap::new(),
         concurrent: HashSet::new(),
     }));
     drop(guard);
@@ -143,6 +164,9 @@ pub fn uninstall() {
         }
     }
     installed.observer.disconnect();
+    for watched in installed.watched.values() {
+        watched.owner.cleanup();
+    }
     installed.owner.cleanup();
     for element in bubbles() {
         let _ = element.class_list().remove_1(CONCURRENT_CLASS);
@@ -181,31 +205,51 @@ fn collection_named(name: &str) -> Option<CollectionId> {
 /// outlines. Runs on every DOM change while x-ray is on, which is what keeps
 /// a row that the scroller just mounted from appearing without its outline.
 fn scan() {
-    let mut fresh: Vec<(CollectionId, EntityId, String, u64)> = Vec::new();
+    let mut fresh: Vec<(CollectionId, EntityId, String, u64, u64, Owner)> = Vec::new();
+    let mut retired: Vec<Owner> = Vec::new();
     let present: HashSet<String> = bubbles().iter().filter_map(|b| b.get_attribute("data-entity-id")).collect();
     {
         let mut guard = slot().lock().unwrap_or_else(|e| e.into_inner());
         let Some(installed) = guard.as_mut() else { return };
         let generation = installed.generation;
+
+        // A reader scrolling through a long history mounts and unmounts
+        // hundreds of bubbles; a watch kept for every one of them would hold a
+        // view and an effect alive for the whole session. The observer sees the
+        // removals, so let go of what has left — the entity is picked up again,
+        // from the same live data, if it comes back.
+        //
+        // Pruned FIRST, so a bubble that left and returned within one batch of
+        // mutations is treated as a return: it starts a fresh incarnation, and
+        // the resolve still in flight for the old one finds itself stale.
+        installed.watched.retain(|id, watched| {
+            let keep = present.contains(id);
+            if !keep {
+                retired.push(watched.owner.clone());
+            }
+            keep
+        });
+        installed.concurrent.retain(|id| present.contains(id));
+
         for bubble in bubbles() {
             let Some(id) = bubble.get_attribute("data-entity-id") else { continue };
-            if installed.watched.contains(&id) {
+            if installed.watched.contains_key(&id) {
                 continue;
             }
             let Some((collection, entity_id)) = inspect_target(&bubble) else { continue };
-            installed.watched.insert(id.clone());
-            fresh.push((collection, entity_id, id, generation));
+            let incarnation = INCARNATIONS.fetch_add(1, Ordering::Relaxed) + 1;
+            let owner = installed.owner.with(Owner::new);
+            installed.watched.insert(id.clone(), WatchedEntity { owner: owner.clone(), incarnation });
+            fresh.push((collection, entity_id, id, generation, incarnation, owner));
         }
-        // A reader scrolling through a long history mounts and unmounts
-        // hundreds of bubbles; a watcher kept for every one of them would hold
-        // a view and an effect alive for the whole session. The observer sees
-        // the removals, so forget what has left — it is picked up again, from
-        // the same live data, if it comes back.
-        installed.watched.retain(|id| present.contains(id));
-        installed.concurrent.retain(|id| present.contains(id));
     }
-    for (collection, entity_id, id, generation) in fresh {
-        watch_heads(collection, entity_id, id, generation);
+    // Outside the lock: cleanup runs arbitrary drop code, which must not be
+    // holding it.
+    for owner in retired {
+        owner.cleanup();
+    }
+    for (collection, entity_id, id, generation, incarnation, owner) in fresh {
+        watch_heads(collection, entity_id, id, generation, incarnation, owner);
     }
     paint();
 }
@@ -217,14 +261,14 @@ fn scan() {
 /// effect that reads it re-runs whenever it changes, which is how a
 /// concurrent write that lands while the reader is looking at the row lights
 /// the outline without a reload.
-fn watch_heads(collection: CollectionId, entity_id: EntityId, id: String, generation: u64) {
-    let owner = {
-        let guard = slot().lock().unwrap_or_else(|e| e.into_inner());
-        match guard.as_ref() {
-            Some(installed) => installed.owner.clone(),
-            None => return,
-        }
-    };
+fn watch_heads(
+    collection: CollectionId,
+    entity_id: EntityId,
+    id: String,
+    generation: u64,
+    incarnation: u64,
+    owner: Owner,
+) {
     // The context is taken HERE, before the future defers: `crate::ctx()` is a
     // global in this app, but the entity resolve below is the boundary the
     // component crate draws too, and reading it once keeps the pair honest.
@@ -249,14 +293,15 @@ fn watch_heads(collection: CollectionId, entity_id: EntityId, id: String, genera
             // Forget it, so the next scan can try again. Left in `watched` a
             // failed resolve would mark the bubble as watched forever and its
             // outline would never appear, however many times it re-mounted.
-            forget(&id, generation);
+            forget(&id, generation, incarnation);
             return;
         };
         // The mode may have gone off — or off and on again — while that
-        // resolve was in flight. Hanging an effect on the old owner would
-        // build something already cleaned up; on a new one it would duplicate
-        // a watcher the fresh scan has already started.
-        if !still_current(generation) {
+        // resolve was in flight, and the bubble may have left and come back,
+        // which starts a new incarnation. Either way this resolve is stale:
+        // attaching now would hang an effect on a cleaned-up owner, or add a
+        // second watcher beside the one the fresh scan already started.
+        if !still_current(generation, &id, incarnation) {
             return;
         }
         owner.with(|| {
@@ -264,7 +309,9 @@ fn watch_heads(collection: CollectionId, entity_id: EntityId, id: String, genera
                 let concurrent = watch() > 1;
                 let mut guard = slot().lock().unwrap_or_else(|e| e.into_inner());
                 let Some(installed) = guard.as_mut() else { return };
-                if installed.generation != generation {
+                if installed.generation != generation
+                    || installed.watched.get(&id).map(|w| w.incarnation) != Some(incarnation)
+                {
                     return;
                 }
                 let changed =
@@ -278,20 +325,28 @@ fn watch_heads(collection: CollectionId, entity_id: EntityId, id: String, genera
     });
 }
 
-/// Whether `generation` is still the installed one.
-fn still_current(generation: u64) -> bool {
+/// Whether this install is still the current one AND this entity is still on
+/// the incarnation that started the work.
+fn still_current(generation: u64, id: &str, incarnation: u64) -> bool {
     let guard = slot().lock().unwrap_or_else(|e| e.into_inner());
-    guard.as_ref().map(|installed| installed.generation == generation).unwrap_or(false)
+    let Some(installed) = guard.as_ref() else { return false };
+    installed.generation == generation && installed.watched.get(id).map(|w| w.incarnation) == Some(incarnation)
 }
 
-/// Stop treating an entity as watched, so a later scan can try it again.
-fn forget(id: &str, generation: u64) {
-    let mut guard = slot().lock().unwrap_or_else(|e| e.into_inner());
-    let Some(installed) = guard.as_mut() else { return };
-    if installed.generation != generation {
-        return;
+/// Stop treating an entity as watched, so a later scan can try it again — but
+/// only if this is still the watch that failed, not one started since.
+fn forget(id: &str, generation: u64, incarnation: u64) {
+    let owner = {
+        let mut guard = slot().lock().unwrap_or_else(|e| e.into_inner());
+        let Some(installed) = guard.as_mut() else { return };
+        if installed.generation != generation || installed.watched.get(id).map(|w| w.incarnation) != Some(incarnation) {
+            return;
+        }
+        installed.watched.remove(id).map(|w| w.owner)
+    };
+    if let Some(owner) = owner {
+        owner.cleanup();
     }
-    installed.watched.remove(id);
 }
 
 /// Put the outline where the concurrent entities are, and nowhere else.
