@@ -1,11 +1,13 @@
 //! Display-form coding for mention tokens (#56): `<@BASE64_ID>` ↔ `@DisplayName`.
 //!
 //! CLIENT-side support, not a server contract: the wire/storage format stays
-//! the canonical token (the [`crate::text`] scanner both sides share), but
-//! the composer SHOWS plain `@DisplayName` text — encoding happens once at
-//! send time, decoding once when an edit is mirrored into the textarea. The
-//! module lives here, beside the token format it mirrors, so its tests run
-//! with the model gate; nothing in it changes [`crate::text`] semantics.
+//! the canonical token (the [`ankurah_chat_model::text`] scanner every
+//! consumer shares), but the composer SHOWS plain `@DisplayName` text —
+//! encoding happens once at send time, decoding once when an edit is mirrored
+//! into the textarea. It stays in community rather than moving to the shared
+//! crate because it is one app's composer behavior, not part of what the
+//! server and its clients must agree on; it mirrors the token rules and
+//! changes none of them.
 //!
 //! Coding rules:
 //! - Encode rewrites an `@` run to a token only when it exactly matches a
@@ -33,7 +35,7 @@
 use std::collections::HashMap;
 use std::ops::Range;
 
-use crate::text::MAX_MENTION_ID_LEN;
+use ankurah_chat_model::text::MAX_MENTION_ID_LEN;
 
 /// Known members, indexed both ways for coding. Build one per operation from
 /// the caller's current users list — construction is cheap and a snapshot is
@@ -169,9 +171,9 @@ impl MemberDirectory {
 }
 
 /// A well-formed mention token starting at byte `i`: `(byte range incl.
-/// delimiters, id payload)`. Mirrors the [`crate::text::parse_mentions`]
-/// token rules (base64url payload of 1..=[`MAX_MENTION_ID_LEN`], then `>`),
-/// positionally.
+/// delimiters, id payload)`. Mirrors the
+/// [`ankurah_chat_model::parse_mentions`] token rules (base64url payload of
+/// 1..=[`MAX_MENTION_ID_LEN`], then `>`), positionally.
 fn token_at(text: &str, i: usize) -> Option<(Range<usize>, &str)> {
     let bytes = text.as_bytes();
     if i + 1 >= bytes.len() || bytes[i] != b'<' || bytes[i + 1] != b'@' {

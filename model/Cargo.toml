@@ -13,6 +13,17 @@ wasm = ["dep:wasm-bindgen", "ankurah/wasm"]
 
 [dependencies]
 ankurah = { version = "=0.9.0", features = ["derive"] }
+# The collections community shares with every other Ankurah chat surface —
+# Message, Room, User, Reaction, ReadState, the DM trio — and the mention/URL
+# scanner. They live there rather than here so the scanner's caps, which the
+# server and the client must agree on byte-for-byte, have exactly one
+# definition no matter how many apps read this data. Re-exported from lib.rs.
+#
+# Pinned to an exact rev, not a branch: this crate's structs ARE the wire
+# format of live rows, so what community compiles against must be a fixed
+# tree, chosen deliberately. Not on crates.io yet — publishing waits until the
+# API stops moving under dogfooding.
+ankurah-chat-model = { git = "https://github.com/ankurah/ankurah-chat", rev = "0a0cedd47fad0509d790c82c05eec4d3cdb4769b" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 wasm-bindgen = { version = "0.2", optional = true }

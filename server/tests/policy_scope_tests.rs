@@ -234,10 +234,20 @@ fn modaction_is_world_readable_and_moderator_writable() {
 /// The derive lowercases the struct name for the collection id; the policy is
 /// keyed by those strings. A silent mismatch would leave a collection with no
 /// rules (deny-all) — catch it here.
+///
+/// All fourteen collections community serves are listed, and that completeness
+/// now spans two repositories: eight of these structs are declared in
+/// ankurah-chat-model, where nothing can see policy.json. A rename there would
+/// arrive as a collection this policy has no entry for, which is why the list
+/// has to be exhaustive rather than a sample.
 #[test]
 fn model_collection_names_match_policy_keys() {
     let config = policy();
     for collection in [
+        community_model::User::collection(),
+        community_model::Room::collection(),
+        community_model::Message::collection(),
+        community_model::UserRoles::collection(),
         community_model::Reaction::collection(),
         community_model::ReadState::collection(),
         community_model::ModAction::collection(),
