@@ -1025,8 +1025,20 @@ mod tests {
     /// row nor a `created_at` at or after the message, and the same DM announces
     /// itself a second time.
     ///
-    /// So the assertion that matters is the comparison between the two stored
-    /// numbers, and the second boot is what makes a violation of it visible.
+    /// So the assertion that carries this test is the comparison between the two
+    /// stored numbers. It is the invariant that is pinned here, not the race:
+    /// the ordering is structural now, and a test cannot lose a race that the
+    /// code no longer runs.
+    ///
+    /// WHAT THE SECOND `start` IS AND IS NOT. It is a second worker set beside
+    /// the first, not a restart — `start` spawns detached tasks and returns
+    /// nothing to stop them with, and `watch_dms` parks forever holding its query
+    /// alive, so a test cannot take the first set down without a shutdown seam
+    /// the server has no other use for. What the second set does reproduce is the
+    /// half that matters here: a fan-out with an empty delivered cache sweeping
+    /// the whole backlog, which is the state a restarted process is in and the
+    /// state the duplicate was minted from. The first set is idle by then, having
+    /// no new changes to react to.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_live_future_dated_dm_is_settled_before_it_is_announced() {
         let ctx = test_context().await;
@@ -1048,8 +1060,9 @@ mod tests {
             "the inbox row is stamped after the message's settled send time, which is what the restart probe compares"
         );
 
-        // Bob reads it, and the server restarts: fresh workers, fresh caches,
-        // the whole backlog replayed.
+        // Bob reads it, and a second worker set boots beside the first: an empty
+        // delivered cache sweeping the whole backlog, which is what a restarted
+        // process looks like from the fan-out's seat (see the doc above).
         let trx = ctx.begin();
         notification.edit(&trx).unwrap().seen().set(&true).unwrap();
         trx.commit().await.unwrap();
@@ -1105,6 +1118,12 @@ mod tests {
 
         let row = ctx.get::<DmMessageView>(message).await.unwrap();
         assert!(row.deleted().unwrap(), "and settling it does not resurrect it");
+
+        // Generous settle before the two negatives below. The settling write is
+        // what the loop above waited for, and a fan-out that HAD been handed this
+        // row would still have its create in flight at that moment — so asserting
+        // on an empty collection here without waiting would pass either way.
+        tokio::time::sleep(Duration::from_millis(600)).await;
         assert!(
             ctx.fetch::<NotificationView>("true").await.unwrap().is_empty(),
             "a tombstoned DM tells nobody about itself, whatever it is dated"

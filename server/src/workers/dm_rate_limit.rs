@@ -610,7 +610,14 @@ async fn thread_participants(ctx: &Context, state: &mut State, thread: EntityId)
         // would be noise. A storage failure is a different thing wearing the
         // same shape: this lookup runs for EVERY message, and a failed one drops
         // that message out of the window and the unanswered count with nothing
-        // to show for it. Same split as `mentions::deliver`.
+        // to show for it.
+        //
+        // The split is `mentions::deliver`'s, the disposition is not: that
+        // function hands a storage error back to its caller, while this one
+        // answers `None` to both legs, so `process` cannot tell them apart and
+        // returns Ok either way. Neither shape is retried in-process by anything
+        // in this file, so what the return type costs is the precision of this
+        // log line and nothing beyond it. See the same note in `dm_notify`.
         Err(RetrievalError::EntityNotFound(_)) | Err(RetrievalError::CollectionNotFound(_)) => {
             debug!(thread = %thread, "DM rate limit: no thread row for this message, so nothing to count");
             return None;

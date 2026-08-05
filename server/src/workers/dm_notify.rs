@@ -204,7 +204,16 @@ async fn thread_participants(ctx: &Context, thread: EntityId) -> Option<(EntityI
         // Split the same way the limiter's twin of this function splits it, and
         // for the same reason: no such row is expected traffic and stays quiet,
         // while a storage failure costs the recipient a notification and has to
-        // be visible. Same split again as `mentions::deliver`.
+        // be visible.
+        //
+        // The split is `mentions::deliver`'s; the DISPOSITION is not, and the
+        // difference is worth naming. That function propagates a storage error to
+        // its caller and this one returns `None` for both legs, so a caller here
+        // cannot tell a message naming no thread from a message whose thread
+        // could not be read. Neither shape retries in-process — `mentions::run`
+        // logs what it is handed and moves to the next message — so what the
+        // return type costs is the log line's precision, which is why the two
+        // legs are worded differently, and nothing else.
         Err(RetrievalError::EntityNotFound(_)) | Err(RetrievalError::CollectionNotFound(_)) => {
             debug!(thread = %thread, "DM fan-out: no thread row to resolve participants from");
             return None;
