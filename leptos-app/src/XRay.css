@@ -42,8 +42,12 @@
 
 /* Hover = a translucent amber wash over the whole bubble. The inset shadow
    composites OVER the bubble's own background, so it reads as a highlight
-   in both themes rather than replacing the theme color. */
-.xrayOn [data-entity-id][data-collection]:hover {
+   in both themes rather than replacing the theme color.
+   Carries `.messageBubble` for the same reason the outline below does: the
+   components set a box-shadow on an own bubble being edited, at four classes,
+   from a sheet injected after this one — so four here would lose the wash on
+   exactly the message a reader is most likely to be hovering. */
+.xrayOn .messageBubble[data-entity-id][data-collection]:hover {
   box-shadow: inset 0 0 0 999px color-mix(in srgb, var(--unread-bg) 22%, transparent);
 }
 

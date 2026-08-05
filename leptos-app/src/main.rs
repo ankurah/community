@@ -397,7 +397,7 @@ pub fn ChatApp() -> impl IntoView {
     // pointed at the canonical row for its pair, so a concurrent first-DM race
     // resolves itself under the reader rather than forking the conversation.
     let dm_threads = dm::threads_query();
-    dm::converge_selection(dm_threads.clone(), selected_dm);
+    dm::converge_selection(dm_threads.clone().into(), selected_dm);
     let dm_read_state = DmReadStateManager::new(ctx(), dm_threads.clone(), current_user_id());
 
     // One app-lifetime users query, shared by the room timeline, the DM
