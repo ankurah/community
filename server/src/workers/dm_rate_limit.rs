@@ -17,8 +17,15 @@
 //! 1. **Initiations** — conversations the sender STARTED (their message is the
 //!    oldest in its thread) *and started inside the window*. This is the
 //!    stranger-DM shape: one person opening many threads at once. Over
-//!    [`MAX_INITIATIONS_PER_WINDOW`] in [`WINDOW_MS`], the message that opened
-//!    the excess conversation is tombstoned.
+//!    [`MAX_INITIATIONS_PER_WINDOW`] in [`WINDOW_MS`], the message being
+//!    observed is tombstoned. That is the message that opened the excess
+//!    conversation the first time; a later message into a thread already over
+//!    the limit trips as itself and is tombstoned as itself, which is the
+//!    friction the narrower penalty relies on.
+//!
+//!    A conversation is counted per PAIR OF MEMBERS, not per thread row. Two
+//!    tabs racing on a first DM leave two rows for the same two people, and
+//!    the client already treats those as one conversation.
 //! 2. **Unanswered messages** — messages into threads where the other
 //!    participant has never said anything. Over
 //!    [`MAX_UNANSWERED_PER_WINDOW`], the excess message is tombstoned. A thread
@@ -80,11 +87,19 @@
 //! them only against the writer — so a sender can put any pair they like on
 //! any row and file it under any thread id. Nothing here reads them. The
 //! conversation a message belongs to is its `thread`, and who that
-//! conversation belongs to is read from the thread row (and remembered), so a
-//! row filed into someone else's thread by a member it does not name is
-//! ignored instead of rewriting that thread's facts — one such row would
-//! otherwise make a monologue look answered and switch the unanswered limit
-//! off.
+//! conversation belongs to is read from the thread row, so a row filed into
+//! someone else's thread by a member it does not name is ignored instead of
+//! rewriting that thread's facts — one such row would otherwise make a
+//! monologue look answered and switch the unanswered limit off.
+//!
+//! That read happens for every message rather than once per thread, because
+//! `DmThread.a`/`b` are themselves mutable and a participant's client can
+//! rewrite the other seat. Remembering the first answer made that rewrite
+//! free: the thread went on counting as a conversation between its original
+//! two, opened long ago and answered, while the newly named member started
+//! receiving notifications and could read the history. A thread that now names
+//! a different pair is treated as the new conversation it is — see
+//! [`Limiter::reseat`].
 //!
 //! TIMESTAMPS ARE CLIENT-SUPPLIED, AND THE WINDOW LIVES WITH THAT. A sender
 //! could future-date messages to jump the timeline or back-date them to slip
@@ -113,7 +128,7 @@ use std::sync::Arc;
 
 use ankurah::{Context, EntityId};
 use anyhow::{Context as _, Result};
-use community_model::{DmMessageView, DmThreadView, ModAction};
+use community_model::{canonical_pair, DmMessageView, DmThreadView, ModAction};
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
@@ -145,8 +160,10 @@ pub const MAX_UNANSWERED_PER_WINDOW: usize = 20;
 pub enum Verdict {
     /// Within both limits.
     Allow,
-    /// The sender has started too many conversations inside the window: this
-    /// message is the one that opened the excess conversation.
+    /// The sender has started too many conversations inside the window. The
+    /// observed message is what gets tombstoned, which is the one that opened
+    /// the excess conversation the first time round — and, after that, any
+    /// further message of theirs into a conversation still over the limit.
     TooManyInitiations { initiations: usize },
     /// The sender is monologuing into too many threads nobody has answered.
     TooManyUnanswered { unanswered: usize },
@@ -188,19 +205,38 @@ impl ThreadFacts {
     }
 }
 
+/// The two members a conversation is between, in [`canonical_pair`] order —
+/// the identity of a conversation, and what initiations are counted by.
+type Pair = (EntityId, EntityId);
+
 /// The limiter's whole state: per-thread facts and, per sender, the timestamps
 /// of their initiations and unanswered messages. Pure — no ankurah types, no
 /// I/O — so the counting rules are testable on their own.
 #[derive(Default)]
 pub struct Limiter {
     threads: HashMap<EntityId, ThreadFacts>,
-    /// sender -> thread -> when that thread's OLDEST message landed, for each
-    /// conversation the sender started. Distinct threads are what count, so a
-    /// re-observed message (boot sweep after a live delivery) cannot inflate
-    /// the tally — and the stamp being the thread's own start is what lets a
-    /// long-standing conversation age out of the window while the sender keeps
-    /// talking in it.
-    initiations: HashMap<EntityId, HashMap<EntityId, i64>>,
+    /// sender -> a conversation they started -> the thread rows that
+    /// conversation is spread across, each stamped with when its own oldest
+    /// message landed.
+    ///
+    /// KEYED BY THE PAIR, NOT BY THE THREAD ROW. Two of one member's tabs
+    /// racing on a first DM create two thread rows for the same two people and
+    /// put an opener in each — the client treats that as ONE conversation
+    /// (`leptos-app/src/dm.rs`, `Conversation`), and so must this: keyed by
+    /// thread, three such races would spend all five of the sender's slots on
+    /// three correspondents and tombstone their next message.
+    ///
+    /// The inner map is per thread rather than one stamp per pair because the
+    /// window has to be measured against when the CONVERSATION started, which
+    /// is the earliest of its rows. Keeping the rows apart is also what lets an
+    /// entry be withdrawn from exactly one of them (see
+    /// [`Limiter::withdraw_initiation`]).
+    ///
+    /// A pair is what counts, so a re-observed message (the boot sweep after a
+    /// live delivery) cannot inflate the tally — and the stamp being the
+    /// conversation's own start is what lets a long-standing one age out of the
+    /// window while the sender keeps talking in it.
+    initiations: HashMap<EntityId, HashMap<Pair, HashMap<EntityId, i64>>>,
     /// sender -> message id -> timestamp, for messages into unanswered threads.
     unanswered: HashMap<EntityId, HashMap<EntityId, i64>>,
     /// Senders already logged this window, so a burst produces ONE ModAction
@@ -238,31 +274,55 @@ impl Limiter {
         if sender != participants.0 && sender != participants.1 {
             return Verdict::Allow;
         }
+        let pair = canonical_pair(participants.0, participants.1);
         // Inert on a healed row (see the parameter doc); load-bearing only in
         // the window before `dm_timestamp` commits, where without it a single
         // future-dated opener would stamp its initiation past every cutoff and
         // hold one of the sender's five slots for good.
         let ts = client_ts.min(now);
 
-        let facts = self.threads.entry(thread).or_default();
-        facts.observe(sender, ts);
-        let initiated = facts.initiated_by(sender);
-        let monologue = facts.unanswered_by_others(sender);
-        // The conversation's own start, which is what the initiation window is
-        // measured against. `ts` (this message) would restamp the entry on
-        // every reply and it would never age out — see the module doc.
-        let started_at = facts.started_at().unwrap_or(ts);
+        // Who this thread's oldest message belonged to BEFORE this one joined
+        // it. A message can arrive older than everything seen so far — the boot
+        // sweep hands a thread's history back in entity-id order, and senders
+        // stamp their own messages — so the opener is not settled until it is
+        // recomputed below.
+        let (initiated, monologue, started_at, displaced) = {
+            let facts = self.threads.entry(thread).or_default();
+            let opener_before = facts.first.map(|(_, who)| who);
+            facts.observe(sender, ts);
+            let displaced = opener_before.filter(|who| !facts.initiated_by(*who));
+            // The conversation's own start, which is what the initiation window
+            // is measured against. `ts` (this message) would restamp the entry
+            // on every reply and it would never age out — see the module doc.
+            (facts.initiated_by(sender), facts.unanswered_by_others(sender), facts.started_at().unwrap_or(ts), displaced)
+        };
+
+        // The credit follows the oldest message, so when the oldest message
+        // changes hands the previous holder's entry has to go with it.
+        // Otherwise a member whose clock lags — momentarily looking like the
+        // thread's opener during the boot sweep — keeps an entry stamped at
+        // their own message time for the rest of the window, and six of those
+        // cost them a tombstoned message and a world-readable row saying they
+        // opened six conversations.
+        if let Some(displaced) = displaced {
+            self.withdraw_initiation(displaced, pair, thread);
+        }
 
         if initiated {
-            self.initiations.entry(sender).or_default().insert(thread, started_at);
+            self.initiations.entry(sender).or_default().entry(pair).or_default().insert(thread, started_at);
         }
         if monologue {
             self.unanswered.entry(sender).or_default().insert(message, ts);
         }
 
         let cutoff = now - WINDOW_MS;
-        if let Some(by_thread) = self.initiations.get_mut(&sender) {
-            by_thread.retain(|_, t| *t >= cutoff);
+        if let Some(by_pair) = self.initiations.get_mut(&sender) {
+            // A conversation leaves the window when it STARTED before the
+            // cutoff, and a conversation spread over two rows started at the
+            // earlier of them. Pruning the rows individually would instead drop
+            // the older row and leave the pair dated by its twin, which is how
+            // a month-old conversation would read as opened today.
+            by_pair.retain(|_, rows| rows.values().min().is_some_and(|t| *t >= cutoff));
         }
         if let Some(by_message) = self.unanswered.get_mut(&sender) {
             by_message.retain(|_, t| *t >= cutoff);
@@ -308,10 +368,47 @@ impl Limiter {
     /// when it started, which is exactly what makes the sender's next attempt
     /// at the same thread trip again — and dropping them would also forget
     /// that the correspondent had ever replied.
-    fn forget_initiation(&mut self, message: EntityId, thread: EntityId, sender: EntityId) {
+    fn forget_initiation(&mut self, message: EntityId, thread: EntityId, participants: Pair, sender: EntityId) {
         self.forget_message(message, sender);
-        if let Some(by_thread) = self.initiations.get_mut(&sender) {
-            by_thread.remove(&thread);
+        self.withdraw_initiation(sender, canonical_pair(participants.0, participants.1), thread);
+    }
+
+    /// Drop one member's claim to having opened one thread row, and with it the
+    /// whole conversation if that was its last row.
+    fn withdraw_initiation(&mut self, sender: EntityId, pair: Pair, thread: EntityId) {
+        let Some(by_pair) = self.initiations.get_mut(&sender) else { return };
+        let Some(rows) = by_pair.get_mut(&pair) else { return };
+        rows.remove(&thread);
+        if rows.is_empty() {
+            by_pair.remove(&pair);
+        }
+    }
+
+    /// A thread row that now names a different pair is a different
+    /// conversation, and this limiter has to account for it as one.
+    ///
+    /// `DmThread.a`/`b` are ordinary mutable properties and the write scope
+    /// asks only whether the writer is one of them, so a participant's client
+    /// can rewrite the other seat (recorded on the model field; closing it
+    /// needs an immutable-field rule the policy grammar does not have). What
+    /// this stops is that move being free: everything accumulated about the
+    /// thread described a conversation between the OLD pair, and none of it is
+    /// true of the new one. So the facts go — the newly named member has never
+    /// answered, whatever the old correspondent did — and the previous pair
+    /// gives back the row. The message being observed then re-establishes the
+    /// thread from scratch, which charges its sender an initiation with the new
+    /// correspondent, dated now, instead of inheriting a conversation opened
+    /// long ago and answered.
+    fn reseat(&mut self, thread: EntityId, previous_participants: Pair) {
+        self.threads.remove(&thread);
+        let previous = canonical_pair(previous_participants.0, previous_participants.1);
+        for by_pair in self.initiations.values_mut() {
+            if let Some(rows) = by_pair.get_mut(&previous) {
+                rows.remove(&thread);
+                if rows.is_empty() {
+                    by_pair.remove(&previous);
+                }
+            }
         }
     }
 }
@@ -332,11 +429,20 @@ pub struct State {
     /// history in entity-id order, so a verdict mid-history is a verdict on a
     /// thread the worker has only half read.
     enforcing: bool,
-    /// thread -> the pair the THREAD row names, read once from storage. The
-    /// limiter is told who a conversation belongs to rather than believing the
-    /// message's own copy of it (see [`Limiter::observe`]), and this is what
-    /// keeps that from costing a query per message during the boot sweep.
-    thread_pairs: HashMap<EntityId, (EntityId, EntityId)>,
+    /// thread -> the pair the THREAD row named the last time this worker
+    /// looked. The limiter is told who a conversation belongs to rather than
+    /// believing the message's own copy of it (see [`Limiter::observe`]), and
+    /// this is what that answer is compared against so a thread quietly
+    /// reseated onto a third member is noticed (see [`thread_participants`]).
+    ///
+    /// Memory posture, on the same terms as [`Limiter::threads`] beside it: one
+    /// entry per thread this process has ever seen a message in, never evicted,
+    /// two entity ids each. It is bounded by the number of conversations rather
+    /// than by traffic, and at community scale that is small enough to keep the
+    /// simple thing. Whatever bounds `Limiter::threads` one day — the standing
+    /// DM query holding every live message in memory is the bigger number, and
+    /// `workers::watch_dms` says what replaces it — bounds this too.
+    thread_pairs: HashMap<EntityId, Pair>,
 }
 
 /// What the limiter's channel carries.
@@ -420,11 +526,11 @@ async fn process(ctx: &Context, state: &mut State, msg: &DmMessageView) -> Resul
             )
             .await?;
             tombstone_message(ctx, msg).await?;
-            state.limiter.forget_initiation(msg.id(), thread, sender);
+            state.limiter.forget_initiation(msg.id(), thread, participants, sender);
             // Ids and counts only — never text, and never the recipient: the
             // mod log is world-readable, and naming who someone DMs would leak
             // exactly what the DM read scope exists to protect.
-            warn!(sender = %sender, thread = %thread, initiations, "DM rate limit: tombstoned the message that opened a conversation over the initiation limit");
+            warn!(sender = %sender, thread = %thread, initiations, "DM rate limit: tombstoned a message into a conversation past the initiation limit");
             Ok(())
         }
         Verdict::TooManyUnanswered { unanswered } => {
@@ -447,17 +553,29 @@ async fn process(ctx: &Context, state: &mut State, msg: &DmMessageView) -> Resul
     }
 }
 
-/// The pair named by a thread row, read once per thread and remembered.
+/// The pair named by a thread row, re-read for every message and compared
+/// against the pair this worker last saw on it.
+///
+/// WHY IT IS RE-READ RATHER THAN REMEMBERED. `DmThread.a`/`b` are the load-
+/// bearing answer to who a conversation belongs to — every consumer resolves
+/// participants from here rather than from the sender-written copies on a
+/// message — and they are ordinary mutable properties. The write scope asks
+/// only whether the writer is one of `a`/`b`, which a participant satisfies
+/// both before and after changing the other seat. Remembering the first answer
+/// and short-circuiting on it meant a reseated thread stayed, in this worker's
+/// picture, a conversation between its original two members that was opened
+/// long ago and answered — which is to say it cost nothing, while the newly
+/// named member started receiving notifications and could read the history.
+/// The cost of asking every time is one local read per message, including
+/// during the boot sweep; the thing it buys is that the pair the limiter counts
+/// by is the pair the row actually names.
 ///
 /// `None` means the row is not there or does not carry both participants —
 /// which is not an error worth retrying: a message can name any thread id its
 /// sender likes, including one no row was ever created for, and such a message
 /// is invisible to everyone (no thread row, no sidebar entry, and `dm_notify`
 /// tells nobody about it).
-async fn thread_participants(ctx: &Context, state: &mut State, thread: EntityId) -> Option<(EntityId, EntityId)> {
-    if let Some(pair) = state.thread_pairs.get(&thread) {
-        return Some(*pair);
-    }
+async fn thread_participants(ctx: &Context, state: &mut State, thread: EntityId) -> Option<Pair> {
     let view = match ctx.get::<DmThreadView>(thread).await {
         Ok(view) => view,
         Err(e) => {
@@ -470,7 +588,14 @@ async fn thread_participants(ctx: &Context, state: &mut State, thread: EntityId)
         return None;
     };
     let pair = (a.id(), b.id());
-    state.thread_pairs.insert(thread, pair);
+    let reseated =
+        state.thread_pairs.insert(thread, pair).filter(|was| canonical_pair(was.0, was.1) != canonical_pair(pair.0, pair.1));
+    if let Some(previous) = reseated {
+        // Ids only, and only the thread's: the mod log's rule applies to the
+        // server log too.
+        warn!(thread = %thread, "DM rate limit: this thread now names a different pair; counting it as a new conversation");
+        state.limiter.reseat(thread, previous);
+    }
     Some(pair)
 }
 
@@ -545,11 +670,11 @@ mod tests {
     fn pair(sender: EntityId, correspondent: EntityId) -> (EntityId, EntityId) { (sender, correspondent) }
 
     /// A sender opening conversations one after another is allowed up to the
-    /// limit and tombstoned past it — and the count is of DISTINCT threads, so
-    /// re-observing the same message (the boot sweep after a live delivery)
-    /// never inflates it.
+    /// limit and tombstoned past it — and the count is of DISTINCT
+    /// conversations, so re-observing the same message (the boot sweep after a
+    /// live delivery) never inflates it.
     #[test]
-    fn initiations_are_counted_per_distinct_thread_and_capped() {
+    fn initiations_are_counted_per_distinct_conversation_and_capped() {
         let mut limiter = Limiter::default();
         let sender = EntityId::new();
         let now = 1_000_000_000;
@@ -620,6 +745,138 @@ mod tests {
                 "reply {i} into a conversation started a month ago must not count as starting one"
             );
         }
+    }
+
+    /// A conversation is the two members, never the row they happened to agree
+    /// on. Two of one member's tabs racing on a first DM leave two `dm_thread`
+    /// rows for the same pair and put an opener in each, and the client already
+    /// reads those as one conversation (`leptos-app/src/dm.rs`,
+    /// `dm::Conversation`). Counted per row instead, three such races would
+    /// spend all five of the sender's slots on three correspondents, tombstone
+    /// their next message and write a world-readable row saying they had
+    /// started six conversations.
+    #[test]
+    fn race_twins_between_the_same_two_members_cost_one_initiation() {
+        let mut limiter = Limiter::default();
+        let sender = EntityId::new();
+        let now = 1_700_000_000_000;
+        let correspondents = ids(MAX_INITIATIONS_PER_WINDOW + 1);
+
+        // Every one of the five conversations is opened twice, in two rows.
+        for (i, correspondent) in correspondents.iter().take(MAX_INITIATIONS_PER_WINDOW).enumerate() {
+            let with = pair(sender, *correspondent);
+            for twin in 0..2 {
+                let ts = now + twin;
+                assert_eq!(
+                    limiter.observe(EntityId::new(), EntityId::new(), with, sender, ts, ts),
+                    Verdict::Allow,
+                    "row {twin} of conversation {i}"
+                );
+            }
+        }
+
+        // A sixth correspondent is a sixth conversation, and the count says so:
+        // six, not eleven.
+        let last = MAX_INITIATIONS_PER_WINDOW;
+        assert_eq!(
+            limiter.observe(EntityId::new(), EntityId::new(), pair(sender, correspondents[last]), sender, now, now),
+            Verdict::TooManyInitiations { initiations: MAX_INITIATIONS_PER_WINDOW + 1 },
+            "ten rows between five people are five conversations; the sixth person is the sixth"
+        );
+    }
+
+    /// An initiation is credited to whoever sent the thread's OLDEST message,
+    /// so when an older message arrives and moves that, the entry moves too.
+    ///
+    /// The boot sweep hands a thread's history back in entity-id order, which
+    /// only approximates send order, and every client stamps its own messages —
+    /// so a member whose clock lags can momentarily look like a thread's
+    /// opener. Left in place, that entry counts against them for the rest of
+    /// the window, and six of them cost a tombstoned message and a public row
+    /// saying they started six conversations they did not.
+    #[test]
+    fn an_initiation_moves_off_a_member_when_an_older_message_takes_the_thread() {
+        let mut limiter = Limiter::default();
+        let (opener, replier) = (EntityId::new(), EntityId::new());
+        let thread = EntityId::new();
+        let with = pair(opener, replier);
+        let now = 1_700_000_000_000;
+
+        // The reply is seen first, so for a moment the thread looks like the
+        // replier's.
+        assert_eq!(limiter.observe(EntityId::new(), thread, with, replier, now - 30_000, now), Verdict::Allow);
+        // Then the message that actually opened the thread arrives, older.
+        assert_eq!(limiter.observe(EntityId::new(), thread, with, opener, now - 60_000, now), Verdict::Allow);
+
+        // The replier is owed their whole budget: a conversation they did not
+        // start must not be holding one of their five slots.
+        let strangers = ids(MAX_INITIATIONS_PER_WINDOW);
+        for (i, stranger) in strangers.iter().enumerate() {
+            assert_eq!(
+                limiter.observe(EntityId::new(), EntityId::new(), pair(replier, *stranger), replier, now, now),
+                Verdict::Allow,
+                "conversation {i}, which the replier really did start"
+            );
+        }
+    }
+
+    /// A thread row rewritten to name someone else is a different
+    /// conversation, and it is charged as one.
+    ///
+    /// Nothing stops the rewrite — `DmThread.a`/`b` are ordinary mutable
+    /// properties and the write scope only asks whether the writer is one of
+    /// them — so what this limiter can do is make it cost the same as opening
+    /// a conversation, which is what it is. Everything the worker had
+    /// accumulated described the OLD pair: that the thread was opened a month
+    /// ago, and that the correspondent had answered. None of it is true of the
+    /// newly named member, so none of it survives.
+    #[test]
+    fn a_thread_reseated_onto_a_third_member_is_charged_as_a_new_conversation() {
+        const DAY_MS: i64 = 24 * 60 * 60 * 1000;
+
+        let mut limiter = Limiter::default();
+        let sender = EntityId::new();
+        let now = 1_700_000_000_000;
+        let threads = ids(MAX_INITIATIONS_PER_WINDOW + 1);
+        let originals = ids(MAX_INITIATIONS_PER_WINDOW + 1);
+        let newcomers = ids(MAX_INITIATIONS_PER_WINDOW + 1);
+
+        // Six conversations opened weeks ago, one per day and every one of them
+        // answered, so every one is outside today's window and exempt from
+        // both limits.
+        for (i, thread) in threads.iter().enumerate() {
+            let with = pair(sender, originals[i]);
+            let opened = now - (30 - i as i64) * DAY_MS;
+            assert_eq!(
+                limiter.observe(EntityId::new(), *thread, with, sender, opened, opened),
+                Verdict::Allow,
+                "opening conversation {i}, weeks apart"
+            );
+            assert_eq!(
+                limiter.observe(EntityId::new(), *thread, with, originals[i], opened + 1, opened + 1),
+                Verdict::Allow,
+                "correspondent {i} answering"
+            );
+        }
+
+        // Today the sender rewrites five of those threads onto five new people
+        // and writes into each. Each one is a conversation started today.
+        for (i, thread) in threads.iter().enumerate().take(MAX_INITIATIONS_PER_WINDOW) {
+            limiter.reseat(*thread, pair(sender, originals[i]));
+            assert_eq!(
+                limiter.observe(EntityId::new(), *thread, pair(sender, newcomers[i]), sender, now, now),
+                Verdict::Allow,
+                "reseating conversation {i} onto someone new"
+            );
+        }
+
+        let last = MAX_INITIATIONS_PER_WINDOW;
+        limiter.reseat(threads[last], pair(sender, originals[last]));
+        assert_eq!(
+            limiter.observe(EntityId::new(), threads[last], pair(sender, newcomers[last]), sender, now, now),
+            Verdict::TooManyInitiations { initiations: MAX_INITIATIONS_PER_WINDOW + 1 },
+            "five reseated threads are five conversations started today, so the sixth is over the limit"
+        );
     }
 
     /// The other half of that rule, so the fix cannot be an over-correction:
@@ -699,15 +956,13 @@ mod tests {
         // exactly as `process` forgets it.
         for i in 0..10 {
             let (message, thread) = (EntityId::new(), EntityId::new());
+            let with = pair(sender, EntityId::new());
             let ts = now + i;
             assert!(
-                matches!(
-                    limiter.observe(message, thread, pair(sender, EntityId::new()), sender, ts, ts),
-                    Verdict::TooManyInitiations { .. }
-                ),
+                matches!(limiter.observe(message, thread, with, sender, ts, ts), Verdict::TooManyInitiations { .. }),
                 "attempt {i} past the initiation limit"
             );
-            limiter.forget_initiation(message, thread, sender);
+            limiter.forget_initiation(message, thread, with, sender);
         }
 
         // The unanswered budget was charged for the five messages that survived

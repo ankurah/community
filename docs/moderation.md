@@ -149,6 +149,15 @@ A thread the correspondent has replied in is exempt from the second limit
 entirely: two people talking are not a broadcast, and a real conversation
 never approaches the number.
 
+A conversation is counted per pair of members, not per thread row. Two of one
+member's tabs racing on a first DM leave two rows between the same two people,
+and the client already reads those as one conversation; counting them
+separately would have spent three of a sender's five slots on one race apiece.
+A thread row rewritten to name a different member is the other side of that
+rule: it is a different conversation and is charged as a new one, because
+nothing in the policy grammar can stop the rewrite (see `DmThread.a`) and the
+alternative was that it cost nothing at all.
+
 **Attribution comes from `DmMessage.user`, never from the thread row.**
 `DmThread` deliberately records no creator: the write scope only checks that
 the writer is one of `a`/`b`, so a `created_by` field would be unreliable — a
@@ -171,10 +180,13 @@ back-dated message buries itself in the recipient's history, so the evasion
 costs the sender the visibility they wanted.
 
 **What a breach does — and what it deliberately does not.** Either limit
-tombstones one message and nothing else: over the initiation limit, the
-message that opened the excess conversation; over the unanswered limit, the
-message that ran the budget out. The `DmThread` row and every earlier message
-in it survive.
+tombstones the message being examined and nothing else. Over the initiation
+limit that is the message that opened the excess conversation the first time
+round, and after that any further message the sender writes into a
+conversation still over the limit — which trips again by design, and is what
+keeps the narrower penalty from being a free pass. Over the unanswered limit it
+is the message that ran the budget out. The `DmThread` row and every earlier
+message in it survive.
 
 An earlier version tombstoned the whole thread and its history on an
 initiation breach. That is the one thing an automatic penalty must not do

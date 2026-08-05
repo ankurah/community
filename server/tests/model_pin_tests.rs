@@ -65,8 +65,11 @@ async fn reply_ref_round_trips_and_absent_property_reads_none() {
 
 /// One unordered pair of users maps to exactly one `(a, b)` tuple, whichever
 /// side asks. This is what makes find-or-create converge: both participants
-/// build the same `a = ? AND b = ?` query, so neither can miss a thread the
-/// other created and open a second one.
+/// build the same `THREADS_FOR_PAIR` lookup, so neither can miss a thread the
+/// other created and open a second one. That lookup asks about BOTH orderings
+/// — the write scope can only ask whether the writer is one of `a`/`b`, so the
+/// server accepts a reversed row — and canonical order is what decides which
+/// of the rows it finds everyone then agrees to write into.
 ///
 /// The order is `EntityId`'s own (the ULID's bytes), NOT the base64 text form —
 /// those disagree, because the base64url alphabet is not in ASCII order. This

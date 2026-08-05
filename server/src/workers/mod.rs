@@ -799,6 +799,109 @@ mod tests {
         );
     }
 
+    /// The rate limiter re-reads the pair a thread names for every message
+    /// instead of remembering the first answer, so a thread quietly reseated
+    /// onto a third member is counted as the new conversation it is.
+    ///
+    /// `DmThread.a`/`b` are ordinary mutable properties and the write scope
+    /// only asks whether the writer is one of them, so a participant's client
+    /// can rewrite the OTHER seat — that residual is disclosed on the model
+    /// field, and closing it needs an immutable-field rule the policy grammar
+    /// does not have. What must not ALSO be true is that the move is free.
+    /// While the limiter cached the pair, a reseated thread went on looking
+    /// like a conversation between the original two, opened a month ago and
+    /// answered — so it cost nothing — while the newly named member began
+    /// receiving the fan-out's notifications and could read the history.
+    ///
+    /// The limiter is driven by hand here: everything before
+    /// `Traffic::BacklogComplete` is counted and not judged, which is the boot
+    /// sweep, and the message after it is live traffic.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_reseated_thread_costs_the_sender_an_initiation() {
+        use super::dm_rate_limit::{State as LimiterState, Traffic, MAX_INITIATIONS_PER_WINDOW};
+
+        const DAY_MS: i64 = 24 * 60 * 60 * 1000;
+        let ctx = test_context().await;
+
+        let trx = ctx.begin();
+        let sender = trx.create(&User { display_name: "Sender".into(), oidc_sub: None }).await.unwrap().id();
+        let old_partner = trx.create(&User { display_name: "Old partner".into(), oidc_sub: None }).await.unwrap().id();
+        let newcomer = trx.create(&User { display_name: "Newcomer".into(), oidc_sub: None }).await.unwrap().id();
+        let mut strangers = Vec::new();
+        for i in 0..MAX_INITIATIONS_PER_WINDOW {
+            strangers.push(trx.create(&User { display_name: format!("Stranger {i}"), oidc_sub: None }).await.unwrap().id());
+        }
+        trx.commit().await.unwrap();
+
+        // The sender's whole budget, spent today on five strangers.
+        let mut backlog = Vec::new();
+        for stranger in &strangers {
+            let (a, b) = canonical_pair(sender, *stranger);
+            let trx = ctx.begin();
+            let thread = trx.create(&DmThread { a: a.into(), b: b.into(), created_at: now_ms(), deleted: false }).await.unwrap().id();
+            trx.commit().await.unwrap();
+            backlog.push(send_dm_at(&ctx, thread, sender, *stranger, now_ms()).await);
+        }
+
+        // And one long-standing conversation, opened a month ago and answered:
+        // outside the window, exempt from both limits.
+        let (a, b) = canonical_pair(sender, old_partner);
+        let a_month_ago = now_ms() - 30 * DAY_MS;
+        let trx = ctx.begin();
+        let settled = trx.create(&DmThread { a: a.into(), b: b.into(), created_at: a_month_ago, deleted: false }).await.unwrap().id();
+        trx.commit().await.unwrap();
+        backlog.push(send_dm_at(&ctx, settled, sender, old_partner, a_month_ago).await);
+        backlog.push(send_dm_at(&ctx, settled, old_partner, sender, a_month_ago + 60_000).await);
+
+        // Boot: the limiter builds its picture, judges none of it, and is
+        // enforcing once the marker has gone through.
+        let state = std::sync::Arc::new(tokio::sync::Mutex::new(LimiterState::default()));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Traffic>();
+        for message in &backlog {
+            tx.send(Traffic::Message(ctx.get::<DmMessageView>(*message).await.unwrap())).unwrap();
+        }
+        tx.send(Traffic::BacklogComplete).unwrap();
+        drop(tx);
+        dm_rate_limit::run(ctx.clone(), state.clone(), &mut rx).await;
+        assert_eq!(
+            ctx.fetch::<DmMessageView>("deleted = false").await.unwrap().len(),
+            backlog.len(),
+            "nothing is tombstoned yet: five conversations is the budget, and the sixth is a month old"
+        );
+
+        // The sender rewrites the settled thread's OTHER seat onto a member who
+        // was never part of it, then writes into it.
+        let settled_view = ctx.get::<DmThreadView>(settled).await.unwrap();
+        let trx = ctx.begin();
+        let editable = settled_view.edit(&trx).unwrap();
+        if a == sender {
+            editable.b().set(&newcomer.into()).unwrap();
+        } else {
+            editable.a().set(&newcomer.into()).unwrap();
+        }
+        trx.commit().await.unwrap();
+        let after_reseat = send_dm_at(&ctx, settled, sender, newcomer, now_ms()).await;
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Traffic>();
+        tx.send(Traffic::Message(ctx.get::<DmMessageView>(after_reseat).await.unwrap())).unwrap();
+        drop(tx);
+        dm_rate_limit::run(ctx.clone(), state, &mut rx).await;
+
+        assert!(
+            ctx.get::<DmMessageView>(after_reseat).await.unwrap().deleted().unwrap(),
+            "the reseated thread is a sixth conversation started today, so the message into it is tombstoned"
+        );
+        let actions: Vec<ModActionView> = ctx
+            .fetch::<ModActionView>("true")
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|m| m.action().map(|a| a == "dm-rate-limit").unwrap_or(false))
+            .collect();
+        assert_eq!(actions.len(), 1, "and the tombstone has its one public trace");
+        assert_eq!(actions[0].user().unwrap().map(|r| r.id()), Some(sender));
+    }
+
     /// A DM notification the recipient has already read is not reissued when
     /// the server restarts, even for a message its sender dated in the future.
     ///
