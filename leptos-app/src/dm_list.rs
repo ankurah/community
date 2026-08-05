@@ -78,7 +78,17 @@ pub fn DmList(
             </Show>
             <For
                 each=move || rows.get()
-                key=|conversation: &dm::Conversation| conversation.canonical.id()
+                // Keyed on the WHOLE row set, not on the canonical row. The
+                // child reads `rows` once, so it has to be rebuilt whenever
+                // that set changes — and half the time it does not change the
+                // canonical row: a first-DM race twin that arrives with a
+                // HIGHER id joins the pair without displacing the lowest id, so
+                // a key of `canonical` alone would hold the old child, and its
+                // badge would go on counting one row of a two-row conversation
+                // for the rest of the session. The row set is unique per
+                // conversation (rows are grouped by participant pair), so this
+                // is still one stable key per sidebar entry.
+                key=|conversation: &dm::Conversation| conversation.rows.clone()
                 children={
                     let users = users.clone();
                     let read_state = read_state.clone();

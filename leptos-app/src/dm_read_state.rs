@@ -81,6 +81,9 @@ struct Inner {
     /// thread id → id of the row this client created, so a second upsert
     /// racing the LiveQuery round-trip edits that row instead of twinning it.
     row_ids: Mutex<HashMap<String, EntityId>>,
+    /// Cursor rows with a repair write in flight (see [`Inner::heal_cursor`]),
+    /// so the changeset that repair produces does not start another one.
+    healing: Mutex<HashSet<EntityId>>,
     /// thread id → unread count within its window.
     unread: Mut<HashMap<String, usize>>,
     /// thread id → newest message timestamp in its window, for sidebar
@@ -115,6 +118,7 @@ impl DmReadStateManager {
             flushed: Mutex::new(HashMap::new()),
             in_flight: Mutex::new(HashSet::new()),
             row_ids: Mutex::new(HashMap::new()),
+            healing: Mutex::new(HashSet::new()),
             unread: Mut::new(HashMap::new()),
             newest: Mut::new(HashMap::new()),
             windows: Mutex::new(HashMap::new()),
@@ -180,10 +184,12 @@ impl DmReadStateManager {
     /// the cursor advances; otherwise the local map updates immediately
     /// (badges clear instantly) and a row upsert is flushed in the background.
     pub fn mark_read(&self, thread_id: &str, ts: i64) {
-        // Never let a cursor run past now. `ts` comes from a message, and a
-        // message's timestamp is whatever its sender's clock said (or claimed):
-        // one message dated 2100 would otherwise park this cursor in 2100 and
-        // silence the thread's badge for every real message after it.
+        // Never let a cursor run past now. `ts` comes from a message, and the
+        // server settles a future-dated message's timestamp on the row — but
+        // this client can be looking at one in the window before that write
+        // lands, and a cursor parked in 2100 outlives the window: it silences
+        // the thread's badge for every real message after it, and `mark_read`
+        // only ever advances, so nothing here could walk it back.
         let ts = ts.min(now_ms());
         let inner: &Arc<Inner> = &self.0;
         {
@@ -208,19 +214,62 @@ impl DmReadStateManager {
         });
     }
 
+    /// Fold the viewer's persisted cursor rows into the local map, repairing
+    /// any that are dated in the future on the way through.
+    ///
+    /// A cursor ahead of now silences a thread's badge completely — every
+    /// message stamps at most today, so nothing is ever newer than the cursor —
+    /// and `mark_read` cannot undo it, because `mark_read` only ever advances.
+    /// Clamping what is read here fixes this session and nothing else: the row
+    /// still says 2100, and the next session starts from the same bad number.
+    /// So the clamped value is written back as well. Nobody else can write this
+    /// row — `dmreadstate`'s scope is `user = $jwt.sub` — so if the owner's
+    /// client does not correct it, nothing will.
     fn rebuild_cursors(inner: &Arc<Inner>) {
+        let now = now_ms();
         let mut cursors = inner.last_read.peek().clone();
         let mut flushed = inner.flushed.lock().unwrap();
+        let mut dated_ahead: Vec<DmReadStateView> = Vec::new();
         for row in inner.cursors.peek() {
-            let (Ok(thread), Ok(ts)) = (row.thread(), row.last_read_ts()) else { continue };
+            let (Ok(thread), Ok(stored)) = (row.thread(), row.last_read_ts()) else { continue };
+            if stored > now {
+                dated_ahead.push(row.clone());
+            }
+            let ts = stored.min(now);
             let key = thread.id().to_base64();
             let entry = cursors.entry(key.clone()).or_insert(0);
             *entry = (*entry).max(ts);
+            // The watermark is what stops `flush` rewriting a row it has
+            // already written, so it takes the clamped value too: parked in the
+            // future it would tell `flush` there is nothing left to write.
             let watermark = flushed.entry(key).or_insert(0);
             *watermark = (*watermark).max(ts);
         }
         drop(flushed);
         inner.last_read.set(cursors);
+        for row in dated_ahead {
+            Self::heal_cursor(inner, row, now);
+        }
+    }
+
+    /// Write today's date over a cursor row dated in the future.
+    ///
+    /// One repair per row at a time: the repair commits, the cursors LiveQuery
+    /// delivers the change, and this function runs again on a row that now
+    /// reads at most now — so the guard is what keeps the burst between those
+    /// two moments from becoming a write per changeset.
+    fn heal_cursor(inner: &Arc<Inner>, row: DmReadStateView, ts: i64) {
+        let row_id = row.id();
+        if !inner.healing.lock().unwrap().insert(row_id) {
+            return;
+        }
+        let inner = Arc::clone(inner);
+        spawn_local(async move {
+            if let Err(e) = write_cursor(&row, ts).await {
+                tracing::error!("Failed to repair a DM read cursor dated in the future ({}): {}", row_id.to_base64(), e);
+            }
+            inner.healing.lock().unwrap().remove(&row_id);
+        });
     }
 
     fn add_window(inner: &Arc<Inner>, thread_id: EntityId) {
@@ -345,4 +394,12 @@ impl DmReadStateManager {
         trx.commit().await?;
         Ok(())
     }
+}
+
+/// Set one cursor row's `last_read_ts`, for the repair path above.
+async fn write_cursor(row: &DmReadStateView, ts: i64) -> Result<(), Box<dyn std::error::Error>> {
+    let trx = ctx().begin();
+    row.edit(&trx)?.last_read_ts().set(&ts)?;
+    trx.commit().await?;
+    Ok(())
 }

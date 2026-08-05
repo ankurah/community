@@ -48,9 +48,18 @@ pub fn DmChat(
     // Which rows this conversation is spread across: normally just the
     // selected one, and more when a first-DM race left twins. Reactive,
     // because the losing twin can arrive after the view is already open.
+    //
+    // A MEMO, NOT A DERIVED SIGNAL. This reads the viewer's whole thread set,
+    // and the effect below re-runs on anything it tracks. Unmemoized, that
+    // effect tracks every thread the viewer has: someone opening a new
+    // conversation with them, while they are scrolled back through history in a
+    // different one, would call `set_source` again — tearing down the
+    // ScrollManager, resetting pagination and snapping them to the live tail.
+    // A memo only notifies when the row set actually differs, so the effect is
+    // back to tracking the selection.
     let rows = {
         let threads = threads.clone();
-        Signal::derive(move || match thread.get() {
+        Memo::new(move |_| match thread.get() {
             Some(t) => dm::pair_rows(&threads.get(), &t),
             None => Vec::new(),
         })
