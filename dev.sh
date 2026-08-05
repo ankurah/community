@@ -520,7 +520,7 @@ show_status() {
     echo -e "${GREEN}community dev environment running${NC}"
     echo ""
     echo -e "  ${DIM}Server:${NC}    ${CYAN}http://127.0.0.1:$SERVER_PORT${NC} ($(status_line server))"
-    echo -e "  ${DIM}Web:${NC}       ${CYAN}http://localhost:$WEB_PORT${NC} ($(status_line web))"
+    echo -e "  ${DIM}Web:${NC}       ${CYAN}http://127.0.0.1:$WEB_PORT${NC} ($(status_line web))"
     if [ "$STORAGE_ENGINE" = "postgres" ]; then
         echo -e "  ${DIM}Postgres:${NC}  ${CYAN}localhost:${PG_PORT}${NC} ($(status_line postgres))"
     fi
@@ -560,7 +560,7 @@ cmd_start() {
 
     echo ""
     echo -e "${GREEN}✓ Dev environment started${NC}"
-    echo -e "  ${DIM}Server:${NC} http://127.0.0.1:$SERVER_PORT   ${DIM}Web:${NC} http://localhost:$WEB_PORT"
+    echo -e "  ${DIM}Server:${NC} http://127.0.0.1:$SERVER_PORT   ${DIM}Web:${NC} http://127.0.0.1:$WEB_PORT"
     echo -e "  Watch output with ${CYAN}./dev.sh --logs${NC}, stop with ${CYAN}./dev.sh --stop${NC}"
     echo ""
 }
