@@ -405,15 +405,17 @@ pub async fn complete_sign_in(code: &str, returned_state: &str) -> Result<Minted
         verifier = enc(&verifier),
     );
     let token_body = http_post(TOKEN_ENDPOINT, &form, "application/x-www-form-urlencoded").await?;
-    let tokens: TokenResponse =
-        serde_json::from_str(&token_body).map_err(|e| format!("could not parse token response ({e}): {token_body}"))?;
+    // Parse failures render on screen in the sign-in error text, and a 200
+    // body can still carry tokens — the id_token here, the minted session
+    // token below — so keep serde's error and leave the body out; the
+    // network tab has the full response when debugging.
+    let tokens: TokenResponse = serde_json::from_str(&token_body).map_err(|e| format!("could not parse token response: {e}"))?;
 
     // 2) Federate: hand the ID token to our server, which validates + mints.
     let session_url = format!("{origin}/auth/session");
     let session_req = serde_json::json!({ "id_token": tokens.id_token, "nonce": nonce });
     let session_body = http_post(&session_url, &session_req.to_string(), "application/json").await?;
-    let session: SessionResponse =
-        serde_json::from_str(&session_body).map_err(|e| format!("could not parse session response ({e}): {session_body}"))?;
+    let session: SessionResponse = serde_json::from_str(&session_body).map_err(|e| format!("could not parse session response: {e}"))?;
 
     // Retain the id_token for RP-initiated logout (`id_token_hint`): it
     // proves to idp.to at sign-out time which client and user are asking.
