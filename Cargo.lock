@@ -123,7 +123,7 @@ dependencies = [
 [[package]]
 name = "ankurah-chat-leptos"
 version = "0.1.0"
-source = "git+https://github.com/ankurah/ankurah-chat?rev=051a71de24b74841b78301a94686f984f8bed0cf#051a71de24b74841b78301a94686f984f8bed0cf"
+source = "git+https://github.com/ankurah/ankurah-chat?rev=62ab4005ac23012e77e07ac582e3157bc7347251#62ab4005ac23012e77e07ac582e3157bc7347251"
 dependencies = [
  "ankurah",
  "ankurah-chat-model",
@@ -144,7 +144,7 @@ dependencies = [
 [[package]]
 name = "ankurah-chat-model"
 version = "0.1.0"
-source = "git+https://github.com/ankurah/ankurah-chat?rev=051a71de24b74841b78301a94686f984f8bed0cf#051a71de24b74841b78301a94686f984f8bed0cf"
+source = "git+https://github.com/ankurah/ankurah-chat?rev=62ab4005ac23012e77e07ac582e3157bc7347251#62ab4005ac23012e77e07ac582e3157bc7347251"
 dependencies = [
  "ankurah",
  "getrandom 0.2.17",

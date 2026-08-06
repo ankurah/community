@@ -23,7 +23,7 @@ ankurah = { version = "=0.9.0", features = ["derive"] }
 # format of live rows, so what community compiles against must be a fixed
 # tree, chosen deliberately. Not on crates.io yet — publishing waits until the
 # API stops moving under dogfooding.
-ankurah-chat-model = { git = "https://github.com/ankurah/ankurah-chat", rev = "051a71de24b74841b78301a94686f984f8bed0cf" }
+ankurah-chat-model = { git = "https://github.com/ankurah/ankurah-chat", rev = "62ab4005ac23012e77e07ac582e3157bc7347251" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 wasm-bindgen = { version = "0.2", optional = true }

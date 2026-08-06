@@ -10,13 +10,14 @@ ankurah = { version = "=0.9.0", features = ["derive", "wasm"] }
 community-model = { path = "../model", features = ["wasm"] }
 # The chat surfaces themselves: the room selector, the room log with its
 # timeline and composer, and the direct-message views. Community is the
-# reference embedder — it hands the components an ankurah Context and layers
-# its own chrome (header, panels, moderation, notifications, x-ray) on top.
+# reference embedder — it hands the components a signal of its session (the
+# ankurah Context and who is reading through it) and layers its own chrome
+# (header, panels, moderation, notifications, x-ray) on top.
 #
 # Pinned to the same rev as ankurah-chat-model above, and for the same reason:
 # these crates are one tree, and a components rev that disagreed with the model
 # rev would resolve two copies of the collections.
-ankurah-chat-leptos = { git = "https://github.com/ankurah/ankurah-chat", rev = "051a71de24b74841b78301a94686f984f8bed0cf" }
+ankurah-chat-leptos = { git = "https://github.com/ankurah/ankurah-chat", rev = "62ab4005ac23012e77e07ac582e3157bc7347251" }
 ankurah-storage-indexeddb-wasm = "=0.9.0"
 ankurah-signals = { version = "=0.9.0", features = ["reactive-graph"] }
 # JWT auth on wasm: client only calls parse_claims_unverified + JwtContext::from_claims

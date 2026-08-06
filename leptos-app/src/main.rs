@@ -348,11 +348,16 @@ pub fn ChatApp() -> impl IntoView {
     });
 
     // The handshake the chat components read everything host-shaped through.
-    // Community is always signed in by the time this mounts (`App` gates on
-    // it), so the viewer is known at build time and the session is never
-    // swapped; the read-only path exists for embedders that open anonymous.
-    let chat = ChatContext::new(ctx())
-        .viewer(Some(current_user_id()))
+    //
+    // The session is the host's to own and the host's alone to write, so it is
+    // a signal here. Community is always signed in by the time this mounts
+    // (`App` gates on it), so the pair is known at build time and this signal
+    // is set once and never again: signing in mid-visit is a real path in the
+    // components, but not one community takes — it signs in with a full-page
+    // redirect. A host that never swaps pays one signal allocation for a
+    // handshake shaped for hosts that do.
+    let session = RwSignal::new((ctx(), Some(current_user_id())));
+    let chat = ChatContext::new(session)
         .online(|| ws_client().connection_state().get().to_string() == "Connected")
         .moderator(can_moderate)
         .on_auth_demand(|| tracing::warn!("a chat write was attempted while signed out"))
