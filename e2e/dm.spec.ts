@@ -60,7 +60,7 @@ test.describe.skip('Direct messages (#30)', () => {
     await ctxB.close();
   });
 
-  test('double-tab first-DM race converges on one thread', async ({ browser }) => {
+  test('double-tab first-DM race resolves to one conversation', async ({ browser }) => {
     test.setTimeout(90_000);
 
     // ONE user in TWO tabs of the SAME context — same localStorage, same
@@ -99,9 +99,11 @@ test.describe.skip('Direct messages (#30)', () => {
     await expect(tab2.locator('.dmItem')).toHaveCount(1, { timeout: 20_000 });
     await expect(B.locator('.dmItem')).toHaveCount(1, { timeout: 20_000 });
 
-    // And both tabs converge on the SAME thread, so a message sent from either
-    // lands in the conversation the other is looking at. (converge_selection
-    // slides a tab that opened the losing twin onto the winner.)
+    // Both tabs show both messages, whichever row each send landed in. That is
+    // NOT convergence — a selection names a correspondent, never a row, so
+    // there is nothing to converge — it is the read side: a conversation view
+    // reads every row its participant pair has, so words written into the
+    // losing twin during the race stay part of the conversation.
     const m1 = `from tab one ${Date.now()}`;
     const m2 = `from tab two ${Date.now()}`;
     await tab1.locator('.input[placeholder="Type a message..."]').fill(m1);
@@ -118,6 +120,37 @@ test.describe.skip('Direct messages (#30)', () => {
     await B.locator('.dmItem').first().click();
     await expect(B.locator('.messagesContainer')).toContainText(m1, { timeout: 15_000 });
     await expect(B.locator('.messagesContainer')).toContainText(m2, { timeout: 15_000 });
+
+    // A second exchange, after the race window has closed.
+    //
+    // WHAT THIS PINS: cross-tab delivery once things have settled, and that the
+    // recipient still sees exactly one conversation rather than two.
+    //
+    // WHAT IT DOES NOT PIN, said plainly so nobody reads more into it: that the
+    // two tabs write into the SAME thread row. Every assertion here is
+    // satisfied by cross-pair reads — a conversation view reads all of the
+    // pair's rows — so both tabs could go on writing into different twins
+    // forever and this would still pass. Nothing on screen carries the thread a
+    // message belongs to, and nothing observes which of a pair's rows is
+    // canonical.
+    //
+    // WHAT WOULD PIN IT, for whoever rewrites these against OIDC (issue #1):
+    // count the pair's `dmthread` rows and assert the SETTLED messages — the
+    // ones sent after both tabs see each other — hang off the lowest id
+    // (messages sent during the race window may legitimately remain on a twin;
+    // resolution is per send). Either query the store from the page, or put the
+    // thread ref on the row's DOM (a `data-thread-id` beside `data-msg-id`)
+    // so a locator can see it. Until then, canonical write routing is pinned by
+    // the server-side convergence tests and by reading the code, not by this.
+    const settled1 = `settled tab one ${Date.now()}`;
+    const settled2 = `settled tab two ${Date.now()}`;
+    await tab1.locator('.input[placeholder="Type a message..."]').fill(settled1);
+    await tab1.click('.button:has-text("Send")');
+    await expect(tab2.locator('.messagesContainer')).toContainText(settled1, { timeout: 15_000 });
+    await tab2.locator('.input[placeholder="Type a message..."]').fill(settled2);
+    await tab2.click('.button:has-text("Send")');
+    await expect(tab1.locator('.messagesContainer')).toContainText(settled2, { timeout: 15_000 });
+    await expect(B.locator('.dmItem')).toHaveCount(1, { timeout: 20_000 });
 
     await ctxA.close();
     await ctxB.close();

@@ -3,12 +3,12 @@ use leptos::prelude::*;
 use std::collections::HashMap;
 
 use ankurah::{Context, EntityId, LiveQuery, Node};
-use ankurah_chat_leptos::{ChatContext, DmConversation, DmReadStateManager, ReadStateManager, RoomLog};
+use ankurah_chat_leptos::{ChatContext, DmConversation, RoomLog};
 use ankurah_jwt_auth::{parse_claims_unverified, JwtAgent, JwtContext};
 use ankurah_signals::{CurrentObserver, Get as AnkurahGet, ReactiveGraphObserver};
 use ankurah_storage_indexeddb_wasm::IndexedDBStorageEngine;
 use ankurah_websocket_client_wasm::WebsocketClient;
-use community_model::{LinkPreviewView, RoomView, UserView};
+use community_model::{LinkPreviewView, UserView};
 use lazy_static::lazy_static;
 use send_wrapper::SendWrapper;
 use std::sync::{Arc, OnceLock, RwLock};
@@ -309,7 +309,7 @@ pub fn ChatApp() -> impl IntoView {
     let profile = RwSignal::new(None::<(EntityId, i32, i32)>);
 
     // UI-local state for selected room (Leptos signal, not Ankurah).
-    let selected_room = RwSignal::new(None::<RoomView>);
+    let selected_room = RwSignal::new(None::<EntityId>);
 
     // UI-local state for current user (Leptos signal).
     let current_user = RwSignal::new(None::<UserView>);
@@ -317,7 +317,7 @@ pub fn ChatApp() -> impl IntoView {
     // Direct messages: which conversation is open, if any. Declared here
     // because the link-preview query below is scoped by it; the thread set and
     // the cursors follow further down.
-    let selected_dm = RwSignal::new(None::<community_model::DmThreadView>);
+    let selected_dm = RwSignal::new(None::<EntityId>);
 
     // Link previews: ONE standing LiveQuery for the room timeline, grouped by
     // url. `LinkPreview` rows are keyed by url with no room ref, and a query
@@ -348,19 +348,43 @@ pub fn ChatApp() -> impl IntoView {
     });
 
     // The handshake the chat components read everything host-shaped through.
-    // Community is always signed in by the time this mounts (`App` gates on
-    // it), so the viewer is known at build time and the session is never
-    // swapped; the read-only path exists for embedders that open anonymous.
-    ChatContext::new(ctx())
-        .viewer(Some(current_user_id()))
+    //
+    // The session is the host's to own and the host's alone to write, so it is
+    // a signal here. Community is always signed in by the time this mounts
+    // (`App` gates on it), so the pair is known already and nothing sets this
+    // signal today: signing in mid-visit is a real path in the components, but
+    // not one community takes — it signs in with a full-page redirect.
+    //
+    // A WRITEABLE SIGNAL ANYWAY, deliberately. `ChatContext::new` takes the
+    // bare pair too and wraps it in a signal that never moves, which is the
+    // honest shape for a session that is fixed for good. This one is an
+    // `RwSignal` because the seam it holds open is where community is heading:
+    // signing out and back in as somebody else without a full-page redirect is
+    // one `session.set((new_context, Some(new_user)))` here and nothing else.
+    // Set the pair as one value when that lands — the components guarantee
+    // what a single read sees, so halves moved separately arrive as two
+    // sessions.
+    let session = RwSignal::new((ctx(), Some(current_user_id())));
+    let chat = ChatContext::new(session)
         .online(|| ws_client().connection_state().get().to_string() == "Connected")
         .moderator(can_moderate)
         .on_auth_demand(|| tracing::warn!("a chat write was attempted while signed out"))
         .hooks(chat_hooks::chat_hooks(previews_by_url, profile))
         .provide();
 
-    // Build the rooms LiveQuery from the global authenticated context.
-    let rooms = ctx().query::<RoomView>("true ORDER BY name ASC").expect("failed to create RoomView LiveQuery");
+    // The rooms, for community's own use: the notification sounds want a
+    // per-room window. Read from the chat handshake, which owns that query for
+    // the session — a second subscription here would be a second copy of the
+    // same rows.
+    //
+    // The NotificationManager then HOLDS this handle for the application's
+    // lifetime, which is the anti-pattern the accessor's doc warns about: the
+    // handle is a borrow of the session's, and a host that swapped sessions
+    // would leave this manager reading through a context the reader had left.
+    // It is correct here and only here, because community signs in with a
+    // full-page redirect and never swaps a session under a mounted tree. A
+    // host that does swap must re-ask.
+    let rooms = chat.rooms().expect("the chat handshake could not open the rooms query");
 
     // Load the signed-in user (the server upserted it before minting our token;
     // the JWT `sub` is that User entity's id).
@@ -388,32 +412,10 @@ pub fn ChatApp() -> impl IntoView {
         move |_| notification_manager.set_current_user_id(current_user.get().map(|u| u.id().to_base64()))
     });
 
-    // Persistent per-room read cursors + unread badges (#13).
-    let read_state = ReadStateManager::new(ctx(), rooms.clone(), current_user_id());
-
-    // Direct messages (#30). The thread query is self-shaping: the dm_thread
-    // read scope (`a = $jwt.sub OR b = $jwt.sub`) means this returns exactly
-    // the viewer's own conversations. `converge_selection` keeps an open thread
-    // pointed at the canonical row for its pair, so a concurrent first-DM race
-    // resolves itself under the reader rather than forking the conversation.
-    let dm_threads = dm::threads_query();
-    dm::converge_selection(dm_threads.clone().into(), selected_dm);
-    let dm_read_state = DmReadStateManager::new(ctx(), dm_threads.clone(), current_user_id());
-
-    // One app-lifetime users query, shared by the room timeline, the DM
-    // timeline and the DM sidebar. Owned here because the two timelines
-    // remount as the reader switches between them.
-    let users = ctx().query::<UserView>("true").expect("failed to create UserView LiveQuery");
-
-    // App-lifetime queries, named for whatever observer the app attached.
-    // The guards are parked in the cleanup closure so they live exactly as
-    // long as ChatApp does.
-    let query_regs = [
-        query_registry::register("rooms (app)", &rooms),
-        query_registry::register("users (app)", &users),
-        query_registry::register("dm threads (app)", &dm_threads),
-    ];
-    on_cleanup(move || drop(query_regs));
+    // Read cursors, the DM thread set, the members list and the reactions
+    // query are all the chat handshake's now, built once per session and
+    // registered there under their own labels — so x-ray's inventory is the
+    // same as it was without community holding any of them.
 
     view! {
         <xray::XRayLauncher />
@@ -424,43 +426,15 @@ pub fn ChatApp() -> impl IntoView {
             <Header current_user selected_room selected_dm />
 
             <div class="mainContent">
-                <Sidebar
-                    rooms
-                    selected_room
-                    read_state=read_state.clone()
-                    dm_threads=dm_threads.clone()
-                    users=users.clone()
-                    selected_dm
-                    dm_read_state=dm_read_state.clone()
-                />
+                <Sidebar selected_room selected_dm />
                 // One timeline at a time. Switching rebuilds the pane's
                 // ScrollManager, which is what a room switch already does.
                 {
-                    let users = users.clone();
-                    let read_state = read_state.clone();
-                    let dm_read_state = dm_read_state.clone();
-                    let dm_threads = dm_threads.clone();
                     move || {
                         if selected_dm.get().is_some() {
-                            view! {
-                                <DmConversation
-                                    thread=selected_dm
-                                    threads=dm_threads.clone()
-                                    users=users.clone()
-                                    read_state=dm_read_state.clone()
-                                />
-                            }
-                            .into_any()
+                            view! { <DmConversation partner=selected_dm /> }.into_any()
                         } else {
-                            view! {
-                                <RoomLog
-                                    room=selected_room
-                                    users=users.clone()
-                                    read_state=read_state.clone()
-                                    debug_header=true
-                                />
-                            }
-                            .into_any()
+                            view! { <RoomLog room=selected_room debug_header=true /> }.into_any()
                         }
                     }
                 }
@@ -470,11 +444,12 @@ pub fn ChatApp() -> impl IntoView {
             // reported, so rendering it here rather than inside the row costs
             // nothing and outlives a row the scroller unmounts.
             {
-                let users = users.clone();
+                let chat = chat.clone();
                 move || {
                 profile.get().map(|(user_id, x, y)| {
-                    users
-                        .get()
+                    chat.members()
+                        .map(|q| q.get())
+                        .unwrap_or_default()
                         .into_iter()
                         .find(|u| u.id() == user_id)
                         .map(|user| {

@@ -63,10 +63,10 @@ pub fn NotificationBadge() -> impl IntoView {
 /// surface.
 #[component]
 pub fn NotificationInbox(
-    selected_room: RwSignal<Option<RoomView>>,
+    selected_room: RwSignal<Option<EntityId>>,
     /// The open DM thread — a kind="dm" row deep-links by opening the
     /// conversation with its sender.
-    selected_dm: RwSignal<Option<community_model::DmThreadView>>,
+    selected_dm: RwSignal<Option<EntityId>>,
     // `Send + Sync` (unlike the other panels' `on_close`) because this one is
     // captured inside `Show`/`For` children, which leptos stores as
     // thread-safe closures. The header's `move || panels().close()`
@@ -310,8 +310,8 @@ fn NotificationRow(
     names_by_user: Memo<HashMap<String, String>>,
     room_names: Memo<HashMap<String, String>>,
     rooms: LiveQuery<RoomView>,
-    selected_room: RwSignal<Option<RoomView>>,
-    selected_dm: RwSignal<Option<community_model::DmThreadView>>,
+    selected_room: RwSignal<Option<EntityId>>,
+    selected_dm: RwSignal<Option<EntityId>>,
     on_close: impl Fn() + Clone + Send + Sync + 'static,
 ) -> impl IntoView {
     let actor_id = notification.actor().ok().flatten().map(|a| a.id().to_base64());
@@ -379,7 +379,7 @@ fn NotificationRow(
         if let Ok(Some(room_ref)) = notification_for_click.room() {
             let room_eid = room_ref.id();
             if let Some(room) = rooms.peek().iter().find(|r| r.id() == room_eid).cloned() {
-                selected_room.set(Some(room));
+                selected_room.set(Some(room.id()));
                 selected_dm.set(None);
                 on_close();
             }
