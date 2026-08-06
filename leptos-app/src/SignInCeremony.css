@@ -6,14 +6,21 @@
    around a dark document. So the surround uses the theme tokens and lands on
    whichever side the frame does. */
 
+/* Scrolls, because the escape hatch has to be reachable at every height the
+   app runs at. A short landscape phone cannot fit the card, and the page
+   behind cannot scroll for it — html/body are fixed and overflow-hidden — so
+   without this the one control that works when the frame does not would sit
+   below the fold with no way to reach it. `touch-action` has to be re-granted
+   for the same reason: body sets `none`, and that reaches descendants. */
 .ceremonyOverlay {
   position: fixed;
   inset: 0;
   z-index: 1100;
   display: flex;
-  align-items: center;
-  justify-content: center;
   padding: var(--sp-5);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  touch-action: pan-y;
   background-color: rgb(6 16 14 / 62%);
   backdrop-filter: blur(6px);
   -webkit-backdrop-filter: blur(6px);
@@ -30,11 +37,15 @@
   }
 }
 
+/* `margin: auto` rather than the overlay centring it: a flex item centred with
+   `align-items` has its overflowing top clipped away, and the header and the ×
+   live up there. */
 .ceremonyCard {
   display: flex;
   flex-direction: column;
+  flex-shrink: 0;
   width: min(100%, 460px);
-  max-height: min(100%, 760px);
+  margin: auto;
   padding: var(--sp-5);
   color: var(--text);
   background: var(--surface);
@@ -196,6 +207,9 @@
   color: var(--text-3);
 }
 
+/* Give the frame back what the viewport does not have. The overlay scrolls
+   whatever is still too tall, but a shorter frame means less scrolling between
+   the visitor and the button underneath it. */
 @media (max-height: 720px) {
   .ceremonyStage {
     min-height: 320px;
@@ -203,6 +217,16 @@
 
   .ceremonyFrame {
     height: 320px;
+  }
+}
+
+@media (max-height: 560px) {
+  .ceremonyStage {
+    min-height: 220px;
+  }
+
+  .ceremonyFrame {
+    height: 220px;
   }
 }
 
