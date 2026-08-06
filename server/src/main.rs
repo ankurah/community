@@ -1,5 +1,5 @@
 use ankurah::{property::Json, Context, EntityId, Node};
-use ankurah_jwt_auth::{Duration, JwtAgent, JwtClaims, JwtContext, SigningKeys};
+use ankurah_jwt_auth::{AuthError, Duration, JwtAgent, JwtClaims, JwtContext, SigningKeys};
 use ankurah_websocket_server::WebsocketServer;
 use anyhow::{Context as _, Result};
 use axum::{
@@ -24,6 +24,7 @@ use tower_http::{
 use tracing::{info, warn, Level};
 
 mod ci_hook;
+mod guest;
 mod oidc;
 mod workers;
 use oidc::{OidcVerifier, VerifiedIdentity};
@@ -72,6 +73,8 @@ struct AppState {
     oidc: Arc<OidcVerifier>,
     /// Seeded identities + shared secret for `POST /hooks/ci` (#66).
     ci: ci_hook::CiHook,
+    /// Signing key + mint budgets for `POST /auth/guest` (#79).
+    guest: guest::GuestMint,
 }
 
 /// The CI webhook handler asks for its own state, not the whole `AppState` —
@@ -79,6 +82,12 @@ struct AppState {
 /// lets axum hand it just the piece it needs.
 impl axum::extract::FromRef<AppState> for ci_hook::CiHook {
     fn from_ref(state: &AppState) -> Self { state.ci.clone() }
+}
+
+/// Same shape for the guest mint: it wants the signing key and its own mint
+/// budgets, and has no business with the OIDC verifier or the node.
+impl axum::extract::FromRef<AppState> for guest::GuestMint {
+    fn from_ref(state: &AppState) -> Self { state.guest.clone() }
 }
 
 #[tokio::main]
@@ -130,6 +139,7 @@ async fn main() -> Result<()> {
     let state = AppState {
         static_dir: PathBuf::from(static_dir),
         system_ctx,
+        guest: guest::GuestMint::new(signing_keys.clone()),
         signing_keys,
         oidc: Arc::new(OidcVerifier::from_env()),
         ci,
@@ -144,6 +154,10 @@ async fn main() -> Result<()> {
         .route("/ws", get(ws_server.route_handler()))
         .route("/health", get(health))
         .route("/auth/session", post(auth_session))
+        // Guest sessions (#79): no IdP round-trip, no body, any browser may
+        // ask. The handler rate limits itself — with identity free and nothing
+        // persisted, a mint budget is what stands in for a ban. See guest.rs.
+        .route("/auth/guest", post(guest::handle))
         // CI status webhook (#66). Not an auth route: it authenticates itself
         // with an HMAC over the raw body, never an IdP token. See ci_hook.rs.
         //
@@ -208,10 +222,26 @@ struct SessionRequest {
     nonce: String,
 }
 
+/// What both mints return — `auth_session` for a member, `guest::handle` for a
+/// visitor — so a client parses one shape whichever way it got its session.
 #[derive(Serialize)]
 struct SessionResponse {
     /// A freshly minted ankurah session token (RS256, signed by us).
     token: String,
+}
+
+/// Sign one ankurah session token.
+///
+/// FOR: both auth routes end here, so there is exactly one place where a claim
+/// set and a lifetime become a signed token — the member path with a federated
+/// idp.to identity, the guest path with nothing to federate.
+///
+/// The ops line is NOT written here, deliberately. A member signing in and a
+/// visitor taking a guest session are different events, and an operator
+/// filtering the log for one must not be counting the other — so each route
+/// writes its own line under its own message. Neither writes the token.
+pub(crate) fn mint_session_token(keys: &SigningKeys, claims: &JwtClaims, ttl_hours: u64) -> Result<String, AuthError> {
+    keys.sign(claims, Duration::from_hours(ttl_hours))
 }
 
 /// Federate-and-remint: validate an idp.to ID token, upsert the `User` keyed on
@@ -259,22 +289,14 @@ async fn auth_session(
     let mut custom = serde_json::Map::new();
     custom.insert("oidc_sub".to_string(), serde_json::Value::String(identity.sub.clone()));
 
-    let claims = JwtClaims {
-        sub: user_id.clone(),
-        roles: roles.clone(),
-        email: identity.email.unwrap_or_default(),
-        name: identity.name,
-        custom,
-    };
+    let claims = JwtClaims { sub: user_id, roles, email: identity.email.unwrap_or_default(), name: identity.name, custom };
 
-    let token = state
-        .signing_keys
-        .sign(&claims, Duration::from_hours(TOKEN_TTL_HOURS))
+    let token = mint_session_token(&state.signing_keys, &claims, TOKEN_TTL_HOURS)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("failed to mint session token: {e}")))?;
 
     // Ops trail: every mint is visible (who, which entity, which roles) so an
     // unexpected role would show up here. Never log the token itself.
-    info!(user = %user_id, email = %claims.email, roles = ?roles, "minted session token");
+    info!(user = %claims.sub, email = %claims.email, roles = ?claims.roles, "minted session token");
 
     Ok(AxumJson(SessionResponse { token }))
 }
@@ -393,8 +415,16 @@ async fn spa_fallback(State(state): State<AppState>, request: Request<Body>) -> 
     })
 }
 
+/// Backend routes, listed one by one rather than matched by prefix: `/auth/` is
+/// NOT a backend namespace — `/auth/callback` is a client-side route the SPA
+/// fallback has to serve.
 fn is_backend_path(path: &str) -> bool {
-    path == "/ws" || path.starts_with("/ws/") || path == "/health" || path == "/auth/session" || path.starts_with("/hooks/")
+    path == "/ws"
+        || path.starts_with("/ws/")
+        || path == "/health"
+        || path == "/auth/session"
+        || path == "/auth/guest"
+        || path.starts_with("/hooks/")
 }
 
 /// Seed the default rooms for the community. Idempotent — only creates rooms

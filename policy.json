@@ -1,12 +1,13 @@
 {
   "roles": {
-    "member": ["view", "post"],
-    "moderator": ["view", "post", "moderate"],
-    "admin": ["view", "post", "moderate"]
+    "guest": ["view"],
+    "member": ["view", "post", "signed_in"],
+    "moderator": ["view", "post", "signed_in", "moderate"],
+    "admin": ["view", "post", "signed_in", "moderate"]
   },
   "collections": {
     "user": {
-      "read": "view",
+      "read": "signed_in",
       "write": "post",
       "scope": [
         { "filter": "oidc_sub = $jwt.custom.oidc_sub", "applies_to": "write", "unless_privilege": "moderate" }
@@ -27,7 +28,7 @@
       ]
     },
     "userroles": {
-      "read": "view",
+      "read": "signed_in",
       "write": "system"
     },
     "ban": {
@@ -52,7 +53,7 @@
       ]
     },
     "modaction": {
-      "read": "view",
+      "read": "signed_in",
       "write": "moderate"
     },
     "notification": {

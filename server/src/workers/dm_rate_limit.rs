@@ -329,8 +329,8 @@ impl Limiter {
         // Otherwise a member whose clock lags — momentarily looking like the
         // thread's opener during the boot sweep — keeps an entry stamped at
         // their own message time for the rest of the window, and six of those
-        // cost them a tombstoned message and a world-readable row saying they
-        // opened six conversations.
+        // cost them a tombstoned message and a row every signed-in member can
+        // read saying they opened six conversations.
         if let Some(displaced) = displaced {
             self.withdraw_initiation(displaced, pair, thread);
         }
@@ -555,8 +555,9 @@ async fn process(ctx: &Context, state: &mut State, msg: &DmMessageView) -> Resul
             tombstone_message(ctx, msg).await?;
             state.limiter.forget_initiation(msg.id(), thread, participants, sender);
             // Ids and counts only — never text, and never the recipient: the
-            // mod log is world-readable, and naming who someone DMs would leak
-            // exactly what the DM read scope exists to protect.
+            // mod log is readable by every signed-in member, and naming who
+            // someone DMs would disclose exactly what the DM read scope exists
+            // to protect.
             warn!(sender = %sender, thread = %thread, initiations, "DM rate limit: tombstoned a message into a conversation past the initiation limit");
             Ok(())
         }
@@ -678,9 +679,10 @@ async fn tombstone_message(ctx: &Context, msg: &DmMessageView) -> Result<()> {
 /// The public audit row. `actor` is `None` — nothing human acted — and the
 /// reason carries the counts, never a recipient and never text.
 ///
-/// DISCLOSURE, STATED: `modaction` is world-readable by design, so this row
-/// tells the community that this member tripped the DM rate limit. It does not
-/// say who they messaged or what they wrote. That trade is deliberate: without
+/// DISCLOSURE, STATED: `modaction` is readable by every signed-in member by
+/// design (and by no guest), so this row tells the community that this member
+/// tripped the DM rate limit. It does not say who they messaged or what they
+/// wrote. That trade is deliberate: without
 /// a public row, an automated tombstone would be invisible to the moderators
 /// who are supposed to decide whether it warrants a Ban, and DMs are private
 /// from moderators precisely so that reports and rows like this one are the
@@ -752,7 +754,8 @@ mod tests {
     /// the message being observed instead of the thread's own start, the sixth
     /// reply tombstoned a month of two-way conversation (the correspondent's
     /// messages included, with nothing anywhere that writes `deleted` back to
-    /// false) and wrote a world-readable row accusing the member of spamming.
+    /// false) and wrote a row the whole signed-in community can read, accusing
+    /// the member of sending in bulk.
     #[test]
     fn answering_six_old_correspondents_within_an_hour_is_never_limited() {
         const DAY_MS: i64 = 24 * 60 * 60 * 1000;
@@ -798,8 +801,8 @@ mod tests {
     /// reads those as one conversation (`leptos-app/src/dm.rs`,
     /// `dm::Conversation`). Counted per row instead, three such races would
     /// spend all five of the sender's slots on three correspondents, tombstone
-    /// their next message and write a world-readable row saying they had
-    /// started six conversations.
+    /// their next message and write a row every signed-in member can read,
+    /// saying they had started six conversations.
     #[test]
     fn race_twins_between_the_same_two_members_cost_one_initiation() {
         let mut limiter = Limiter::default();

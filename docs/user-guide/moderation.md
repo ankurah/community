@@ -21,13 +21,17 @@ same everywhere they sign in.
 ## The public moderation log
 
 The **gavel** button in the top bar opens the **moderation log** — and it's
-open to *everyone*, not just moderators. Every moderator action lands here:
-message removals, bans, and unbans, each showing who did it, what they did, any
-reason they gave, and when.
+open to *every signed-in member*, not just moderators. Every moderator action
+lands here: message removals, bans, and unbans, each showing who did it, what
+they did, any reason they gave, and when.
 
 This is the point of moderation in Community: **deleted messages are hidden,
-never quietly erased.** If something was removed, anyone can see that it was,
-and why.
+never quietly erased.** If something was removed, every member can see that it
+was, and why.
+
+"Public" here means public to the community, not to the open web: the log is
+the community's own record, so reading Community without signing in doesn't
+include it.
 
 ## What being banned looks like
 

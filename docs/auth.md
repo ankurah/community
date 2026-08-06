@@ -62,6 +62,10 @@ Decide when wiring. Either way, a verified identity → `JwtContext::from_claims
 
 ### Policy (`policy.json`) sketch
 
+*(Superseded 2026-08-06 — kept as the record of what was sketched before the
+decision. `user.read` is no longer `view`: see the guest-mode section at the
+end of this file for the shipped `view`/`signed_in` split.)*
+
 ```json
 {
   "roles": { "member": ["view", "post"] },
@@ -119,3 +123,84 @@ skipped for now); policy hardening (issue #3 — e.g. scope `user` writes to sel
 - **Sign-in failures render on the sign-in card** (`.signInError`), not just the
   console; one-time PKCE material is cleared when the callback consumes it,
   success or failure.
+
+## Status — guest sessions (2026-08-06, auth lane)
+
+`POST /auth/guest` (#79) mints a session for a visitor who has not signed in.
+The same RS256 key signs it, through the same code path `/auth/session` uses
+(`mint_session_token`), so a client checks one verifying key whichever way it
+got its token. What differs: `sub` is the literal `guest` and the only role is
+`guest`. No IdP round-trip, no nonce, no request body — any browser may ask —
+and nothing is written to storage, so a guest leaves no `User` row and no
+history. The token lives two hours (`GUEST_TOKEN_TTL_HOURS`) against the
+member token's twelve, because re-minting costs a guest one unattended POST
+while a member pays an OIDC round-trip. The client re-mints on expiry or
+reconnect.
+
+**What a guest may read** is a privilege split in `policy.json`, not a rule
+about guests. `view` is the anonymous tier, and what it leaves readable is
+four collections: `room`, `message`, `reaction`, `linkpreview` — room names
+and topics, message text and timestamps, reaction counts, link previews. Two
+different refusals produce that four, and they work at different layers.
+
+The **collection gate** refuses three outright. A new `signed_in` privilege
+keys the collections a reader has to have signed in for: `user` and
+`userroles` (no roster for the street) and `modaction` (moderation records are
+community business). The privilege says what its name says — the bearer
+completed sign-in — and the `member` floor applied at mint means every
+signed-in bearer holds it and no guest does. Signed-in visibility is
+unchanged; member, moderator and admin all hold it.
+
+`view` passes the gate on the other eleven, and the **row scopes** empty seven
+of them: `ban`, `readstate`, `notification`, `notificationpref`, `dmthread`,
+`dmmessage`, `dmreadstate`. Each keeps the row-local scope it already had, and
+those refuse a guest with no new rule written — the scopes compare `$jwt.sub`
+against an entity id, the guest subject is a literal that never parses as one,
+so the comparison is false, a query matches nothing and a get by id is
+refused. A guest holds no `post` privilege either, so a guest writes nothing
+anywhere. `server/tests/guest_policy_live_tests.rs` runs all of that against
+the real policy on a real node.
+
+**What that leaves the guest client without: author names.** `Message` carries
+`user: Ref<User>` and no display name of its own, so a reader who cannot read
+the `user` collection gets the text of every message and the name of nobody —
+including their own would-be neighbours in the member list, which a guest does
+not receive either. That is the client lane's open problem (tracked on #65),
+not a policy gap: whatever it does — render a placeholder, or have the server
+denormalize a display name onto something a guest may read — is a decision
+about the guest UI, and this branch deliberately leaves the client untouched.
+
+**How the collection gate closes, stated exactly, because a future role could
+open it.** `can_access_collection` passes when a caller's roles hold the read
+privilege **or** the write privilege. `signed_in` closes the roster and the
+mod log only because no role today holds `post`, `moderate` or `system`
+without also holding `signed_in`. Add a role like `"contributor": ["view",
+"post"]` and it would read the roster through `user`'s write gate — so any new
+role that may write must carry `signed_in` too.
+`only_signed_in_roles_reach_the_signed_in_collections` in
+`server/tests/policy_scope_tests.rs` asserts exactly that, over every role in
+the file, so a role that breaks it fails there rather than in production.
+
+**Private rooms do not exist** as a feature — `Room` carries a name, a
+creator, and a topic, and nothing about visibility — so every room is public
+today and a guest reads all of them. The public/private question comes back
+when private rooms do.
+
+**The mint is rate limited** per client address and per instance, because a
+guest has no account to ban: identity is free per session, so the ban table
+has nothing to point at. Both budgets are in-memory and per-instance (the
+service runs `--max-instances 1`, so today that is the whole service; a
+rollout serves two revisions with a budget each). The counted address is the
+LAST `X-Forwarded-For` entry — the one Google's front end appends, and the
+only one no caller can write — which assumes the service stays reached
+directly through Cloud Run; an external load balancer appends two entries and
+would need that read moved. See `server/src/guest.rs`.
+
+**When refusals look shared, check for a second header line.** A request that
+arrives with MORE than one `X-Forwarded-For` line is counted against the
+socket peer instead — in production that peer is the front end, so every such
+caller lands in one budget together and they run each other out of mints.
+That is deliberate: the front end appends its address to one of the lines and
+the server cannot tell which, so reading either would mean counting a value
+the caller chose. An operator seeing 429s that look shared across unrelated
+callers should look for callers sending their own `X-Forwarded-For` header.

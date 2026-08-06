@@ -55,8 +55,8 @@
 //! says so. A member who had six or more future-dated openers sitting in
 //! storage now has six conversations stamped as started at that one instant, so
 //! their next message into any of those threads inside the window is tombstoned
-//! and earns them a world-readable `dm-rate-limit` row saying they started six
-//! conversations. Nobody started anything at that moment; the batch is an
+//! and earns them a `dm-rate-limit` row, readable by every signed-in member,
+//! saying they started six conversations. Nobody started anything at that moment; the batch is an
 //! artifact of when this worker first looked. What buys it is that it happens
 //! ONCE EVER rather than on every restart — the stored values never move again
 //! after that boot, which is exactly what the recompute-on-read version it
