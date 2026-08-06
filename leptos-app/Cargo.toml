@@ -35,6 +35,13 @@ web-sys = { version = "=0.3.82", features = [
     # X-ray's own affordances over the chat components: a delegated click
     # listener, and a MutationObserver watching for bubbles as they mount.
     "MutationObserver", "MutationObserverInit", "MutationRecord", "DomTokenList",
+    # The framed sign-in ceremony: the result the callback frame posts to the
+    # page that framed it arrives as a MessageEvent, Escape closes the modal
+    # through a KeyboardEvent listener, and the × is held in a typed NodeRef so
+    # focus can move onto it at mount. Named here rather than borrowed from
+    # whatever else in the graph happens to enable them — a dependency shuffle
+    # would take that away without touching this file.
+    "MessageEvent", "KeyboardEvent", "HtmlButtonElement",
 ] }
 js-sys = "=0.3.82"
 tracing-wasm = "0.2.1"

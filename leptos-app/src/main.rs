@@ -31,6 +31,7 @@ mod profile_popover;
 mod qr_code_modal;
 mod room_topic;
 mod sidebar;
+mod sign_in_ceremony;
 mod user_detail_panel;
 mod xray;
 
@@ -114,6 +115,13 @@ fn main() {
 async fn initialize() {
     // Resolve the session token: either finish an OIDC callback, or restore one.
     if auth::is_callback() {
+        // Inside a sign-in frame this document is a courier, not the app: hand
+        // the code and state to the page that framed it and stop here. Nothing
+        // mounts and nothing connects — that page holds the PKCE verifier, does
+        // the exchange, and takes the frame down afterwards.
+        if auth::relay_callback_to_parent() {
+            return;
+        }
         match auth::handle_callback().await {
             Ok(token) => {
                 auth::store_token(&token);
@@ -228,14 +236,69 @@ pub fn App() -> impl IntoView {
 /// The signed-out landing view.
 #[component]
 pub fn SignIn() -> impl IntoView {
-    let start = move |_| {
+    // Sign-in failures used to reach only the console; render them where the
+    // user actually is. Seeded from the callback's failure (set before mount),
+    // and written again if the click itself cannot get off the ground.
+    let auth_error = RwSignal::new(AUTH_ERROR.read().ok().and_then(|guard| guard.clone()));
+
+    // The live framed attempt, if the visitor is in the middle of one.
+    let ceremony = RwSignal::new(None::<auth::FramedAttempt>);
+
+    let top_level = move || {
         if let Err(e) = auth::start_sign_in() {
             tracing::error!("failed to start sign-in: {:?}", e);
+            auth_error.set(Some(format!("could not start sign-in: {e:?}")));
         }
     };
-    // Sign-in failures used to reach only the console; render them where the
-    // user actually is. Read once — the value is set before mount.
-    let auth_error = AUTH_ERROR.read().ok().and_then(|guard| guard.clone());
+    let start = move |_| {
+        // The overlay covers this button for the mouse but not for the
+        // keyboard. A second Enter would restash fresh PKCE material and reload
+        // the frame under a credential prompt already in progress, so while a
+        // ceremony is up this button does nothing.
+        if ceremony.get_untracked().is_some() {
+            return;
+        }
+        // A new attempt starts without the last one's failure over it.
+        auth_error.set(None);
+        match auth::begin_framed_sign_in() {
+            // idp.to frames for this origin: run the ceremony without leaving the page.
+            Ok(Some(attempt)) => ceremony.set(Some(attempt)),
+            // It does not, so a frame would be refused and would say nothing
+            // about it. Hand over the whole tab, which always works.
+            Ok(None) => top_level(),
+            // Setting up the attempt failed (no sessionStorage, say). The
+            // top-level flow needs the same things, so let it fail where the
+            // user can see it.
+            Err(e) => {
+                tracing::error!("failed to set up framed sign-in: {:?}", e);
+                top_level();
+            }
+        }
+    };
+
+    // Closing takes the frame down with the modal and abandons the stashed
+    // attempt, so the next click starts clean. A reason handed back moves to
+    // the card's banner — the modal that was showing it is about to go, and the
+    // visitor still needs to read it.
+    let close_ceremony = move |reason: Option<String>| {
+        auth::cancel_pending_sign_in();
+        if reason.is_some() {
+            auth_error.set(reason);
+        }
+        ceremony.set(None);
+    };
+
+    // Signing in mid-visit: store the token and let the app boot the way it
+    // boots on every other load with a session in hand — `initialize` picks it
+    // up from `stored_token`, connects the node, waits for policy, and mounts
+    // `ChatApp`. Deliberately NOT a swap under the mounted tree: there is one
+    // path into the signed-in UI, and this is it.
+    let signed_in = move |token: String| {
+        auth::store_token(&token);
+        if let Some(w) = window() {
+            let _ = w.location().set_href("/");
+        }
+    };
     view! {
         <div class="signIn">
             <div class="signInGlow signInGlowA" aria-hidden="true"></div>
@@ -280,7 +343,7 @@ pub fn SignIn() -> impl IntoView {
                         "Open community"
                     </span>
                 </div>
-                {auth_error.map(|message| view! {
+                {move || auth_error.get().map(|message| view! {
                     <div class="signInError" role="alert">{message}</div>
                 })}
                 <button class="signInButton" on:click=start>
@@ -293,6 +356,13 @@ pub fn SignIn() -> impl IntoView {
                 </button>
                 <p class="signInFootnote">"Authentication by idp.to — local-first chat, built in Rust + wasm."</p>
             </div>
+            {move || ceremony.get().map(|attempt| view! {
+                <sign_in_ceremony::SignInCeremony
+                    attempt=attempt
+                    on_close=close_ceremony
+                    on_signed_in=signed_in
+                />
+            })}
         </div>
     }
 }
