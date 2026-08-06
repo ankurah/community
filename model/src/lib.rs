@@ -60,9 +60,11 @@ pub struct Ban {
 }
 
 /// Public moderation-log row, created whenever a moderator acts on a message
-/// (e.g. deleting it) or on a member (banning/unbanning). World-readable by
-/// design — the community can see what moderation happened — but only
-/// writable with the `moderate` privilege.
+/// (e.g. deleting it) or on a member (banning/unbanning). Readable by every
+/// signed-in member by design — the community can see what moderation happened
+/// — and by nobody else: the `modaction` read privilege is `signed_in`, which a
+/// guest session (community#79) does not hold. Writable only with the
+/// `moderate` privilege.
 ///
 /// Exactly one of `message` / `user` is set per row: whichever names the
 /// target, with `action` saying what was done to it. Both are `Option`
