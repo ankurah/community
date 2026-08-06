@@ -69,8 +69,8 @@ from. Do not look for a room-kick — it doesn't exist on purpose.
 
 Ban/unban are lights-on like everything else: both write a `ModAction` row
 that every signed-in member can read. "Public" here means public to the
-community, not to the street — `modaction.read` is the `member` privilege, so
-a guest session (#79) reads none of the log. Who was banned and why is
+community, not to the street — `modaction.read` is the `signed_in` privilege,
+so a guest session (#79) reads none of the log. Who was banned and why is
 community business; an anonymous reader gets the conversation, not the
 moderation record. The model supports two target kinds —
 `message: Option<Ref<Message>>` for message-targeted rows ("delete",

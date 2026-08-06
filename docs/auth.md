@@ -135,11 +135,13 @@ reconnect.
 
 **What a guest may read** is a privilege split in `policy.json`, not a rule
 about guests. `view` is the anonymous tier — `room`, `message`, `reaction`,
-`linkpreview`, everything a page has to render — and a new `member` privilege,
-held by member/moderator/admin, gates the three collections that require
-having signed in: `user` and `userroles` (no roster for the street) and
-`modaction` (moderation records are community business). Signed-in visibility
-is unchanged; all three roles hold the new privilege. Every private collection
+`linkpreview`, everything a page has to render — and a new `signed_in`
+privilege gates the three collections a reader has to have signed in for:
+`user` and `userroles` (no roster for the street) and `modaction` (moderation
+records are community business). The privilege says what its name says — the
+bearer completed sign-in — and the `member` floor applied at mint means every
+signed-in bearer holds it and no guest does. Signed-in visibility is
+unchanged; member, moderator and admin all hold it. Every private collection
 keeps the row-local scope it already had, and those refuse a guest with no new
 rule written: the scopes compare `$jwt.sub` against an entity id, the guest
 subject is a literal that never parses as one, so the comparison is false and

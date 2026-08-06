@@ -223,19 +223,19 @@ fn members_read_bans_but_cannot_write_them() {
 }
 
 /// The moderation log is lights-on to the community and closed to the street.
-/// It moved from `view` to `member` when guests arrived (#79): every signed-in
-/// member still reads every row — that is the whole point of lights-on
-/// moderation — while a guest, who holds `view` and nothing else, reads none of
-/// it. Who was banned and why is community business, not an anonymous
-/// visitor's.
+/// It moved from `view` to `signed_in` when guests arrived (#79): every
+/// signed-in member still reads every row — that is the whole point of
+/// lights-on moderation — while a guest, who holds `view` and nothing else,
+/// reads none of it. Who was banned and why is community business, not an
+/// anonymous visitor's.
 #[test]
-fn modaction_is_member_readable_and_moderator_writable() {
+fn modaction_is_signed_in_readable_and_moderator_writable() {
     let config = policy();
     let rules = &config.collections["modaction"];
-    assert_eq!(rules.read.as_deref(), Some("member"), "signed-in members read the whole log; guests read none of it");
+    assert_eq!(rules.read.as_deref(), Some("signed_in"), "signed-in members read the whole log; guests read none of it");
     assert_eq!(rules.write.as_deref(), Some("moderate"));
     assert!(rules.scope.is_empty());
-    assert!(config.roles_have_privilege(&["member".to_string()], "member"), "no member loses sight of the log");
+    assert!(config.roles_have_privilege(&["member".to_string()], "signed_in"), "no member loses sight of the log");
 }
 
 /// The derive lowercases the struct name for the collection id; the policy is
@@ -581,8 +581,9 @@ fn members_can_write_dm_collections_at_the_collection_gate() {
 
 /// The whole guest posture in one privilege split. `view` is the read tier an
 /// anonymous visitor gets — rooms, messages, reactions, link previews, the
-/// things a page has to render to be worth arriving at. `member` is the tier
-/// that requires having signed in, and exactly three collections sit behind it:
+/// things a page has to render to be worth arriving at. `signed_in` is the tier
+/// the bearer must have signed in for, and exactly three collections sit behind
+/// it:
 /// `user` and `userroles` (no roster for the street — a guest reads the
 /// conversation, not the membership list) and `modaction` (moderation records
 /// are community business).
@@ -627,14 +628,15 @@ fn a_guest_holds_no_write_privilege_over_any_collection() {
 }
 
 /// The no-regression half of the split: moving three reads from `view` to
-/// `member` must leave every signed-in role seeing exactly what it saw before.
-/// All three hold the new privilege, so all three still pass those gates.
+/// `signed_in` must leave every signed-in role seeing exactly what it saw
+/// before. All three hold the new privilege, so all three still pass those
+/// gates.
 #[test]
 fn signed_in_roles_keep_every_collection_they_could_read_before() {
     let config = policy();
     for role in ["member", "moderator", "admin"] {
         let roles = [role.to_string()];
-        assert!(config.roles_have_privilege(&roles, "member"), "role '{role}' must hold the signed-in read privilege");
+        assert!(config.roles_have_privilege(&roles, "signed_in"), "role '{role}' must hold the signed-in read privilege");
         for collection in config.collections.keys() {
             assert!(
                 config.can_access_collection(&roles, &collection.as_str().into()),
