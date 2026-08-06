@@ -160,15 +160,26 @@ fn registered_embed_origin() -> Option<&'static str> {
     EMBED_ORIGINS.into_iter().find(|registered| *registered == origin)
 }
 
-/// Abandon a stashed attempt — the ceremony was closed before it finished.
-/// Clearing now means a result that arrives late finds no verifier and is
-/// refused, rather than quietly minting a session nobody is waiting for. The
-/// next attempt generates its own material, so this never blocks a retry.
+/// Abandon an attempt: clear the one-time material, and drop an `id_token` a
+/// finishing exchange may have retained on its way out.
+///
+/// Clearing the material handles a cancel that lands before a result does — a
+/// result arriving afterwards finds no verifier and is refused, rather than
+/// quietly minting a session nobody is waiting for. The `id_token` handles the
+/// other order: a cancel that lands while the exchange is already past the
+/// token endpoint, where [`complete_sign_in`] retains one for logout before it
+/// returns. Calling this again once that exchange settles is what keeps a
+/// cancelled sign-in from leaving an idp.to token in a signed-out browser.
+///
+/// The next attempt generates its own material, so this never blocks a retry.
 pub fn cancel_pending_sign_in() {
     if let Some(ss) = session_storage() {
         let _ = ss.remove_item(SS_VERIFIER);
         let _ = ss.remove_item(SS_STATE);
         let _ = ss.remove_item(SS_NONCE);
+    }
+    if let Some(ls) = local_storage() {
+        let _ = ls.remove_item(LS_ID_TOKEN);
     }
 }
 
@@ -238,6 +249,12 @@ pub async fn handle_callback() -> Result<String, String> {
 /// report that the app must not boot here. `false` at the top level, where the
 /// caller carries on into [`handle_callback`].
 ///
+/// Only a real authorization result is carried, and only when it can actually
+/// be delivered. Returning `true` suppresses the app in this document for good,
+/// so a `/auth/callback` framed with no `code` and no `error` — and a message
+/// the parent window refuses — both fall through to [`handle_callback`], which
+/// already has an answer for a callback carrying nothing.
+///
 /// Only the short-lived authorization code and the returned `state` travel. The
 /// page that framed this one holds the PKCE verifier and does the exchange, so
 /// no token — idp.to's or ours — is ever put in a message, a URL, or this
@@ -245,26 +262,29 @@ pub async fn handle_callback() -> Result<String, String> {
 pub fn relay_callback_to_parent() -> bool {
     let Some(window) = window() else { return false };
     let Some(parent) = embedding_parent(&window) else { return false };
+    let Some(params) = window.location().search().ok().and_then(|search| UrlSearchParams::new_with_str(&search).ok())
+    else {
+        return false;
+    };
+    let field = |name: &str| params.get(name).filter(|value| !value.is_empty());
+
+    if field("code").is_none() && field("error").is_none() {
+        return false;
+    }
+
+    let message = js_sys::Object::new();
+    let _ = js_sys::Reflect::set(&message, &JsValue::from_str("type"), &JsValue::from_str(CALLBACK_MESSAGE_TYPE));
+    for name in ["code", "state", "error", "error_description"] {
+        if let Some(value) = field(name) {
+            let _ = js_sys::Reflect::set(&message, &JsValue::from_str(name), &JsValue::from_str(&value));
+        }
+    }
 
     // Addressed to our own origin, which is also the parent's: the callback and
     // the page that framed it are both served from here. A parent anywhere else
     // never receives this, whatever it claims to be.
     let origin = window.location().origin().unwrap_or_default();
-    let params = window.location().search().ok().and_then(|search| UrlSearchParams::new_with_str(&search).ok());
-
-    let mut fields: Vec<(&str, String)> = vec![("type", CALLBACK_MESSAGE_TYPE.to_string())];
-    for name in ["code", "state", "error", "error_description"] {
-        if let Some(value) = params.as_ref().and_then(|p| p.get(name)).filter(|value| !value.is_empty()) {
-            fields.push((name, value));
-        }
-    }
-
-    let message = js_sys::Object::new();
-    for (name, value) in &fields {
-        let _ = js_sys::Reflect::set(&message, &JsValue::from_str(name), &JsValue::from_str(value));
-    }
-    let _ = parent.post_message(&message, &origin);
-    true
+    parent.post_message(&message, &origin).is_ok()
 }
 
 /// The window that framed this document, when there is one this document can
