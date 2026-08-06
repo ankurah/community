@@ -1,3 +1,15 @@
 [workspace]
 resolver = "2"
 members = ["model", "server", "leptos-app"]
+
+# RSA-4096 keygen (ankurah-jwt-auth's SigningKeys::generate, backed by `rsa`)
+# is unusably slow unoptimized — 24–70s measured per debug server boot without
+# ANKURAH_JWT_SIGNING_KEY, and per test binary that mints real tokens. The
+# prime-search arithmetic lives in these two crates, so they alone build
+# optimized in dev. Deliberately NOT `package."*"`: that would also send the
+# whole leptos wasm stack through opt-level 2 in trunk's dev builds, which
+# blows the e2e webServer's 180s startup budget on a cold cache.
+[profile.dev.package.rsa]
+opt-level = 2
+[profile.dev.package.num-bigint-dig]
+opt-level = 2
