@@ -31,6 +31,7 @@ mod profile_popover;
 mod qr_code_modal;
 mod room_topic;
 mod sidebar;
+mod sign_in_ceremony;
 mod user_detail_panel;
 mod xray;
 
@@ -235,14 +236,45 @@ pub fn App() -> impl IntoView {
 /// The signed-out landing view.
 #[component]
 pub fn SignIn() -> impl IntoView {
-    let start = move |_| {
+    // Sign-in failures used to reach only the console; render them where the
+    // user actually is. Seeded from the callback's failure (set before mount),
+    // and written again if the click itself cannot get off the ground.
+    let auth_error = RwSignal::new(AUTH_ERROR.read().ok().and_then(|guard| guard.clone()));
+
+    // The live framed attempt, if the visitor is in the middle of one.
+    let ceremony = RwSignal::new(None::<auth::FramedAttempt>);
+
+    let top_level = move || {
         if let Err(e) = auth::start_sign_in() {
             tracing::error!("failed to start sign-in: {:?}", e);
+            auth_error.set(Some(format!("could not start sign-in: {e:?}")));
         }
     };
-    // Sign-in failures used to reach only the console; render them where the
-    // user actually is. Read once — the value is set before mount.
-    let auth_error = AUTH_ERROR.read().ok().and_then(|guard| guard.clone());
+    let start = move |_| match auth::begin_framed_sign_in() {
+        // idp.to frames for this origin: run the ceremony without leaving the page.
+        Ok(Some(attempt)) => ceremony.set(Some(attempt)),
+        // It does not, so a frame would be refused and would say nothing about
+        // it. Hand over the whole tab, which always works.
+        Ok(None) => top_level(),
+        // Setting up the attempt failed (no sessionStorage, say). The top-level
+        // flow needs the same things, so let it fail where the user can see it.
+        Err(e) => {
+            tracing::error!("failed to set up framed sign-in: {:?}", e);
+            top_level();
+        }
+    };
+
+    // Signing in mid-visit: store the token and let the app boot the way it
+    // boots on every other load with a session in hand — `initialize` picks it
+    // up from `stored_token`, connects the node, waits for policy, and mounts
+    // `ChatApp`. Deliberately NOT a swap under the mounted tree: there is one
+    // path into the signed-in UI, and this is it.
+    let signed_in = move |token: String| {
+        auth::store_token(&token);
+        if let Some(w) = window() {
+            let _ = w.location().set_href("/");
+        }
+    };
     view! {
         <div class="signIn">
             <div class="signInGlow signInGlowA" aria-hidden="true"></div>
@@ -287,7 +319,7 @@ pub fn SignIn() -> impl IntoView {
                         "Open community"
                     </span>
                 </div>
-                {auth_error.map(|message| view! {
+                {move || auth_error.get().map(|message| view! {
                     <div class="signInError" role="alert">{message}</div>
                 })}
                 <button class="signInButton" on:click=start>
@@ -300,6 +332,18 @@ pub fn SignIn() -> impl IntoView {
                 </button>
                 <p class="signInFootnote">"Authentication by idp.to — local-first chat, built in Rust + wasm."</p>
             </div>
+            // Closing takes the frame down with the modal and abandons the
+            // stashed attempt, so the next click starts clean.
+            {move || ceremony.get().map(|attempt| view! {
+                <sign_in_ceremony::SignInCeremony
+                    attempt=attempt
+                    on_close=move || {
+                        auth::cancel_pending_sign_in();
+                        ceremony.set(None);
+                    }
+                    on_signed_in=signed_in
+                />
+            })}
         </div>
     }
 }

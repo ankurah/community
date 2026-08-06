@@ -1,17 +1,22 @@
 //! Client-side OIDC (Authorization Code + PKCE, public client) against idp.to,
 //! plus the federate call to our own `/auth/session`.
 //!
-//! Flow: [`start_sign_in`] generates a PKCE verifier/challenge + `state` +
-//! `nonce`, stashes them in `sessionStorage`, and redirects to idp.to's
-//! authorize endpoint. On return, the SPA lands on `/auth/callback`;
-//! [`handle_callback`] verifies `state`, exchanges the `code` for an `id_token`
-//! at idp.to's token endpoint, then POSTs it to our `/auth/session`, which
-//! validates it and mints an ankurah session token.
+//! Two ways in, one exchange. [`start_sign_in`] hands the whole tab to idp.to
+//! and gets it back at `/auth/callback`; [`begin_framed_sign_in`] puts the same
+//! authorization request in a frame on the page the visitor is already looking
+//! at, and the callback — same-origin, so it can talk to us — hands the code
+//! back with `postMessage`. Both generate one PKCE verifier/challenge +
+//! `state` + `nonce` into `sessionStorage`, and both finish in
+//! [`complete_sign_in`], which exchanges the `code` for an `id_token` at
+//! idp.to's token endpoint and POSTs it to our `/auth/session`, which validates
+//! it and mints an ankurah session token.
 //!
-//! That landing page is not always the page the visitor is looking at. When it
-//! is loaded inside a frame the page around it put there, it is a courier
-//! rather than the app: [`relay_callback_to_parent`] hands the result up and
-//! the exchange happens where the PKCE verifier is.
+//! The framed request is the special case in two respects only: it must start
+//! at the property host (see [`FRAMED_AUTHORIZE_ENDPOINT`]) and carry an
+//! `embed_origin` from [`EMBED_ORIGINS`], and it is available on those origins
+//! alone. Everything else — the parameters, the custody of the one-time
+//! material, the exchange, the federate call, token storage — is the flow that
+//! was already here.
 //!
 //! No client secret and no server-side session: a static SPA does the whole
 //! dance. All crypto here is pure-Rust (sha2) + the browser's CSPRNG (getrandom
@@ -22,13 +27,31 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::{spawn_local, JsFuture};
-use web_sys::{window, Headers, Request, RequestInit, Response, Storage, UrlSearchParams};
+use web_sys::{window, Headers, MessageEvent, Request, RequestInit, Response, Storage, UrlSearchParams};
 
 // --- idp.to public-client config (verified against their live discovery doc) ---
 const CLIENT_ID: &str = "app_HsW5XyYWbr0KQrHZb5iejw";
 const AUTHORIZE_ENDPOINT: &str = "https://id.idp.to/oidc/authorize";
 const TOKEN_ENDPOINT: &str = "https://id.idp.to/oidc/token";
 const DISCOVERY_ENDPOINT: &str = "https://id.idp.to/.well-known/openid-configuration";
+/// Where a *framed* authorization request starts: idp.to's property host,
+/// bypassing the discovery-advertised issuer above. The issuer deliberately
+/// stays non-frameable, and Chromium checks framing policy on every hop of a
+/// redirect chain — so a frame that began at the issuer would be refused
+/// before it ever reached the property. Top-level sign-in keeps the issuer.
+const FRAMED_AUTHORIZE_ENDPOINT: &str = "https://ankurah.login.idp.to/oidc/authorize";
+/// The origins idp.to has registered as embedders of that property. Sending one
+/// as `embed_origin` is what gets `frame-ancestors <that origin>` back instead
+/// of `frame-ancestors 'none'`; the registry is exact, port included, which is
+/// why the development entry names a port and why no other local port can be
+/// substituted for it.
+///
+/// DEPLOYMENT CONSTANTS. What `embed_origin` says is "the page doing the
+/// embedding is allowed to embed", so a value taken from a URL parameter, a
+/// message, or a referrer would let the caller answer that question about
+/// itself — [`registered_embed_origin`] therefore matches our own origin
+/// against these literals and sends the literal, never the runtime string.
+const EMBED_ORIGINS: [&str; 2] = ["https://community.ankurah.org", "http://127.0.0.1:5173"];
 /// Discriminates the framed callback's `postMessage` from every other message
 /// the page might receive.
 const CALLBACK_MESSAGE_TYPE: &str = "idp-auth-callback";
@@ -77,8 +100,14 @@ pub fn is_callback() -> bool {
         .unwrap_or(false)
 }
 
-/// Begin sign-in: generate PKCE + state + nonce, stash them, and redirect to
-/// idp.to. Navigates away on success, so it only returns on setup failure.
+/// Begin sign-in at the top level: generate PKCE + state + nonce, stash them,
+/// and hand the tab to idp.to. Navigates away on success, so it only returns on
+/// setup failure.
+///
+/// This is also the ceremony's escape hatch. A frame that the browser refuses
+/// to display raises no event the parent can hear, so the visitor must always
+/// have this within reach; taking it regenerates every one-time value, which is
+/// why an abandoned framed attempt cannot spoil the next try.
 pub fn start_sign_in() -> Result<(), JsValue> {
     let window = window().ok_or_else(|| JsValue::from_str("no window"))?;
     let pending = stash_new_pending(&window)?;
@@ -86,8 +115,65 @@ pub fn start_sign_in() -> Result<(), JsValue> {
     window.location().assign(&auth_url)
 }
 
+/// A framed sign-in ready to be put on screen: the URL for the frame, and the
+/// `state` the parent will hold until a result comes back claiming to be this
+/// attempt's.
+#[derive(Clone)]
+pub struct FramedAttempt {
+    pub authorize_url: String,
+    pub state: String,
+}
+
+/// Begin sign-in in a frame: same one-time material as [`start_sign_in`], same
+/// parameters, but addressed to the property host and carrying `embed_origin`.
+/// Returns rather than navigating — the caller mounts the frame.
+///
+/// `Ok(None)` when idp.to does not frame for the origin we are served from. The
+/// caller must take [`start_sign_in`] instead: a frame the browser refuses to
+/// display reports nothing back, so attempting one here would show an empty box
+/// and no reason for it. Nothing is stashed in that case — the top-level flow
+/// generates its own material.
+pub fn begin_framed_sign_in() -> Result<Option<FramedAttempt>, JsValue> {
+    let Some(embed_origin) = registered_embed_origin() else { return Ok(None) };
+    let window = window().ok_or_else(|| JsValue::from_str("no window"))?;
+    let pending = stash_new_pending(&window)?;
+    // Exactly one `embed_origin`: a duplicate or unlisted value is refused the
+    // same way a missing one is.
+    let authorize_url = format!(
+        "{FRAMED_AUTHORIZE_ENDPOINT}?{query}&embed_origin={embed}",
+        query = authorize_query(&pending),
+        embed = enc(embed_origin),
+    );
+    Ok(Some(FramedAttempt { authorize_url, state: pending.state }))
+}
+
+/// The `embed_origin` to send from the page we are on, or `None` when idp.to
+/// has not registered this origin as an embedder.
+///
+/// The only read of the runtime origin in the framed path, and it selects
+/// rather than derives: our own origin is compared for equality against
+/// [`EMBED_ORIGINS`], and what a match returns is the matching literal, so the
+/// bytes on the wire are always one of the two written above. An origin that
+/// matches neither gets no frame at all.
+fn registered_embed_origin() -> Option<&'static str> {
+    let origin = window()?.location().origin().ok()?;
+    EMBED_ORIGINS.into_iter().find(|registered| *registered == origin)
+}
+
+/// Abandon a stashed attempt — the ceremony was closed before it finished.
+/// Clearing now means a result that arrives late finds no verifier and is
+/// refused, rather than quietly minting a session nobody is waiting for. The
+/// next attempt generates its own material, so this never blocks a retry.
+pub fn cancel_pending_sign_in() {
+    if let Some(ss) = session_storage() {
+        let _ = ss.remove_item(SS_VERIFIER);
+        let _ = ss.remove_item(SS_STATE);
+        let _ = ss.remove_item(SS_NONCE);
+    }
+}
+
 /// The one-time material for one authorization request, stashed and ready to
-/// be spent by the callback that comes back.
+/// be spent by whichever callback context comes back.
 struct PendingAuth {
     redirect_uri: String,
     state: String,
@@ -113,7 +199,10 @@ fn stash_new_pending(window: &web_sys::Window) -> Result<PendingAuth, JsValue> {
     Ok(PendingAuth { redirect_uri: format!("{origin}{CALLBACK_PATH}"), state, nonce, challenge })
 }
 
-/// The authorization parameters for a stashed attempt.
+/// The authorization parameters, identical in both flows. `redirect_uri` is the
+/// live origin's callback (production, or a registered loopback port in dev) —
+/// unlike `embed_origin`, it has to name where the browser actually is, and
+/// idp.to matches it against the registered set.
 fn authorize_query(pending: &PendingAuth) -> String {
     format!(
         "response_type=code&client_id={client}&redirect_uri={redirect}\
@@ -127,8 +216,8 @@ fn authorize_query(pending: &PendingAuth) -> String {
     )
 }
 
-/// Complete the callback: read `code`/`state` off the landing URL and spend
-/// them. Returns the minted ankurah token.
+/// Complete a top-level callback: read `code`/`state` off the landing URL and
+/// spend them. Returns the minted ankurah token.
 pub async fn handle_callback() -> Result<String, String> {
     let window = window().ok_or("no window")?;
     let search = window.location().search().map_err(|_| "no query string")?;
@@ -187,7 +276,9 @@ fn embedding_parent(window: &web_sys::Window) -> Option<web_sys::Window> {
     window.parent().ok().flatten()
 }
 
-/// idp.to's `error` response, worded for the sign-in card.
+/// idp.to's `error` response, worded for the sign-in card. Shared by both
+/// callback contexts so the ceremony explains a refusal exactly as the
+/// top-level redirect does.
 fn authorize_error_message(error: &str, description: &str) -> String {
     // `invalid_scope` means idp.to advertises the `roles` scope but hasn't
     // activated role configuration for this Application (or it regressed).
@@ -203,6 +294,10 @@ fn authorize_error_message(error: &str, description: &str) -> String {
 /// Spend an authorization code: verify `state` against the stashed attempt,
 /// exchange the code for an `id_token`, then federate it to our
 /// `/auth/session`. Returns the minted ankurah token.
+///
+/// The one code-to-session path in the client. The top-level callback reaches
+/// it with values read from its own URL; the ceremony reaches it with values a
+/// framed callback sent its parent. Neither gets its own exchange.
 pub async fn complete_sign_in(code: &str, returned_state: &str) -> Result<String, String> {
     let window = window().ok_or("no window")?;
     let origin = window.location().origin().map_err(|_| "no origin")?;
@@ -254,6 +349,61 @@ pub async fn complete_sign_in(code: &str, returned_state: &str) -> Result<String
     }
 
     Ok(session.token)
+}
+
+// --- the parent side of the ceremony ----------------------------------------
+
+/// What a message the page received turned out to be.
+pub enum FramedMessage {
+    /// This attempt's authorization code, ready for [`complete_sign_in`].
+    Accepted { code: String },
+    /// This attempt came back as an idp.to error rather than a code.
+    Failed(String),
+    /// Not this attempt's result: from another origin, not the callback's
+    /// message at all, carrying a `state` that does not match, or a second copy
+    /// of one already taken.
+    Ignored,
+}
+
+/// Check one message against the attempt the ceremony is waiting on.
+///
+/// `expected_state` is the attempt's `state`, and it is taken by the first
+/// message that matches it — so a replay, or anything arriving once the
+/// ceremony has settled, finds nothing to match and is ignored. The stashed
+/// `state` in `sessionStorage` is checked again inside [`complete_sign_in`];
+/// this check is what keeps an unexpected message from starting an exchange at
+/// all.
+pub fn read_framed_message(event: &MessageEvent, expected_state: &mut Option<String>) -> FramedMessage {
+    let Some(origin) = window().and_then(|w| w.location().origin().ok()) else { return FramedMessage::Ignored };
+    if event.origin() != origin {
+        return FramedMessage::Ignored;
+    }
+
+    let data = event.data();
+    if message_field(&data, "type").as_deref() != Some(CALLBACK_MESSAGE_TYPE) {
+        return FramedMessage::Ignored;
+    }
+    let Some(expected) = expected_state.as_deref() else { return FramedMessage::Ignored };
+    if message_field(&data, "state").as_deref() != Some(expected) {
+        return FramedMessage::Ignored;
+    }
+    *expected_state = None;
+
+    if let Some(error) = message_field(&data, "error") {
+        let description = message_field(&data, "error_description").unwrap_or_default();
+        return FramedMessage::Failed(authorize_error_message(&error, &description));
+    }
+    match message_field(&data, "code") {
+        Some(code) => FramedMessage::Accepted { code },
+        None => FramedMessage::Failed("the sign-in frame came back with neither a code nor an error".into()),
+    }
+}
+
+/// Read one string member of a received message, treating absent and empty
+/// alike — the relay omits a parameter it did not find, and a member that
+/// arrived empty says nothing either.
+fn message_field(data: &JsValue, name: &str) -> Option<String> {
+    js_sys::Reflect::get(data, &JsValue::from_str(name)).ok()?.as_string().filter(|value| !value.is_empty())
 }
 
 /// Persist the minted ankurah token across reloads.

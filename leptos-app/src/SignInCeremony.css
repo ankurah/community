@@ -1,0 +1,217 @@
+/* In-page sign-in ceremony: idp.to's authorization page, framed.
+
+   The signed-out landing behind this is fixed dark in both themes, but the
+   card is not: idp.to's page inside the frame follows the visitor's own
+   light/dark preference, and a card that ignored it would put a bright panel
+   around a dark document. So the surround uses the theme tokens and lands on
+   whichever side the frame does. */
+
+.ceremonyOverlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--sp-5);
+  background-color: rgb(6 16 14 / 62%);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  animation: ceremonyOverlayIn 150ms var(--ease) both;
+}
+
+@keyframes ceremonyOverlayIn {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
+.ceremonyCard {
+  display: flex;
+  flex-direction: column;
+  width: min(100%, 460px);
+  max-height: min(100%, 760px);
+  padding: var(--sp-5);
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-xl);
+  box-shadow: var(--shadow-3);
+  animation: ceremonyCardIn 180ms var(--ease) both;
+}
+
+@keyframes ceremonyCardIn {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.97);
+  }
+
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.ceremonyHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  margin-bottom: var(--sp-4);
+}
+
+.ceremonyHeader h2 {
+  margin: 0;
+  font-size: var(--fs-lg);
+  font-weight: 750;
+  letter-spacing: -0.01em;
+  color: var(--text);
+}
+
+.ceremonySubtitle {
+  margin: 3px 0 0;
+  font-size: var(--fs-md);
+  line-height: 1.5;
+  color: var(--text-3);
+}
+
+.ceremonyClose {
+  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 26px;
+  line-height: 1;
+  color: var(--text-3);
+  border-radius: var(--r-sm);
+  transition:
+    color var(--t-fast) var(--ease),
+    background-color var(--t-fast) var(--ease);
+}
+
+.ceremonyClose:hover {
+  color: var(--text);
+  background-color: var(--surface-3);
+}
+
+/* The frame's seat. A fixed height rather than one that follows the frame:
+   a refused document leaves the element zero-sized and its own height
+   unreadable, so the box has to hold its shape either way. */
+.ceremonyStage {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 420px;
+  padding: 0;
+  overflow: hidden;
+  background: var(--surface-3);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+}
+
+.ceremonyFrame {
+  width: 100%;
+  height: 420px;
+  border: none;
+  /* idp.to's page paints its own background; tell it which one to pick. */
+  color-scheme: light dark;
+}
+
+.ceremonyStatus {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+  padding: var(--sp-5);
+  font-size: var(--fs-base);
+  line-height: 1.5;
+  text-align: center;
+  color: var(--text-2);
+}
+
+.ceremonyStatusFailed {
+  color: var(--danger);
+}
+
+.ceremonySpinner {
+  width: 15px;
+  height: 15px;
+  border: 2px solid var(--border-strong);
+  border-top-color: var(--primary);
+  border-radius: var(--r-full);
+  animation: ceremonySpin 700ms linear infinite;
+}
+
+@keyframes ceremonySpin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.ceremonyHint {
+  margin: var(--sp-3) 0 0;
+  font-size: var(--fs-sm);
+  line-height: 1.5;
+  text-align: center;
+  color: var(--text-faint);
+}
+
+/* Always on screen, never conditional: a document the browser refuses to
+   frame raises no event, so there is nothing to react to — the way out has to
+   be there before anything goes wrong. */
+.ceremonyEscape {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+  width: 100%;
+  min-height: 42px;
+  margin-top: var(--sp-3);
+  padding: 0 var(--sp-4);
+  font-size: var(--fs-base);
+  font-weight: 650;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  transition:
+    background-color var(--t-fast) var(--ease),
+    border-color var(--t-fast) var(--ease);
+}
+
+.ceremonyEscape:hover {
+  background: var(--surface-3);
+  border-color: var(--primary);
+}
+
+.ceremonyEscape svg {
+  width: 15px;
+  height: 15px;
+  color: var(--text-3);
+}
+
+@media (max-height: 720px) {
+  .ceremonyStage {
+    min-height: 320px;
+  }
+
+  .ceremonyFrame {
+    height: 320px;
+  }
+}
+
+@media (max-width: 480px) {
+  .ceremonyOverlay {
+    padding: var(--sp-3);
+  }
+
+  .ceremonyCard {
+    padding: var(--sp-4);
+  }
+}

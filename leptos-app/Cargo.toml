@@ -35,6 +35,9 @@ web-sys = { version = "=0.3.82", features = [
     # X-ray's own affordances over the chat components: a delegated click
     # listener, and a MutationObserver watching for bubbles as they mount.
     "MutationObserver", "MutationObserverInit", "MutationRecord", "DomTokenList",
+    # The framed sign-in ceremony: the result the callback frame posts to the
+    # page that framed it arrives as a MessageEvent.
+    "MessageEvent",
 ] }
 js-sys = "=0.3.82"
 tracing-wasm = "0.2.1"
