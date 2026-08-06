@@ -22,15 +22,23 @@
 //! one when the old one expires or the connection comes back.
 //!
 //! WHAT A GUEST TOKEN GRANTS, and where that is decided — `policy.json`, not
-//! here. The `guest` role holds one privilege, `view`, which opens four
-//! collections: `room`, `message`, `reaction`, `linkpreview`. That is the
-//! conversation and what renders alongside it, and it is the whole tier.
-//! Everything else is refused. The roster and the moderation log (`user`,
-//! `userroles`, `modaction`) sit behind the `signed_in` privilege, which a
-//! guest does not hold. The private collections — DMs, inboxes, read cursors,
-//! bans — are withheld by the row-local scopes that were already there, which
-//! compare `$jwt.sub` against an entity id that [`GUEST_SUB`] never equals. And
-//! a guest holds no `post` privilege, so a guest writes nothing anywhere.
+//! here. The `guest` role holds one privilege, `view`, and it leaves four
+//! collections readable: `room`, `message`, `reaction`, `linkpreview` — the
+//! conversation, and what renders alongside it. That is the whole tier, and it
+//! is what TWO refusals leave behind rather than what one privilege opens.
+//!
+//! The collection gate refuses three outright: the roster and the moderation
+//! log (`user`, `userroles`, `modaction`) are keyed to the `signed_in`
+//! privilege a guest does not hold, so the query never reaches a row. `view`
+//! passes that gate on the other eleven.
+//!
+//! The row scopes then empty seven of those eleven — DMs, inboxes, read
+//! cursors, bans — with no rule written about guests anywhere. Those scopes
+//! compare `$jwt.sub` against an entity id, and [`GUEST_SUB`] never equals one,
+//! so a query matches nothing and a get by id is refused. Four are left, which
+//! is the list above.
+//!
+//! And a guest holds no `post` privilege, so a guest writes nothing anywhere.
 //! `policy.json` and `server/tests/guest_policy_live_tests.rs` are the
 //! authority on all of that; this module only mints the claims those rules are
 //! then applied to.

@@ -138,21 +138,28 @@ while a member pays an OIDC round-trip. The client re-mints on expiry or
 reconnect.
 
 **What a guest may read** is a privilege split in `policy.json`, not a rule
-about guests. `view` is the anonymous tier and it covers four collections:
-`room`, `message`, `reaction`, `linkpreview` — room names and topics, message
-text and timestamps, reaction counts, link previews. A new `signed_in`
-privilege gates the three collections a reader has to have signed in for:
-`user` and `userroles` (no roster for the street) and `modaction` (moderation
-records are community business). The privilege says what its name says — the
-bearer completed sign-in — and the `member` floor applied at mint means every
+about guests. `view` is the anonymous tier, and what it leaves readable is
+four collections: `room`, `message`, `reaction`, `linkpreview` — room names
+and topics, message text and timestamps, reaction counts, link previews. Two
+different refusals produce that four, and they work at different layers.
+
+The **collection gate** refuses three outright. A new `signed_in` privilege
+keys the collections a reader has to have signed in for: `user` and
+`userroles` (no roster for the street) and `modaction` (moderation records are
+community business). The privilege says what its name says — the bearer
+completed sign-in — and the `member` floor applied at mint means every
 signed-in bearer holds it and no guest does. Signed-in visibility is
-unchanged; member, moderator and admin all hold it. Every private collection
-keeps the row-local scope it already had, and those refuse a guest with no new
-rule written: the scopes compare `$jwt.sub` against an entity id, the guest
-subject is a literal that never parses as one, so the comparison is false and
-the row is withheld. A guest holds no `post` privilege, so a guest writes
-nothing anywhere. `server/tests/guest_policy_live_tests.rs` runs all of that
-against the real policy on a real node.
+unchanged; member, moderator and admin all hold it.
+
+`view` passes the gate on the other eleven, and the **row scopes** empty seven
+of them: `ban`, `readstate`, `notification`, `notificationpref`, `dmthread`,
+`dmmessage`, `dmreadstate`. Each keeps the row-local scope it already had, and
+those refuse a guest with no new rule written — the scopes compare `$jwt.sub`
+against an entity id, the guest subject is a literal that never parses as one,
+so the comparison is false, a query matches nothing and a get by id is
+refused. A guest holds no `post` privilege either, so a guest writes nothing
+anywhere. `server/tests/guest_policy_live_tests.rs` runs all of that against
+the real policy on a real node.
 
 **What that leaves the guest client without: author names.** `Message` carries
 `user: Ref<User>` and no display name of its own, so a reader who cannot read
