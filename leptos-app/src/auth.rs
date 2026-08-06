@@ -23,7 +23,7 @@
 //! "js"); the ankurah token is only ever *read* client-side.
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::{spawn_local, JsFuture};
@@ -75,8 +75,11 @@ const SS_NONCE: &str = "oidc_nonce";
 // localStorage key for the minted ankurah session token (survives reloads).
 const LS_TOKEN: &str = "community_session_token";
 // localStorage key for the idp.to id_token, retained ONLY to present as
-// `id_token_hint` at RP-initiated logout. Same custody tier as the session
-// token above (it carries the same identity claims the session token does).
+// `id_token_hint` at RP-initiated logout — stored as a `RetainedIdToken` pair
+// naming the session it belongs to, because this slot is shared across the
+// origin's tabs and a concurrent sign-in overwrites it. Same custody tier as
+// the session token above (it carries the same identity claims the session
+// token does).
 const LS_ID_TOKEN: &str = "community_id_token";
 
 /// The callback path our SPA fallback serves (also a registered redirect_uri).
@@ -100,6 +103,17 @@ pub struct MintedSession {
     /// handed back so a caller that decides this session is unwanted can undo
     /// exactly that write. See [`remove_id_token_if_matches`].
     pub id_token: String,
+}
+
+/// What sits in `LS_ID_TOKEN`: the retained id_token plus the `sub` (entity
+/// id) of the ankurah session minted alongside it. The pairing is what lets
+/// `sign_out` tell whether the hint it found belongs to the session it is
+/// ending — without it, whichever tab signed in last owns the slot, and every
+/// other session's sign-out presents (and deletes) a foreign hint.
+#[derive(Serialize, Deserialize)]
+struct RetainedIdToken {
+    id_token: String,
+    session_sub: String,
 }
 
 /// True when the app is currently loading the OIDC redirect landing page.
@@ -213,16 +227,26 @@ pub fn cancel_pending_sign_in() {
 /// path touches the slot not at all.
 ///
 /// Be exact about the cross-tab case, because a compare reads stronger than
-/// this one is. [`complete_sign_in`] writes this slot unconditionally, and no
+/// this one is. [`complete_sign_in`] writes this slot on its way out of a
+/// successful exchange (skipped only when the minted session token's `sub` is
+/// unreadable, and then this exchange left nothing here to take back), and no
 /// await separates that write from this call — so if another tab signed in
-/// while the cancelled exchange was in flight, its value is already overwritten
+/// while the cancelled exchange was in flight, its pair is already overwritten
 /// by the time the compare runs, and the compare then matches our own. The
-/// compare bites only on a write landing inside that gap. Making the retention
-/// itself ownership-aware is what covers the rest, and that belongs to the
-/// shared exchange rather than here.
+/// compare bites only on a write landing inside that gap. What makes the
+/// surviving overwrite harmless is the retention itself: the slot holds a
+/// [`RetainedIdToken`], and `sign_out` spends a hint only for the session it
+/// is ending, so no session's sign-out ever presents the value another
+/// exchange left here.
 pub fn remove_id_token_if_matches(expected: &str) {
     let Some(ls) = local_storage() else { return };
-    if ls.get_item(LS_ID_TOKEN).ok().flatten().as_deref() == Some(expected) {
+    let Some(raw) = ls.get_item(LS_ID_TOKEN).ok().flatten() else { return };
+    // A non-pair value cannot be this exchange's write (an exchange writes
+    // pairs), so a legacy bare token is left for sign_out's bridge to spend.
+    let holds_ours = serde_json::from_str::<RetainedIdToken>(&raw)
+        .map(|retained| retained.id_token == expected)
+        .unwrap_or(false);
+    if holds_ours {
         let _ = ls.remove_item(LS_ID_TOKEN);
     }
 }
@@ -419,10 +443,18 @@ pub async fn complete_sign_in(code: &str, returned_state: &str) -> Result<Minted
 
     // Retain the id_token for RP-initiated logout (`id_token_hint`): it
     // proves to idp.to at sign-out time which client and user are asking.
+    // Paired with the minted session's `sub` so sign-out can tell the hint is
+    // its own — this slot is shared across tabs, and an unowned value would
+    // hand another session's sign-out a foreign hint. If the fresh session
+    // token's `sub` is unreadable (not expected), retain nothing: a hint
+    // nobody can claim is the bug, not a fallback.
     // Custody note: it expires within the hour and sits beside the 12h
     // session token, which is the bigger prize for the same attacker.
-    if let Some(ls) = local_storage() {
-        let _ = ls.set_item(LS_ID_TOKEN, &tokens.id_token);
+    if let (Some(ls), Some(session_sub)) = (local_storage(), token_sub(&session.token)) {
+        let retained = RetainedIdToken { id_token: tokens.id_token.clone(), session_sub };
+        if let Ok(json) = serde_json::to_string(&retained) {
+            let _ = ls.set_item(LS_ID_TOKEN, &json);
+        }
     }
 
     Ok(MintedSession { token: session.token, id_token: tokens.id_token })
@@ -505,17 +537,26 @@ pub fn stored_token() -> Option<String> {
 ///
 /// Local state goes first: whatever the IdP side does, this browser is signed
 /// out of Community the moment the user clicks. Then, when idp.to advertises
-/// an `end_session_endpoint` and we still hold an id_token to present as the
-/// hint, navigate through it so the idp.to session actually ends — otherwise
-/// the next "Sign in" click would silently re-admit without a passkey touch.
-/// Any discovery trouble degrades to the old behavior (reload to the sign-in
-/// screen, IdP session left standing).
+/// an `end_session_endpoint` and the retained id_token belongs to the session
+/// this tab is ending, navigate through it so the idp.to session actually
+/// ends — otherwise the next "Sign in" click would silently re-admit without
+/// a passkey touch. A hint some other session's sign-in retained stays in
+/// storage for that session's own sign-out, and this one degrades to the
+/// local-only path (the idp.to session standing at that point is the other
+/// session's, not ours to end). Any discovery trouble degrades the same way
+/// (reload to the sign-in screen, IdP session left standing).
 pub fn sign_out() {
-    let id_token = local_storage().and_then(|ls| ls.get_item(LS_ID_TOKEN).ok().flatten());
-    if let Some(ls) = local_storage() {
-        let _ = ls.remove_item(LS_TOKEN);
-        let _ = ls.remove_item(LS_ID_TOKEN);
-    }
+    // The session being ended is this tab's in-memory one — deliberately NOT
+    // whatever `LS_TOKEN` holds: that slot is shared across tabs and
+    // last-writer-wins, the same clobber the ownership check guards against.
+    let live_sub = crate::AUTH_TOKEN.read().ok().and_then(|guard| guard.as_deref().and_then(token_sub));
+    let id_token = match local_storage() {
+        Some(ls) => {
+            let _ = ls.remove_item(LS_TOKEN);
+            take_id_token_if_owned(&ls, live_sub.as_deref())
+        }
+        None => None,
+    };
 
     spawn_local(async move {
         let end_session = discovery_end_session_endpoint().await;
@@ -533,6 +574,30 @@ pub fn sign_out() {
         };
         let _ = w.location().set_href(&target);
     });
+}
+
+/// Withdraw the retained id_token for use as `id_token_hint`, only when it
+/// belongs to the session being ended. A pair some other session retained is
+/// left where it is — its owner's sign-out still needs it, and removing it
+/// here is exactly the cross-tab clobber the pairing exists to prevent. A
+/// pre-pairing value (a bare JWT, from before `RetainedIdToken`) names no
+/// owner; it is spent as-is, once — discarding it instead would cost every
+/// already-signed-in browser the idp.to half of its next sign-out.
+fn take_id_token_if_owned(ls: &Storage, live_sub: Option<&str>) -> Option<String> {
+    let raw = ls.get_item(LS_ID_TOKEN).ok().flatten()?;
+    match serde_json::from_str::<RetainedIdToken>(&raw) {
+        Ok(retained) if live_sub == Some(retained.session_sub.as_str()) => {
+            let _ = ls.remove_item(LS_ID_TOKEN);
+            Some(retained.id_token)
+        }
+        Ok(_) => None,
+        // Not a pair: a legacy bare id_token, or unrecognizable debris. Spend
+        // the former; clear the latter rather than presenting junk to idp.to.
+        Err(_) => {
+            let _ = ls.remove_item(LS_ID_TOKEN);
+            if token_sub(&raw).is_some() { Some(raw) } else { None }
+        }
+    }
 }
 
 // --- helpers ---------------------------------------------------------------
@@ -553,13 +618,7 @@ fn random_b64url(n: usize) -> String {
 /// real expiry). Reads `exp` from the JWT payload; a 30s leeway avoids using a
 /// token that expires mid-request. Unparseable → treat as expired.
 fn token_is_expired(token: &str) -> bool {
-    let Some(payload_b64) = token.split('.').nth(1) else {
-        return true;
-    };
-    let Ok(bytes) = URL_SAFE_NO_PAD.decode(payload_b64) else {
-        return true;
-    };
-    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+    let Some(value) = payload_json(token) else {
         return true;
     };
     // No `exp` → be lenient (our tokens always have one; this is only an optimization).
@@ -567,6 +626,22 @@ fn token_is_expired(token: &str) -> bool {
         return false;
     };
     (js_sys::Date::now() / 1000.0) + 30.0 >= exp
+}
+
+/// A JWT's payload as JSON — no signature check: these are client-side reads
+/// of tokens we already hold (expiry optimization, ownership matching), never
+/// trust decisions. The server is the enforcer.
+fn payload_json(token: &str) -> Option<serde_json::Value> {
+    let payload_b64 = token.split('.').nth(1)?;
+    let bytes = URL_SAFE_NO_PAD.decode(payload_b64).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+/// A JWT's `sub` claim. For the ankurah session token that is the user's
+/// entity id — the name retention and sign-out agree on when deciding whom a
+/// stored id_token belongs to.
+fn token_sub(token: &str) -> Option<String> {
+    Some(payload_json(token)?.get("sub")?.as_str()?.to_string())
 }
 
 async fn http_post(url: &str, body: &str, content_type: &str) -> Result<String, String> {

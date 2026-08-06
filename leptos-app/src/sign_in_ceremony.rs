@@ -110,8 +110,10 @@ pub fn SignInCeremony(
                     // further — so by this line the pending-attempt keys hold a
                     // SUCCESSOR's material (this attempt's was consumed before
                     // the first request went out) and are not this task's to
-                    // clear. The id_token is: this exchange wrote it moments
-                    // ago, and only that value is taken back. See
+                    // clear. The id_token is: this exchange retained it
+                    // moments ago, paired with the session it minted, and the
+                    // compare reads that pair's `id_token` — so only this
+                    // exchange's own write is taken back. See
                     // `remove_id_token_if_matches` for what that compare does
                     // and does not cover.
                     if let Ok(minted) = &outcome {
