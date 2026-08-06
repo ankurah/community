@@ -114,6 +114,13 @@ fn main() {
 async fn initialize() {
     // Resolve the session token: either finish an OIDC callback, or restore one.
     if auth::is_callback() {
+        // Inside a sign-in frame this document is a courier, not the app: hand
+        // the code and state to the page that framed it and stop here. Nothing
+        // mounts and nothing connects — that page holds the PKCE verifier, does
+        // the exchange, and takes the frame down afterwards.
+        if auth::relay_callback_to_parent() {
+            return;
+        }
         match auth::handle_callback().await {
             Ok(token) => {
                 auth::store_token(&token);

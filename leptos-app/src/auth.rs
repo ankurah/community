@@ -8,6 +8,11 @@
 //! at idp.to's token endpoint, then POSTs it to our `/auth/session`, which
 //! validates it and mints an ankurah session token.
 //!
+//! That landing page is not always the page the visitor is looking at. When it
+//! is loaded inside a frame the page around it put there, it is a courier
+//! rather than the app: [`relay_callback_to_parent`] hands the result up and
+//! the exchange happens where the PKCE verifier is.
+//!
 //! No client secret and no server-side session: a static SPA does the whole
 //! dance. All crypto here is pure-Rust (sha2) + the browser's CSPRNG (getrandom
 //! "js"); the ankurah token is only ever *read* client-side.
@@ -24,6 +29,9 @@ const CLIENT_ID: &str = "app_HsW5XyYWbr0KQrHZb5iejw";
 const AUTHORIZE_ENDPOINT: &str = "https://id.idp.to/oidc/authorize";
 const TOKEN_ENDPOINT: &str = "https://id.idp.to/oidc/token";
 const DISCOVERY_ENDPOINT: &str = "https://id.idp.to/.well-known/openid-configuration";
+/// Discriminates the framed callback's `postMessage` from every other message
+/// the page might receive.
+const CALLBACK_MESSAGE_TYPE: &str = "idp-auth-callback";
 /// idp.to's account center for our directory (#36): where users manage their
 /// name, passkeys, and recovery email. `return_to` brings them back to
 /// Community — idp.to validates it against the domain's allowed return URLs, so
@@ -135,6 +143,48 @@ pub async fn handle_callback() -> Result<String, String> {
     let returned_state = params.get("state").ok_or("callback missing `state`")?;
 
     complete_sign_in(&code, &returned_state).await
+}
+
+/// Inside a frame, hand this callback's result to the page that framed it and
+/// report that the app must not boot here. `false` at the top level, where the
+/// caller carries on into [`handle_callback`].
+///
+/// Only the short-lived authorization code and the returned `state` travel. The
+/// page that framed this one holds the PKCE verifier and does the exchange, so
+/// no token — idp.to's or ours — is ever put in a message, a URL, or this
+/// frame's history.
+pub fn relay_callback_to_parent() -> bool {
+    let Some(window) = window() else { return false };
+    let Some(parent) = embedding_parent(&window) else { return false };
+
+    // Addressed to our own origin, which is also the parent's: the callback and
+    // the page that framed it are both served from here. A parent anywhere else
+    // never receives this, whatever it claims to be.
+    let origin = window.location().origin().unwrap_or_default();
+    let params = window.location().search().ok().and_then(|search| UrlSearchParams::new_with_str(&search).ok());
+
+    let mut fields: Vec<(&str, String)> = vec![("type", CALLBACK_MESSAGE_TYPE.to_string())];
+    for name in ["code", "state", "error", "error_description"] {
+        if let Some(value) = params.as_ref().and_then(|p| p.get(name)).filter(|value| !value.is_empty()) {
+            fields.push((name, value));
+        }
+    }
+
+    let message = js_sys::Object::new();
+    for (name, value) in &fields {
+        let _ = js_sys::Reflect::set(&message, &JsValue::from_str(name), &JsValue::from_str(value));
+    }
+    let _ = parent.post_message(&message, &origin);
+    true
+}
+
+/// The window that framed this document, when there is one this document can
+/// reach. `None` at the top level, and `None` inside a frame whose embedder is
+/// another origin — `frameElement` is null there — which is the same answer for
+/// the purpose at hand: no same-origin parent to hand a result to.
+fn embedding_parent(window: &web_sys::Window) -> Option<web_sys::Window> {
+    window.frame_element().ok().flatten()?;
+    window.parent().ok().flatten()
 }
 
 /// idp.to's `error` response, worded for the sign-in card.
