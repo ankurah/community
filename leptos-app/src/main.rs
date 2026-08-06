@@ -351,11 +351,19 @@ pub fn ChatApp() -> impl IntoView {
     //
     // The session is the host's to own and the host's alone to write, so it is
     // a signal here. Community is always signed in by the time this mounts
-    // (`App` gates on it), so the pair is known at build time and this signal
-    // is set once and never again: signing in mid-visit is a real path in the
-    // components, but not one community takes — it signs in with a full-page
-    // redirect. A host that never swaps pays one signal allocation for a
-    // handshake shaped for hosts that do.
+    // (`App` gates on it), so the pair is known already and nothing sets this
+    // signal today: signing in mid-visit is a real path in the components, but
+    // not one community takes — it signs in with a full-page redirect.
+    //
+    // A WRITEABLE SIGNAL ANYWAY, deliberately. `ChatContext::new` takes the
+    // bare pair too and wraps it in a signal that never moves, which is the
+    // honest shape for a session that is fixed for good. This one is an
+    // `RwSignal` because the seam it holds open is where community is heading:
+    // signing out and back in as somebody else without a full-page redirect is
+    // one `session.set((new_context, Some(new_user)))` here and nothing else.
+    // Set the pair as one value when that lands — the components guarantee
+    // what a single read sees, so halves moved separately arrive as two
+    // sessions.
     let session = RwSignal::new((ctx(), Some(current_user_id())));
     let chat = ChatContext::new(session)
         .online(|| ws_client().connection_state().get().to_string() == "Connected")
