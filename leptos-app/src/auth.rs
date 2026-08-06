@@ -92,6 +92,16 @@ struct SessionResponse {
     token: String,
 }
 
+/// What one spent authorization code produced.
+pub struct MintedSession {
+    /// The ankurah session token — what the app runs on.
+    pub token: String,
+    /// The idp.to `id_token` the exchange retained for RP-initiated logout,
+    /// handed back so a caller that decides this session is unwanted can undo
+    /// exactly that write. See [`remove_id_token_if_matches`].
+    pub id_token: String,
+}
+
 /// True when the app is currently loading the OIDC redirect landing page.
 pub fn is_callback() -> bool {
     window()
@@ -160,16 +170,16 @@ fn registered_embed_origin() -> Option<&'static str> {
     EMBED_ORIGINS.into_iter().find(|registered| *registered == origin)
 }
 
-/// Abandon an attempt: clear the one-time material, and drop an `id_token` a
-/// finishing exchange may have retained on its way out.
+/// Discard whatever one-time material is currently stashed, so a result that
+/// arrives afterwards finds no verifier and is refused rather than quietly
+/// minting a session nobody is waiting for.
 ///
-/// Clearing the material handles a cancel that lands before a result does — a
-/// result arriving afterwards finds no verifier and is refused, rather than
-/// quietly minting a session nobody is waiting for. The `id_token` handles the
-/// other order: a cancel that lands while the exchange is already past the
-/// token endpoint, where [`complete_sign_in`] retains one for logout before it
-/// returns. Calling this again once that exchange settles is what keeps a
-/// cancelled sign-in from leaving an idp.to token in a signed-out browser.
+/// Blunt on purpose, and therefore only safe from a caller that knows no other
+/// attempt can own the stash. Closing the ceremony is such a caller: the
+/// sign-in button does nothing while a ceremony is up, so no successor exists
+/// until this one is gone. A caller that resumes after an await is NOT — by
+/// then its own material is long consumed and anything present belongs to a
+/// later attempt.
 ///
 /// The next attempt generates its own material, so this never blocks a retry.
 pub fn cancel_pending_sign_in() {
@@ -178,7 +188,20 @@ pub fn cancel_pending_sign_in() {
         let _ = ss.remove_item(SS_STATE);
         let _ = ss.remove_item(SS_NONCE);
     }
-    if let Some(ls) = local_storage() {
+}
+
+/// Withdraw the `id_token` one exchange retained, and only if it is still that
+/// exchange's — the compare is the whole point.
+///
+/// A cancelled sign-in should not leave an idp.to token in a signed-out
+/// browser. But `localStorage` is shared across this origin's tabs and the slot
+/// may have changed owner while the cancelled exchange was in flight: another
+/// tab may have signed in, or a later attempt here may have succeeded. Removing
+/// only a value that still matches undoes this exchange's write exactly, and
+/// leaves a live session its sign-out hint.
+pub fn remove_id_token_if_matches(expected: &str) {
+    let Some(ls) = local_storage() else { return };
+    if ls.get_item(LS_ID_TOKEN).ok().flatten().as_deref() == Some(expected) {
         let _ = ls.remove_item(LS_ID_TOKEN);
     }
 }
@@ -242,7 +265,7 @@ pub async fn handle_callback() -> Result<String, String> {
     let code = params.get("code").ok_or("callback missing `code`")?;
     let returned_state = params.get("state").ok_or("callback missing `state`")?;
 
-    complete_sign_in(&code, &returned_state).await
+    complete_sign_in(&code, &returned_state).await.map(|minted| minted.token)
 }
 
 /// Inside a frame, hand this callback's result to the page that framed it and
@@ -251,9 +274,17 @@ pub async fn handle_callback() -> Result<String, String> {
 ///
 /// Only a real authorization result is carried, and only when it can actually
 /// be delivered. Returning `true` suppresses the app in this document for good,
-/// so a `/auth/callback` framed with no `code` and no `error` — and a message
-/// the parent window refuses — both fall through to [`handle_callback`], which
-/// already has an answer for a callback carrying nothing.
+/// so both of those refusals fall through to [`handle_callback`] instead — but
+/// they land in different places, and the second is worth naming.
+///
+/// A `/auth/callback` framed with no `code` and no `error` gets the answer that
+/// already existed for a callback carrying nothing. A message the parent
+/// refuses is uglier: `handle_callback` then spends a real code right here,
+/// mounting the app inside the frame with the session in the frame's storage.
+/// That is still the better of the two failures — the alternative is a blank
+/// frame and a parent waiting on a message that never arrived — and it is close
+/// to unreachable, since a same-origin post addressed to our own origin does
+/// not fail.
 ///
 /// Only the short-lived authorization code and the returned `state` travel. The
 /// page that framed this one holds the PKCE verifier and does the exchange, so
@@ -313,12 +344,13 @@ fn authorize_error_message(error: &str, description: &str) -> String {
 
 /// Spend an authorization code: verify `state` against the stashed attempt,
 /// exchange the code for an `id_token`, then federate it to our
-/// `/auth/session`. Returns the minted ankurah token.
+/// `/auth/session`. Returns the minted ankurah token, and the `id_token` this
+/// exchange retained on its way out.
 ///
 /// The one code-to-session path in the client. The top-level callback reaches
 /// it with values read from its own URL; the ceremony reaches it with values a
 /// framed callback sent its parent. Neither gets its own exchange.
-pub async fn complete_sign_in(code: &str, returned_state: &str) -> Result<String, String> {
+pub async fn complete_sign_in(code: &str, returned_state: &str) -> Result<MintedSession, String> {
     let window = window().ok_or("no window")?;
     let origin = window.location().origin().map_err(|_| "no origin")?;
 
@@ -368,7 +400,7 @@ pub async fn complete_sign_in(code: &str, returned_state: &str) -> Result<String
         let _ = ls.set_item(LS_ID_TOKEN, &tokens.id_token);
     }
 
-    Ok(session.token)
+    Ok(MintedSession { token: session.token, id_token: tokens.id_token })
 }
 
 // --- the parent side of the ceremony ----------------------------------------

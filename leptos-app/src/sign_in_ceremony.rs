@@ -101,14 +101,25 @@ pub fn SignInCeremony(
                 if abandoned.get() {
                     // Closed while this was in flight. The mint already happened
                     // server-side and cannot be taken back, but nothing of it is
-                    // kept here: no session token is stored, no navigation
-                    // follows, and the id_token the exchange retained on its way
-                    // out goes with the rest of the attempt.
-                    auth::cancel_pending_sign_in();
+                    // kept here: no session token is stored and no navigation
+                    // follows.
+                    //
+                    // What this must not do is reach for whatever is in storage
+                    // now. An await can be arbitrarily long — a stalled request,
+                    // the × the visitor was invited to use, a retry that gets
+                    // further — so by this line the pending-attempt keys hold a
+                    // SUCCESSOR's material (this attempt's was consumed before
+                    // the first request went out) and the id_token slot may
+                    // belong to a session that is running, in this tab or
+                    // another. Only this exchange's own write is withdrawn, and
+                    // only while it is still the value sitting there.
+                    if let Ok(minted) = &outcome {
+                        auth::remove_id_token_if_matches(&minted.id_token);
+                    }
                     return;
                 }
                 match outcome {
-                    Ok(token) => on_signed_in(token),
+                    Ok(minted) => on_signed_in(minted.token),
                     Err(e) => {
                         // The reason goes on screen, never through the console:
                         // these strings can carry a raw response body, and a

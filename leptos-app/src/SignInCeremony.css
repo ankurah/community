@@ -10,8 +10,13 @@
    app runs at. A short landscape phone cannot fit the card, and the page
    behind cannot scroll for it — html/body are fixed and overflow-hidden — so
    without this the one control that works when the frame does not would sit
-   below the fold with no way to reach it. `touch-action` has to be re-granted
-   for the same reason: body sets `none`, and that reaches descendants. */
+   below the fold with no way to reach it.
+
+   `touch-action: pan-y` names the one gesture this box wants. It is not
+   undoing body's blanket `none`: a pan is permitted by the values from the
+   touched element up to whichever element scrolls it, and that is this one, so
+   body was never in the walk. Declaring it here is what keeps the vertical pan
+   if the overlay ever stops being its own scroller. */
 .ceremonyOverlay {
   position: fixed;
   inset: 0;
