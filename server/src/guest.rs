@@ -167,8 +167,11 @@ pub async fn handle(State(mint): State<GuestMint>, ConnectInfo(peer): ConnectInf
             AxumJson(SessionResponse { token }).into_response()
         }
         Err(e) => {
+            // The detail goes to the log, not to the caller: nobody has
+            // identified themselves to reach this route, so what they get back
+            // is that the mint failed, and an operator reads why.
             warn!("failed to mint a guest token: {e}");
-            (StatusCode::INTERNAL_SERVER_ERROR, format!("failed to mint guest token: {e}")).into_response()
+            (StatusCode::INTERNAL_SERVER_ERROR, "failed to mint guest token").into_response()
         }
     }
 }

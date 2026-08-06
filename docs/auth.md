@@ -195,3 +195,12 @@ LAST `X-Forwarded-For` entry — the one Google's front end appends, and the
 only one no caller can write — which assumes the service stays reached
 directly through Cloud Run; an external load balancer appends two entries and
 would need that read moved. See `server/src/guest.rs`.
+
+**When refusals look shared, check for a second header line.** A request that
+arrives with MORE than one `X-Forwarded-For` line is counted against the
+socket peer instead — in production that peer is the front end, so every such
+caller lands in one budget together and they run each other out of mints.
+That is deliberate: the front end appends its address to one of the lines and
+the server cannot tell which, so reading either would mean counting a value
+the caller chose. An operator seeing 429s that look shared across unrelated
+callers should look for callers sending their own `X-Forwarded-For` header.
