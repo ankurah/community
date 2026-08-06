@@ -73,8 +73,24 @@ pub fn is_callback() -> bool {
 /// idp.to. Navigates away on success, so it only returns on setup failure.
 pub fn start_sign_in() -> Result<(), JsValue> {
     let window = window().ok_or_else(|| JsValue::from_str("no window"))?;
+    let pending = stash_new_pending(&window)?;
+    let auth_url = format!("{AUTHORIZE_ENDPOINT}?{}", authorize_query(&pending));
+    window.location().assign(&auth_url)
+}
+
+/// The one-time material for one authorization request, stashed and ready to
+/// be spent by the callback that comes back.
+struct PendingAuth {
+    redirect_uri: String,
+    state: String,
+    nonce: String,
+    challenge: String,
+}
+
+/// Generate PKCE verifier/challenge + `state` + `nonce` and stash the secrets
+/// in `sessionStorage`, where they survive the redirect but not the tab.
+fn stash_new_pending(window: &web_sys::Window) -> Result<PendingAuth, JsValue> {
     let origin = window.location().origin().map_err(|_| JsValue::from_str("no origin"))?;
-    let redirect_uri = format!("{origin}{CALLBACK_PATH}");
 
     let verifier = random_b64url(32);
     let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
@@ -86,60 +102,60 @@ pub fn start_sign_in() -> Result<(), JsValue> {
     ss.set_item(SS_STATE, &state)?;
     ss.set_item(SS_NONCE, &nonce)?;
 
-    redirect_to_authorize(&window, &redirect_uri, SCOPE, &state, &nonce, &challenge)
+    Ok(PendingAuth { redirect_uri: format!("{origin}{CALLBACK_PATH}"), state, nonce, challenge })
 }
 
-/// Build the authorize URL and navigate to it. Navigates away on success.
-fn redirect_to_authorize(
-    window: &web_sys::Window,
-    redirect_uri: &str,
-    scope: &str,
-    state: &str,
-    nonce: &str,
-    challenge: &str,
-) -> Result<(), JsValue> {
-    let auth_url = format!(
-        "{AUTHORIZE_ENDPOINT}?response_type=code&client_id={client}&redirect_uri={redirect}\
+/// The authorization parameters for a stashed attempt.
+fn authorize_query(pending: &PendingAuth) -> String {
+    format!(
+        "response_type=code&client_id={client}&redirect_uri={redirect}\
          &scope={scope}&state={state}&nonce={nonce}&code_challenge={challenge}&code_challenge_method=S256",
         client = enc(CLIENT_ID),
-        redirect = enc(redirect_uri),
-        scope = enc(scope),
-        state = enc(state),
-        nonce = enc(nonce),
-        challenge = enc(challenge),
-    );
-
-    window.location().assign(&auth_url)
+        redirect = enc(&pending.redirect_uri),
+        scope = enc(SCOPE),
+        state = enc(&pending.state),
+        nonce = enc(&pending.nonce),
+        challenge = enc(&pending.challenge),
+    )
 }
 
-/// Complete the callback: verify `state`, exchange the code for an `id_token`,
-/// then federate it to our `/auth/session`. Returns the minted ankurah token.
+/// Complete the callback: read `code`/`state` off the landing URL and spend
+/// them. Returns the minted ankurah token.
 pub async fn handle_callback() -> Result<String, String> {
     let window = window().ok_or("no window")?;
-    let location = window.location();
-    let origin = location.origin().map_err(|_| "no origin")?;
-    let search = location.search().map_err(|_| "no query string")?;
+    let search = window.location().search().map_err(|_| "no query string")?;
 
     let params = UrlSearchParams::new_with_str(&search).map_err(|_| "malformed query string")?;
 
     if let Some(error) = params.get("error") {
-        // `invalid_scope` means idp.to advertises the `roles` scope but hasn't
-        // activated role configuration for this Application (or it regressed).
-        // Degrading to a role-less request is pointless — the server requires
-        // the roles claim — so this is a retry-later condition: the next
-        // sign-in attempt re-reads discovery and asks again.
-        if error == "invalid_scope" {
-            return Err(
-                "idp.to has not finished activating roles for this application — try signing in again shortly"
-                    .into(),
-            );
-        }
-        let desc = params.get("error_description").unwrap_or_default();
-        return Err(format!("idp.to returned an error: {error} {desc}"));
+        return Err(authorize_error_message(&error, &params.get("error_description").unwrap_or_default()));
     }
 
     let code = params.get("code").ok_or("callback missing `code`")?;
     let returned_state = params.get("state").ok_or("callback missing `state`")?;
+
+    complete_sign_in(&code, &returned_state).await
+}
+
+/// idp.to's `error` response, worded for the sign-in card.
+fn authorize_error_message(error: &str, description: &str) -> String {
+    // `invalid_scope` means idp.to advertises the `roles` scope but hasn't
+    // activated role configuration for this Application (or it regressed).
+    // Degrading to a role-less request is pointless — the server requires
+    // the roles claim — so this is a retry-later condition: the next
+    // sign-in attempt re-reads discovery and asks again.
+    if error == "invalid_scope" {
+        return "idp.to has not finished activating roles for this application — try signing in again shortly".into();
+    }
+    format!("idp.to returned an error: {error} {description}")
+}
+
+/// Spend an authorization code: verify `state` against the stashed attempt,
+/// exchange the code for an `id_token`, then federate it to our
+/// `/auth/session`. Returns the minted ankurah token.
+pub async fn complete_sign_in(code: &str, returned_state: &str) -> Result<String, String> {
+    let window = window().ok_or("no window")?;
+    let origin = window.location().origin().map_err(|_| "no origin")?;
 
     let ss = session_storage().ok_or("sessionStorage unavailable")?;
     let saved_state = ss.get_item(SS_STATE).ok().flatten().ok_or("no saved state (stale callback?)")?;
@@ -153,7 +169,7 @@ pub async fn handle_callback() -> Result<String, String> {
 
     // The one-time material is consumed by THIS callback — clear it now, not
     // only on success, so a failed exchange can't leave it behind for a stale
-    // retry (the next attempt regenerates everything in `start_sign_in`).
+    // retry (every attempt regenerates it in `stash_new_pending`).
     let _ = ss.remove_item(SS_VERIFIER);
     let _ = ss.remove_item(SS_STATE);
     let _ = ss.remove_item(SS_NONCE);
@@ -163,7 +179,7 @@ pub async fn handle_callback() -> Result<String, String> {
     // 1) Exchange the authorization code for tokens (public client — no secret).
     let form = format!(
         "grant_type=authorization_code&code={code}&redirect_uri={redirect}&client_id={client}&code_verifier={verifier}",
-        code = enc(&code),
+        code = enc(code),
         redirect = enc(&redirect_uri),
         client = enc(CLIENT_ID),
         verifier = enc(&verifier),
