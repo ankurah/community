@@ -222,13 +222,20 @@ fn members_read_bans_but_cannot_write_them() {
     assert_eq!(rules.scope.len(), 1, "exactly the self-visibility rule — a second scope rule would AND in and narrow it");
 }
 
+/// The moderation log is lights-on to the community and closed to the street.
+/// It moved from `view` to `member` when guests arrived (#79): every signed-in
+/// member still reads every row — that is the whole point of lights-on
+/// moderation — while a guest, who holds `view` and nothing else, reads none of
+/// it. Who was banned and why is community business, not an anonymous
+/// visitor's.
 #[test]
-fn modaction_is_world_readable_and_moderator_writable() {
+fn modaction_is_member_readable_and_moderator_writable() {
     let config = policy();
     let rules = &config.collections["modaction"];
-    assert_eq!(rules.read.as_deref(), Some("view"), "the moderation log is public by design");
+    assert_eq!(rules.read.as_deref(), Some("member"), "signed-in members read the whole log; guests read none of it");
     assert_eq!(rules.write.as_deref(), Some("moderate"));
     assert!(rules.scope.is_empty());
+    assert!(config.roles_have_privilege(&["member".to_string()], "member"), "no member loses sight of the log");
 }
 
 /// The derive lowercases the struct name for the collection id; the policy is
@@ -566,4 +573,83 @@ fn members_can_write_dm_collections_at_the_collection_gate() {
             "the member role must pass the {collection} collection write gate; the row scope does the real filtering"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Guests (#79): what a session with nobody signed in may read
+// ---------------------------------------------------------------------------
+
+/// The whole guest posture in one privilege split. `view` is the read tier an
+/// anonymous visitor gets — rooms, messages, reactions, link previews, the
+/// things a page has to render to be worth arriving at. `member` is the tier
+/// that requires having signed in, and exactly three collections sit behind it:
+/// `user` and `userroles` (no roster for the street — a guest reads the
+/// conversation, not the membership list) and `modaction` (moderation records
+/// are community business).
+///
+/// Both halves are asserted, because either one alone would pass while the
+/// feature was broken: a guest with too much reads the roster, and a guest with
+/// too little sees an empty room.
+#[test]
+fn the_guest_read_tier_covers_the_conversation_and_stops_at_the_roster() {
+    let config = policy();
+    let guest = ["guest".to_string()];
+    assert_eq!(config.roles["guest"], vec!["view".to_string()], "a guest holds the read tier and nothing else");
+
+    for collection in ["room", "message", "reaction", "linkpreview"] {
+        assert!(
+            config.can_access_collection(&guest, &collection.into()),
+            "a guest must be able to read {collection} — it is part of what an anonymous reader sees"
+        );
+    }
+    for collection in ["user", "userroles", "modaction"] {
+        assert!(
+            !config.can_access_collection(&guest, &collection.into()),
+            "a guest must NOT reach {collection}: the collection gate is what keeps the roster and the mod log signed-in-only"
+        );
+    }
+}
+
+/// A guest writes nothing, anywhere. The `post` privilege is what every write
+/// gate in this policy is keyed to (bar the moderator and system ones), and the
+/// guest role does not hold it — so read-only is a property of the role, not of
+/// each collection's rules being individually correct.
+#[test]
+fn a_guest_holds_no_write_privilege_over_any_collection() {
+    let config = policy();
+    let guest = ["guest".to_string()];
+    for collection in config.collections.keys() {
+        assert!(
+            !config.can_write_collection(&guest, &collection.as_str().into()),
+            "a guest must not be able to write {collection}"
+        );
+    }
+}
+
+/// The no-regression half of the split: moving three reads from `view` to
+/// `member` must leave every signed-in role seeing exactly what it saw before.
+/// All three hold the new privilege, so all three still pass those gates.
+#[test]
+fn signed_in_roles_keep_every_collection_they_could_read_before() {
+    let config = policy();
+    for role in ["member", "moderator", "admin"] {
+        let roles = [role.to_string()];
+        assert!(config.roles_have_privilege(&roles, "member"), "role '{role}' must hold the signed-in read privilege");
+        for collection in config.collections.keys() {
+            assert!(
+                config.can_access_collection(&roles, &collection.as_str().into()),
+                "role '{role}' lost read access to {collection}"
+            );
+        }
+    }
+}
+
+/// A guest's `sub` is the literal `guest` (`server/src/guest.rs`, `GUEST_SUB`),
+/// which is not an entity id and never equals one — so every row-local scope in
+/// this policy fails closed for a guest without any rule being written about
+/// guests. This pins the property those rules now silently depend on: the
+/// literal cannot be parsed as an id, so it cannot collide with a member's.
+#[test]
+fn the_guest_subject_is_not_an_entity_id() {
+    assert!(EntityId::from_base64("guest").is_err(), "the guest subject must never parse as an entity id");
 }

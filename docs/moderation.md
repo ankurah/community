@@ -67,8 +67,12 @@ from. Do not look for a room-kick — it doesn't exist on purpose.
 
 ## The public log (`ModAction`)
 
-Ban/unban are lights-on like everything else: both write a world-readable
-`ModAction` row. The model now supports two target kinds —
+Ban/unban are lights-on like everything else: both write a `ModAction` row
+that every signed-in member can read. "Public" here means public to the
+community, not to the street — `modaction.read` is the `member` privilege, so
+a guest session (#79) reads none of the log. Who was banned and why is
+community business; an anonymous reader gets the conversation, not the
+moderation record. The model supports two target kinds —
 `message: Option<Ref<Message>>` for message-targeted rows ("delete",
 "restore") and `user: Option<Ref<User>>` for user-targeted rows ("ban",
 "unban"); exactly one is set per row. Both are `Option` because a row only
@@ -85,8 +89,8 @@ quoted underneath.
 | Banned member     | their own             | own "Banned" badge (briefly — the self-lock takes over) |
 | Member in good standing | none            | no ban state at all                  |
 
-Everyone sees the ban/unban entries in the public moderation log — that is
-the point of lights-on moderation.
+Every signed-in member sees the ban/unban entries in the moderation log —
+that is the point of lights-on moderation. A guest sees no log at all.
 
 ---
 
@@ -212,10 +216,10 @@ replay is done. A burst committed in the seconds before a restart therefore
 escapes retroactive tombstoning — but it still counts, so the sender's next
 message pays for it.
 
-**What that public row discloses, stated plainly.** `modaction` is
-world-readable by design, so the row tells the community that this member
-tripped the DM rate limit, and carries the counts. It never names a recipient
-and never contains message text. That trade is deliberate: without a public
+**What that public row discloses, stated plainly.** `modaction` is readable
+by every signed-in member by design (and by no guest), so the row tells the
+community that this member tripped the DM rate limit, and carries the counts.
+It never names a recipient and never contains message text. That trade is deliberate: without a public
 row an automated tombstone would be invisible to the moderators who are
 supposed to decide whether it warrants a ban — and since moderators cannot
 read DMs, rows like this one and user reports are the only signal they get.
