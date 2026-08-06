@@ -250,18 +250,42 @@ pub fn SignIn() -> impl IntoView {
             auth_error.set(Some(format!("could not start sign-in: {e:?}")));
         }
     };
-    let start = move |_| match auth::begin_framed_sign_in() {
-        // idp.to frames for this origin: run the ceremony without leaving the page.
-        Ok(Some(attempt)) => ceremony.set(Some(attempt)),
-        // It does not, so a frame would be refused and would say nothing about
-        // it. Hand over the whole tab, which always works.
-        Ok(None) => top_level(),
-        // Setting up the attempt failed (no sessionStorage, say). The top-level
-        // flow needs the same things, so let it fail where the user can see it.
-        Err(e) => {
-            tracing::error!("failed to set up framed sign-in: {:?}", e);
-            top_level();
+    let start = move |_| {
+        // The overlay covers this button for the mouse but not for the
+        // keyboard. A second Enter would restash fresh PKCE material and reload
+        // the frame under a credential prompt already in progress, so while a
+        // ceremony is up this button does nothing.
+        if ceremony.get_untracked().is_some() {
+            return;
         }
+        // A new attempt starts without the last one's failure over it.
+        auth_error.set(None);
+        match auth::begin_framed_sign_in() {
+            // idp.to frames for this origin: run the ceremony without leaving the page.
+            Ok(Some(attempt)) => ceremony.set(Some(attempt)),
+            // It does not, so a frame would be refused and would say nothing
+            // about it. Hand over the whole tab, which always works.
+            Ok(None) => top_level(),
+            // Setting up the attempt failed (no sessionStorage, say). The
+            // top-level flow needs the same things, so let it fail where the
+            // user can see it.
+            Err(e) => {
+                tracing::error!("failed to set up framed sign-in: {:?}", e);
+                top_level();
+            }
+        }
+    };
+
+    // Closing takes the frame down with the modal and abandons the stashed
+    // attempt, so the next click starts clean. A reason handed back moves to
+    // the card's banner — the modal that was showing it is about to go, and the
+    // visitor still needs to read it.
+    let close_ceremony = move |reason: Option<String>| {
+        auth::cancel_pending_sign_in();
+        if reason.is_some() {
+            auth_error.set(reason);
+        }
+        ceremony.set(None);
     };
 
     // Signing in mid-visit: store the token and let the app boot the way it
@@ -332,15 +356,10 @@ pub fn SignIn() -> impl IntoView {
                 </button>
                 <p class="signInFootnote">"Authentication by idp.to — local-first chat, built in Rust + wasm."</p>
             </div>
-            // Closing takes the frame down with the modal and abandons the
-            // stashed attempt, so the next click starts clean.
             {move || ceremony.get().map(|attempt| view! {
                 <sign_in_ceremony::SignInCeremony
                     attempt=attempt
-                    on_close=move || {
-                        auth::cancel_pending_sign_in();
-                        ceremony.set(None);
-                    }
+                    on_close=close_ceremony
                     on_signed_in=signed_in
                 />
             })}

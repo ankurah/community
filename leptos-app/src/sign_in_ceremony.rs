@@ -25,6 +25,9 @@
 //! `auth` put them, the exchange is `auth::complete_sign_in`, and the frame
 //! goes away the moment its code is in hand.
 
+use std::cell::Cell;
+use std::rc::Rc;
+
 use leptos::prelude::*;
 use send_wrapper::SendWrapper;
 use wasm_bindgen::JsCast;
@@ -47,15 +50,23 @@ enum Phase {
 /// unmounts the frame and the message listener together.
 ///
 /// `on_close` abandons the attempt — the × and Escape take it, and a failure
-/// leaves it as one of the two ways on, beside the escape hatch.
+/// leaves it as one of the two ways on, beside the escape hatch. Its argument
+/// is a message the visitor should still be able to read once the modal is
+/// gone: why the attempt failed, or why the escape hatch could not open.
 /// `on_signed_in` receives the minted ankurah session token.
 #[component]
 pub fn SignInCeremony(
     attempt: FramedAttempt,
-    on_close: impl Fn() + Clone + 'static,
+    on_close: impl Fn(Option<String>) + Clone + 'static,
     on_signed_in: impl Fn(String) + Clone + 'static,
 ) -> impl IntoView {
     let phase = RwSignal::new(Phase::Waiting);
+
+    // Set once the visitor has asked to stop. The exchange is a spawned future
+    // that owns everything it needs before its first await, so unmounting the
+    // modal cannot stop it — without this it would run to completion and sign
+    // the visitor in after they closed the ceremony.
+    let abandoned = Rc::new(Cell::new(false));
 
     // The attempt's `state`, held for the one message allowed to claim it. The
     // exchange needs it again afterwards, so the copy the listener consumes is
@@ -65,6 +76,7 @@ pub fn SignInCeremony(
 
     let message_closure = wasm_bindgen::closure::Closure::wrap(Box::new({
         let on_signed_in = on_signed_in.clone();
+        let abandoned = abandoned.clone();
         move |event: MessageEvent| {
             let verdict = expected_state
                 .try_update_value(|expected| auth::read_framed_message(&event, expected))
@@ -83,11 +95,25 @@ pub fn SignInCeremony(
             phase.set(Phase::Exchanging);
             let attempt_state = attempt_state.clone();
             let on_signed_in = on_signed_in.clone();
+            let abandoned = abandoned.clone();
             spawn_local(async move {
-                match auth::complete_sign_in(&code, &attempt_state).await {
+                let outcome = auth::complete_sign_in(&code, &attempt_state).await;
+                if abandoned.get() {
+                    // Closed while this was in flight. The mint already happened
+                    // server-side and cannot be taken back, but nothing of it is
+                    // kept here: no session token is stored, no navigation
+                    // follows, and the id_token the exchange retained on its way
+                    // out goes with the rest of the attempt.
+                    auth::cancel_pending_sign_in();
+                    return;
+                }
+                match outcome {
                     Ok(token) => on_signed_in(token),
                     Err(e) => {
-                        tracing::error!("framed sign-in failed: {}", e);
+                        // The reason goes on screen, never through the console:
+                        // these strings can carry a raw response body, and a
+                        // body can carry a token.
+                        tracing::error!("framed sign-in did not complete; the reason is shown to the visitor");
                         phase.set(Phase::Failed(e));
                     }
                 }
@@ -95,14 +121,29 @@ pub fn SignInCeremony(
         }
     }) as Box<dyn FnMut(_)>);
 
+    // Stop, whatever is in flight: mark the attempt abandoned, then hand up
+    // whatever the visitor should still be able to read once the modal is gone.
+    let close = {
+        let on_close = on_close.clone();
+        let abandoned = abandoned.clone();
+        move || {
+            abandoned.set(true);
+            let reason = match phase.get_untracked() {
+                Phase::Failed(message) => Some(message),
+                _ => None,
+            };
+            on_close(reason);
+        }
+    };
+
     // Escape closes, as it does for every other overlay in the app. It only
     // reaches us while the parent page holds focus — once the frame has it, the
     // key belongs to idp.to's page — so it is a convenience, not the way out.
     let key_closure = wasm_bindgen::closure::Closure::wrap(Box::new({
-        let on_close = on_close.clone();
+        let close = close.clone();
         move |e: web_sys::KeyboardEvent| {
             if e.key() == "Escape" {
-                on_close();
+                close();
             }
         }
     }) as Box<dyn FnMut(_)>);
@@ -111,25 +152,46 @@ pub fn SignInCeremony(
         let _ = w.add_event_listener_with_callback("message", message_closure.as_ref().unchecked_ref());
         let _ = w.add_event_listener_with_callback("keydown", key_closure.as_ref().unchecked_ref());
     }
-    let listeners = SendWrapper::new((message_closure, key_closure));
+    let on_unmount = SendWrapper::new((message_closure, key_closure, abandoned.clone()));
     on_cleanup(move || {
-        let (message_closure, key_closure) = listeners.take();
+        let (message_closure, key_closure, abandoned) = on_unmount.take();
+        // Whatever took the ceremony off the page, nothing it started may
+        // finish. `close` has usually said so already; this covers every other
+        // way the modal can be unmounted.
+        abandoned.set(true);
         if let Some(w) = window() {
             let _ = w.remove_event_listener_with_callback("message", message_closure.as_ref().unchecked_ref());
             let _ = w.remove_event_listener_with_callback("keydown", key_closure.as_ref().unchecked_ref());
         }
     });
 
-    let escape = move |_| {
-        // The flow that has always worked: hand the whole tab to idp.to. It
-        // regenerates every one-time value on the way out, so an attempt
-        // abandoned here cannot spoil this one.
-        if let Err(e) = auth::start_sign_in() {
-            tracing::error!("failed to start top-level sign-in: {:?}", e);
+    let escape = {
+        let on_close = on_close.clone();
+        move |_| {
+            // The flow that has always worked: hand the whole tab to idp.to. It
+            // regenerates every one-time value on the way out, so an attempt
+            // abandoned here cannot spoil this one.
+            if let Err(e) = auth::start_sign_in() {
+                // This is the control for when everything else has failed, so
+                // its own failure cannot be swallowed. Close and put the reason
+                // on the card, where the visitor is left standing.
+                tracing::error!("the ceremony's escape hatch could not start top-level sign-in: {:?}", e);
+                on_close(Some(format!("could not open the idp.to sign-in page: {e:?}")));
+            }
         }
     };
 
-    let close_button = on_close.clone();
+    // Focus starts inside the modal. Otherwise it stays on the button that
+    // opened it, one Enter away from restashing fresh material and reloading
+    // the frame under a credential prompt already in progress.
+    let close_ref = NodeRef::<leptos::html::Button>::new();
+    Effect::new(move |_| {
+        if let Some(el) = close_ref.get() {
+            let _ = el.focus();
+        }
+    });
+
+    let close_button = close.clone();
 
     view! {
         // No dismiss-on-scrim-click, unlike the app's other modals: a stray
@@ -142,7 +204,12 @@ pub fn SignInCeremony(
                         <h2>"Sign in with idp.to"</h2>
                         <p class="ceremonySubtitle">"Use the passkey you already have — this page stays where it is."</p>
                     </div>
-                    <button class="ceremonyClose" aria-label="Close" on:click=move |_| close_button()>"×"</button>
+                    <button
+                        class="ceremonyClose"
+                        aria-label="Close"
+                        node_ref=close_ref
+                        on:click=move |_| close_button()
+                    >"×"</button>
                 </div>
 
                 <div class="ceremonyStage">
@@ -181,7 +248,15 @@ pub fn SignInCeremony(
                     </p>
                 })}
 
-                <button class="ceremonyEscape" on:click=escape>
+                // Held shut only while the exchange is in flight, so a click
+                // cannot navigate away from a session that is seconds from
+                // being minted. The × beside it is never held shut, so this is
+                // not a moment the visitor can be stuck in.
+                <button
+                    class="ceremonyEscape"
+                    disabled=move || matches!(phase.get(), Phase::Exchanging)
+                    on:click=escape
+                >
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"
                         stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                         <path d="M14 4h6v6" />
