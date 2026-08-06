@@ -21,11 +21,19 @@
 //! short life and no history anywhere on the server. The client mints a fresh
 //! one when the old one expires or the connection comes back.
 //!
-//! WHAT A GUEST TOKEN CAN DO TODAY: nothing at all. `policy.json` grants the
-//! `guest` role no privileges, so every collection read and every write is
-//! refused. That is deliberate and it is the point of landing this first — the
-//! endpoint arrives ahead of the policy work that decides what a guest may see,
-//! and a role nobody has granted anything to is the fail-closed place to wait.
+//! WHAT A GUEST TOKEN GRANTS, and where that is decided — `policy.json`, not
+//! here. The `guest` role holds one privilege, `view`, which opens four
+//! collections: `room`, `message`, `reaction`, `linkpreview`. That is the
+//! conversation and what renders alongside it, and it is the whole tier.
+//! Everything else is refused. The roster and the moderation log (`user`,
+//! `userroles`, `modaction`) sit behind the `signed_in` privilege, which a
+//! guest does not hold. The private collections — DMs, inboxes, read cursors,
+//! bans — are withheld by the row-local scopes that were already there, which
+//! compare `$jwt.sub` against an entity id that [`GUEST_SUB`] never equals. And
+//! a guest holds no `post` privilege, so a guest writes nothing anywhere.
+//! `policy.json` and `server/tests/guest_policy_live_tests.rs` are the
+//! authority on all of that; this module only mints the claims those rules are
+//! then applied to.
 //!
 //! # Why the mint is rate limited
 //!
@@ -53,7 +61,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json as AxumJson,
 };
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::SessionResponse;
 
@@ -62,8 +70,9 @@ use crate::SessionResponse;
 /// against `$jwt.sub` simply does not match for a guest.
 pub const GUEST_SUB: &str = "guest";
 
-/// The only role a guest token carries. `policy.json` grants it nothing today,
-/// which is why a guest token currently authorizes nothing.
+/// The only role a guest token carries. `policy.json` grants it the `view`
+/// privilege and nothing else — the read tier the module header describes: the
+/// conversation, no roster, no moderation log, no private row, and no write.
 pub const GUEST_ROLE: &str = "guest";
 
 /// Guest session lifetime — hours, and deliberately far short of the member
@@ -103,8 +112,14 @@ impl GuestMint {
 
     /// Decide one mint request. `Err` carries how long until the budget that
     /// refused it reopens.
+    ///
+    /// A poisoned lock is taken anyway (the jwt-auth idiom, used at every lock
+    /// in that crate): the guarded state is two integers and a map of them, so
+    /// the worst a panicking predecessor leaves behind is a count that is
+    /// slightly off. Refusing the lock instead would turn one panic into an
+    /// endpoint that 500s forever.
     fn admit(&self, client: IpAddr, now: Instant) -> Result<(), Duration> {
-        self.0.limiter.lock().expect("guest mint limiter poisoned").admit(client, now)
+        self.0.limiter.lock().unwrap_or_else(|e| e.into_inner()).admit(client, now)
     }
 }
 
@@ -134,7 +149,15 @@ pub async fn handle(State(mint): State<GuestMint>, ConnectInfo(peer): ConnectInf
     }
 
     match crate::mint_session_token(&mint.0.keys, &guest_claims(), GUEST_TOKEN_TTL_HOURS) {
-        Ok(token) => AxumJson(SessionResponse { token }).into_response(),
+        Ok(token) => {
+            // Its own message, distinct from the member path's "minted session
+            // token": a sign-in and a guest session are different events, and
+            // an operator counting one must not be counting the other. The
+            // claims are constants, so the only thing worth carrying is how
+            // long this one lives. Never the token.
+            info!(user = GUEST_SUB, ttl_hours = GUEST_TOKEN_TTL_HOURS, "minted a guest session token");
+            AxumJson(SessionResponse { token }).into_response()
+        }
         Err(e) => {
             warn!("failed to mint a guest token: {e}");
             (StatusCode::INTERNAL_SERVER_ERROR, format!("failed to mint guest token: {e}")).into_response()
@@ -177,17 +200,26 @@ fn guest_claims() -> JwtClaims {
 /// every caller into a single budget. Whoever adds one has to move this to the
 /// second entry from the right.
 ///
-/// With no `X-Forwarded-For` at all, the socket peer IS the client: that is the
-/// local dev and smoke case. In production the peer is the front end, so if the
-/// header ever went missing there, every caller would share one budget — the
-/// safe direction to fail in.
+/// With no usable `X-Forwarded-For`, the socket peer is what the mint counts
+/// against. Locally that peer IS the client (dev, and the smoke). In production
+/// it is the front end, so every caller in that situation shares one budget —
+/// which is the safe way to be wrong, and the reason the two unusable cases
+/// below take this route rather than reading on.
 fn client_address(headers: &HeaderMap, peer: IpAddr) -> IpAddr {
-    let Some(forwarded) = headers.get_all(FORWARDED_FOR).into_iter().last().and_then(|value| value.to_str().ok()) else {
+    let mut lines = headers.get_all(FORWARDED_FOR).into_iter();
+    let Some(forwarded) = lines.next() else { return peer };
+    // A SECOND header line makes the whole header unusable. A caller may send
+    // its own `X-Forwarded-For`, and the front end appends its address to one
+    // line rather than merging them — this service cannot tell which line came
+    // back with that address on the end, and reading the wrong one is reading a
+    // value the caller chose. Two lines therefore count against the peer.
+    if lines.next().is_some() {
         return peer;
-    };
-    // Only the last entry is consulted. An unparseable one falls back to the
-    // peer rather than walking further left, because further left is exactly
-    // the part a caller writes.
+    }
+    let Ok(forwarded) = forwarded.to_str() else { return peer };
+    // Only the last entry of that one line is consulted. An unparseable last
+    // entry falls back to the peer rather than walking further left, because
+    // further left is exactly the part a caller writes.
     forwarded.rsplit(',').map(str::trim).find(|entry| !entry.is_empty()).and_then(parse_address).unwrap_or(peer)
 }
 
@@ -400,6 +432,29 @@ mod tests {
         headers.insert(FORWARDED_FOR, "203.0.113.7, not-an-address".parse().unwrap());
         assert_eq!(client_address(&headers, peer), peer);
     }
+
+    #[test]
+    fn two_forwarded_for_lines_count_against_the_peer() {
+        // A caller may send its own `X-Forwarded-For` line, and the front end
+        // appends its address to ONE line rather than merging the two. Which
+        // line came back carrying it is not knowable here, so picking either
+        // one risks counting an address the caller wrote — the budget would be
+        // whatever that caller wanted it to be. Both lines are therefore
+        // discarded and the peer is counted, which puts every caller doing this
+        // into one shared budget.
+        let peer = IpAddr::from([10, 0, 0, 1]);
+        let mut headers = HeaderMap::new();
+        headers.append(FORWARDED_FOR, "203.0.113.7".parse().unwrap());
+        headers.append(FORWARDED_FOR, "198.51.100.9".parse().unwrap());
+        assert_eq!(client_address(&headers, peer), peer);
+
+        // One line with the same content is the ordinary case and still counts
+        // the front end's entry — so the refusal above is about the SECOND
+        // line, not about the addresses in it.
+        let mut single = HeaderMap::new();
+        single.insert(FORWARDED_FOR, "198.51.100.9, 203.0.113.7".parse().unwrap());
+        assert_eq!(client_address(&single, peer), address(7));
+    }
 }
 
 /// The endpoint over its real axum route: what a caller gets back, and what
@@ -472,8 +527,17 @@ mod route_tests {
         // endpoint mints must check out against the same key `/auth/session`'s
         // tokens do.
         let claims = test_keys().verify(&token).expect("the minted token verifies against the signing key");
-        assert_eq!(claims.sub, GUEST_SUB);
-        assert_eq!(claims.roles, vec![GUEST_ROLE.to_string()]);
+
+        // THE LITERAL STRINGS, DELIBERATELY, not GUEST_SUB and GUEST_ROLE.
+        // Asserting the constants against themselves proves only that the
+        // handler used them: a rename of `GUEST_ROLE` to "member" would leave
+        // this test, the constants and the live policy suite all green while
+        // production minted member-role tokens. These two words are the wire
+        // contract — what `policy.json`'s `guest` role is keyed on and what the
+        // scopes compare against — so they are spelled out here, and changing
+        // them has to be a deliberate act with this line edited to match.
+        assert_eq!(claims.sub, "guest");
+        assert_eq!(claims.roles, vec!["guest".to_string()]);
         assert!(claims.email.is_empty(), "a guest has no email");
         assert_eq!(claims.name, None);
 
@@ -489,8 +553,14 @@ mod route_tests {
     async fn mints_past_the_budget_are_refused_with_a_reopening_time() {
         // Every request carries a DIFFERENT leading `X-Forwarded-For` entry and
         // the SAME trailing one, which is the shape a caller varying the header
-        // produces: all of them count against the one address the front end
-        // appended, so the budget still runs out.
+        // produces: varying the left of the header buys no extra budget.
+        //
+        // What this does NOT show is that the trailing entry is what was
+        // counted — every request here also shares one `ConnectInfo`, so peer
+        // counting would produce the same eleven results.
+        // `the_counted_address_is_the_last_forwarded_entry` is what separates
+        // those two; this test is about the route returning 429 with a
+        // reopening time once a budget is spent.
         let app = app();
         for n in 0..MAX_PER_CLIENT {
             let forwarded = format!("198.51.100.{n}, 203.0.113.7");

@@ -230,20 +230,18 @@ struct SessionResponse {
     token: String,
 }
 
-/// Sign one ankurah session token, and record the mint in the ops trail.
+/// Sign one ankurah session token.
 ///
-/// FOR: both auth routes end here, so there is exactly one place where claims
-/// become a signed token and exactly one place that decides what a mint leaves
-/// in the log. The member path arrives with a federated idp.to identity; the
-/// guest path arrives with nothing to federate and an empty `email`, which is
-/// what a guest has.
+/// FOR: both auth routes end here, so there is exactly one place where a claim
+/// set and a lifetime become a signed token — the member path with a federated
+/// idp.to identity, the guest path with nothing to federate.
 ///
-/// Never logs the token itself — only who it names, what it grants, and how
-/// long it lives.
+/// The ops line is NOT written here, deliberately. A member signing in and a
+/// visitor taking a guest session are different events, and an operator
+/// filtering the log for one must not be counting the other — so each route
+/// writes its own line under its own message. Neither writes the token.
 pub(crate) fn mint_session_token(keys: &SigningKeys, claims: &JwtClaims, ttl_hours: u64) -> Result<String, AuthError> {
-    let token = keys.sign(claims, Duration::from_hours(ttl_hours))?;
-    info!(user = %claims.sub, email = %claims.email, roles = ?claims.roles, ttl_hours, "minted session token");
-    Ok(token)
+    keys.sign(claims, Duration::from_hours(ttl_hours))
 }
 
 /// Federate-and-remint: validate an idp.to ID token, upsert the `User` keyed on
@@ -293,11 +291,12 @@ async fn auth_session(
 
     let claims = JwtClaims { sub: user_id, roles, email: identity.email.unwrap_or_default(), name: identity.name, custom };
 
-    // Signed through the shared mint, which is also what writes the ops trail:
-    // every mint is visible (who, which entity, which roles), so an unexpected
-    // role would show up there.
     let token = mint_session_token(&state.signing_keys, &claims, TOKEN_TTL_HOURS)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("failed to mint session token: {e}")))?;
+
+    // Ops trail: every mint is visible (who, which entity, which roles) so an
+    // unexpected role would show up here. Never log the token itself.
+    info!(user = %claims.sub, email = %claims.email, roles = ?claims.roles, "minted session token");
 
     Ok(AxumJson(SessionResponse { token }))
 }
