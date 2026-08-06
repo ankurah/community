@@ -646,6 +646,33 @@ fn signed_in_roles_keep_every_collection_they_could_read_before() {
     }
 }
 
+/// The invariant that has to keep holding as roles are added, and the reason it
+/// needs stating at all: `can_access_collection` passes on the read privilege
+/// OR the write one. `signed_in` shuts the roster and the mod log today only
+/// because no role holds `post`, `moderate` or `system` without also holding
+/// `signed_in` — add `"contributor": ["view", "post"]` and it would read the
+/// roster through `user`'s WRITE gate, having been granted no read privilege
+/// for it at all.
+///
+/// So this asserts the biconditional over every role in the file, the ones
+/// there now and the ones somebody adds later: reaching one of the three is
+/// exactly holding `signed_in`.
+#[test]
+fn only_signed_in_roles_reach_the_signed_in_collections() {
+    let config = policy();
+    for role in config.roles.keys() {
+        let roles = [role.clone()];
+        let signed_in = config.roles_have_privilege(&roles, "signed_in");
+        for collection in ["user", "userroles", "modaction"] {
+            assert_eq!(
+                config.can_access_collection(&roles, &collection.into()),
+                signed_in,
+                "role '{role}' reaches {collection} iff it holds signed_in — a role that may WRITE a collection also passes its read gate"
+            );
+        }
+    }
+}
+
 /// A guest's `sub` is the literal `guest` (`server/src/guest.rs`, `GUEST_SUB`),
 /// which is not an entity id and never equals one — so every row-local scope in
 /// this policy fails closed for a guest without any rule being written about

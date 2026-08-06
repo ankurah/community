@@ -285,8 +285,29 @@ async fn a_guest_writes_nothing() {
     .await;
     assert!(reacted.is_err(), "a guest may not react");
 
-    // Nothing landed, on either attempt.
-    let root_messages = root.fetch::<MessageView>("true").await.unwrap();
-    assert_eq!(root_messages.len(), 1, "only the seeded message exists");
+    // The control: the same call, from a signed-in member writing as
+    // themselves, lands. Without it a write path broken for everybody — a
+    // misconfigured node, a model that no longer commits — would read as a
+    // guest-specific denial and this test would pass for the wrong reason.
+    let member = member(&node, author);
+    let trx = member.begin();
+    trx.create(&Message {
+        user: author.into(),
+        room: room.into(),
+        text: "posting as myself".to_string(),
+        timestamp: 5,
+        deleted: false,
+        edited_at: None,
+        collaborative: None,
+        re: None,
+    })
+    .await
+    .unwrap();
+    trx.commit().await.expect("a member may post as themselves");
+
+    // Nothing the guest attempted landed; the member's message did.
+    let messages = root.fetch::<MessageView>("true").await.unwrap();
+    assert_eq!(messages.len(), 2, "the seeded message and the member's, and nothing from the guest");
+    assert!(messages.iter().all(|row| row.text().unwrap() != "posting as nobody"));
     assert_eq!(root.fetch::<ReactionView>("true").await.unwrap().len(), 1, "only the seeded reaction exists");
 }
