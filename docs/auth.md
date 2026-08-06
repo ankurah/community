@@ -62,6 +62,10 @@ Decide when wiring. Either way, a verified identity → `JwtContext::from_claims
 
 ### Policy (`policy.json`) sketch
 
+*(Superseded 2026-08-06 — kept as the record of what was sketched before the
+decision. `user.read` is no longer `view`: see the guest-mode section at the
+end of this file for the shipped `view`/`signed_in` split.)*
+
 ```json
 {
   "roles": { "member": ["view", "post"] },
@@ -134,8 +138,9 @@ while a member pays an OIDC round-trip. The client re-mints on expiry or
 reconnect.
 
 **What a guest may read** is a privilege split in `policy.json`, not a rule
-about guests. `view` is the anonymous tier — `room`, `message`, `reaction`,
-`linkpreview`, everything a page has to render — and a new `signed_in`
+about guests. `view` is the anonymous tier and it covers four collections:
+`room`, `message`, `reaction`, `linkpreview` — room names and topics, message
+text and timestamps, reaction counts, link previews. A new `signed_in`
 privilege gates the three collections a reader has to have signed in for:
 `user` and `userroles` (no roster for the street) and `modaction` (moderation
 records are community business). The privilege says what its name says — the
@@ -148,6 +153,26 @@ subject is a literal that never parses as one, so the comparison is false and
 the row is withheld. A guest holds no `post` privilege, so a guest writes
 nothing anywhere. `server/tests/guest_policy_live_tests.rs` runs all of that
 against the real policy on a real node.
+
+**What that leaves the guest client without: author names.** `Message` carries
+`user: Ref<User>` and no display name of its own, so a reader who cannot read
+the `user` collection gets the text of every message and the name of nobody —
+including their own would-be neighbours in the member list, which a guest does
+not receive either. That is the client lane's open problem (tracked on #65),
+not a policy gap: whatever it does — render a placeholder, or have the server
+denormalize a display name onto something a guest may read — is a decision
+about the guest UI, and this branch deliberately leaves the client untouched.
+
+**How the collection gate closes, stated exactly, because a future role could
+open it.** `can_access_collection` passes when a caller's roles hold the read
+privilege **or** the write privilege. `signed_in` closes the roster and the
+mod log only because no role today holds `post`, `moderate` or `system`
+without also holding `signed_in`. Add a role like `"contributor": ["view",
+"post"]` and it would read the roster through `user`'s write gate — so any new
+role that may write must carry `signed_in` too.
+`only_signed_in_roles_reach_the_signed_in_collections` in
+`server/tests/policy_scope_tests.rs` asserts exactly that, over every role in
+the file, so a role that breaks it fails there rather than in production.
 
 **Private rooms do not exist** as a feature — `Room` carries a name, a
 creator, and a topic, and nothing about visibility — so every room is public
