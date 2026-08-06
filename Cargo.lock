@@ -123,7 +123,7 @@ dependencies = [
 [[package]]
 name = "ankurah-chat-leptos"
 version = "0.1.0"
-source = "git+https://github.com/ankurah/ankurah-chat?rev=ffc5682f040c9b07d66285fd69d1a80aa755af0e#ffc5682f040c9b07d66285fd69d1a80aa755af0e"
+source = "git+https://github.com/ankurah/ankurah-chat?rev=12c1cb9bdfdade64f5161b91766be50f30c95ea1#12c1cb9bdfdade64f5161b91766be50f30c95ea1"
 dependencies = [
  "ankurah",
  "ankurah-chat-model",
@@ -144,7 +144,7 @@ dependencies = [
 [[package]]
 name = "ankurah-chat-model"
 version = "0.1.0"
-source = "git+https://github.com/ankurah/ankurah-chat?rev=ffc5682f040c9b07d66285fd69d1a80aa755af0e#ffc5682f040c9b07d66285fd69d1a80aa755af0e"
+source = "git+https://github.com/ankurah/ankurah-chat?rev=12c1cb9bdfdade64f5161b91766be50f30c95ea1#12c1cb9bdfdade64f5161b91766be50f30c95ea1"
 dependencies = [
  "ankurah",
  "getrandom 0.2.17",
@@ -1368,7 +1368,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3269,7 +3269,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4998,7 +4998,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
