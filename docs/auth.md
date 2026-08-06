@@ -204,3 +204,18 @@ That is deliberate: the front end appends its address to one of the lines and
 the server cannot tell which, so reading either would mean counting a value
 the caller chose. An operator seeing 429s that look shared across unrelated
 callers should look for callers sending their own `X-Forwarded-For` header.
+
+## Status — sign-out hint ownership (2026-08-06)
+
+- **The retained id_token names the session it belongs to**: localStorage
+  `community_id_token` now holds `{id_token, session_sub}`, `session_sub`
+  being the `sub` (entity id) of the ankurah session `complete_sign_in`
+  minted alongside it. The slot is shared across the origin's tabs and a
+  concurrent sign-in overwrites it, so sign-out presents (and removes) the
+  hint only when it belongs to the session being ended; a pair some other
+  session retained stays in place for that session's own sign-out, and this
+  one degrades to the local-clear path. A pre-pairing bare id_token is spent
+  as-is, once, so browsers signed in before this change keep the idp.to half
+  of their next sign-out. The ceremony's cancel compare
+  (`remove_id_token_if_matches`) reads the pair and matches its `id_token`
+  field, so a cancelled exchange still takes back exactly its own write.
