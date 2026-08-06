@@ -175,11 +175,24 @@ fn registered_embed_origin() -> Option<&'static str> {
 /// minting a session nobody is waiting for.
 ///
 /// Blunt on purpose, and therefore only safe from a caller that knows no other
-/// attempt can own the stash. Closing the ceremony is such a caller: the
-/// sign-in button does nothing while a ceremony is up, so no successor exists
-/// until this one is gone. A caller that resumes after an await is NOT — by
-/// then its own material is long consumed and anything present belongs to a
-/// later attempt.
+/// attempt can own the stash. Closing the ceremony is very nearly such a
+/// caller: the sign-in button does nothing while a ceremony is up, so no
+/// successor can be started from there. A caller that resumes after an await is
+/// NOT — by then its own material is long consumed and anything present belongs
+/// to a later attempt.
+///
+/// The stash that precondition misses sits right beside the caller. The
+/// ceremony's escape hatch calls [`start_sign_in`], which stashes the top-level
+/// attempt's material and then only *begins* a cross-origin navigation: the
+/// document stays interactive until that navigation commits, with the × and
+/// Escape still live. A close inside that window clears material the visitor is
+/// seconds from spending at idp.to, and they come back to "no saved state
+/// (stale callback?)". The window is narrow and predates the ceremony's cancel
+/// handling — the same clear ran from the same call site before any of it — so
+/// it is left standing rather than patched around here. The durable fix is for
+/// the escape to mark the stash as handed off, so a later close skips the
+/// clear. Written down rather than left for the next caller to rediscover from
+/// a rule that does not quite hold.
 ///
 /// The next attempt generates its own material, so this never blocks a retry.
 pub fn cancel_pending_sign_in() {
@@ -190,15 +203,23 @@ pub fn cancel_pending_sign_in() {
     }
 }
 
-/// Withdraw the `id_token` one exchange retained, and only if it is still that
-/// exchange's — the compare is the whole point.
+/// Withdraw the `id_token` one exchange retained, and only while the slot still
+/// holds that exchange's value.
 ///
-/// A cancelled sign-in should not leave an idp.to token in a signed-out
-/// browser. But `localStorage` is shared across this origin's tabs and the slot
-/// may have changed owner while the cancelled exchange was in flight: another
-/// tab may have signed in, or a later attempt here may have succeeded. Removing
-/// only a value that still matches undoes this exchange's write exactly, and
-/// leaves a live session its sign-out hint.
+/// What this is for is the failed cancelled exchange. The unconditional removal
+/// it replaced emptied the slot whatever had happened — including when the
+/// exchange had failed and written nothing at all, so a cancel could take a
+/// value the cancelled attempt never put there. Scoped to a compare, the `Err`
+/// path touches the slot not at all.
+///
+/// Be exact about the cross-tab case, because a compare reads stronger than
+/// this one is. [`complete_sign_in`] writes this slot unconditionally, and no
+/// await separates that write from this call — so if another tab signed in
+/// while the cancelled exchange was in flight, its value is already overwritten
+/// by the time the compare runs, and the compare then matches our own. The
+/// compare bites only on a write landing inside that gap. Making the retention
+/// itself ownership-aware is what covers the rest, and that belongs to the
+/// shared exchange rather than here.
 pub fn remove_id_token_if_matches(expected: &str) {
     let Some(ls) = local_storage() else { return };
     if ls.get_item(LS_ID_TOKEN).ok().flatten().as_deref() == Some(expected) {
@@ -280,11 +301,13 @@ pub async fn handle_callback() -> Result<String, String> {
 /// A `/auth/callback` framed with no `code` and no `error` gets the answer that
 /// already existed for a callback carrying nothing. A message the parent
 /// refuses is uglier: `handle_callback` then spends a real code right here,
-/// mounting the app inside the frame with the session in the frame's storage.
-/// That is still the better of the two failures — the alternative is a blank
-/// frame and a parent waiting on a message that never arrived — and it is close
-/// to unreachable, since a same-origin post addressed to our own origin does
-/// not fail.
+/// mounting a second copy of the app inside the frame. What it mints is not
+/// stranded — the frame is same-origin, so the session lands in exactly the
+/// storage the parent reads on its next load — but until something reloads, the
+/// visitor is looking at the app in a modal-sized box. That is still the better
+/// of the two failures: the alternative is a blank frame and a parent waiting
+/// on a message that never arrived. And it is close to unreachable, since a
+/// same-origin post addressed to our own origin does not fail.
 ///
 /// Only the short-lived authorization code and the returned `state` travel. The
 /// page that framed this one holds the PKCE verifier and does the exchange, so

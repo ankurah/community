@@ -15,8 +15,9 @@
    `touch-action: pan-y` names the one gesture this box wants. It is not
    undoing body's blanket `none`: a pan is permitted by the values from the
    touched element up to whichever element scrolls it, and that is this one, so
-   body was never in the walk. Declaring it here is what keeps the vertical pan
-   if the overlay ever stops being its own scroller. */
+   body was never in the walk. What it buys is narrowing — the overlay would
+   otherwise be `auto` — so pinch-zoom and the horizontal pan are ruled out and
+   the vertical one is all that is left. */
 .ceremonyOverlay {
   position: fixed;
   inset: 0;

@@ -109,10 +109,11 @@ pub fn SignInCeremony(
                     // the × the visitor was invited to use, a retry that gets
                     // further — so by this line the pending-attempt keys hold a
                     // SUCCESSOR's material (this attempt's was consumed before
-                    // the first request went out) and the id_token slot may
-                    // belong to a session that is running, in this tab or
-                    // another. Only this exchange's own write is withdrawn, and
-                    // only while it is still the value sitting there.
+                    // the first request went out) and are not this task's to
+                    // clear. The id_token is: this exchange wrote it moments
+                    // ago, and only that value is taken back. See
+                    // `remove_id_token_if_matches` for what that compare does
+                    // and does not cover.
                     if let Ok(minted) = &outcome {
                         auth::remove_id_token_if_matches(&minted.id_token);
                     }
