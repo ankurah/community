@@ -35,8 +35,23 @@ struct RoomQueryState {
 }
 
 impl NotificationManager {
-    pub fn new(rooms: LiveQuery<RoomView>, current_user: Option<String>) -> Self {
-        let audio_context = AudioContext::new().expect("Failed to create AudioContext");
+    /// `None` when the browser will not give us an `AudioContext`.
+    ///
+    /// Everything this manager does is play a sound — the room subscriptions
+    /// below exist only to decide when — so without one there is nothing for
+    /// it to be, and `None` is the honest answer rather than a manager holding
+    /// subscriptions it can never act on. A browser can refuse for ordinary
+    /// reasons (a hardened profile, no audio device, an embedding page's
+    /// permissions policy), so this is not a fault to die on: the chat still
+    /// works, and it is quiet.
+    pub fn new(rooms: LiveQuery<RoomView>, current_user: Option<String>) -> Option<Self> {
+        let audio_context = match AudioContext::new() {
+            Ok(context) => context,
+            Err(e) => {
+                tracing::warn!("no AudioContext, so no notification sounds: {e:?}");
+                return None;
+            }
+        };
 
         let inner = Arc::new(Inner {
             current_user_id: Mutex::new(current_user),
@@ -70,7 +85,7 @@ impl NotificationManager {
         // Store the guard
         *inner._rooms_guard.lock().unwrap() = Some(rooms_guard);
 
-        Self(SendWrapper::new(inner))
+        Some(Self(SendWrapper::new(inner)))
     }
 
     fn setup_audio_unlock(audio_context: AudioContext) {

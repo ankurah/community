@@ -89,14 +89,29 @@ fn inspect_entry(message: MessageView, close: Box<dyn Fn()>) -> AnyView {
 /// moderator removed it; no row means the author did. The LiveQuery mounts
 /// only for tombstoned rows, so the per-row cost stays confined to the rare
 /// case.
+///
+/// THAT HEURISTIC ONLY HOLDS IF WE COULD LOOK, so there are three states here
+/// and not two. `modaction` is signed-in-only in policy.json, so a guest's
+/// query is refused outright at the collection gate; a member's query is fine
+/// but answers empty for the moment before it loads. Reading either absence
+/// as "no row exists" prints "Removed by the author" over a moderator's
+/// removal — a false statement about a person, shown to every anonymous
+/// reader of every moderated message. A query we could not open, and one that
+/// has not answered yet, therefore both say "Removed" and claim nothing.
+///
+/// The fix stays on this side deliberately. Letting a guest read `modaction`
+/// would trade a wrong label for a moderation record the street can page
+/// through, which is what the `signed_in` privilege exists to refuse.
 #[component]
 fn TombstoneNotice(message: MessageView) -> impl IntoView {
     let mod_actions = crate::queries::selection("message = ? AND action = 'delete'", [(&message.id()).into()])
         .ok()
         .and_then(|sel| crate::ctx().query::<ModActionView>(sel).ok());
-    let label = move || {
-        let by_moderator = mod_actions.as_ref().map(|q| !q.get().is_empty()).unwrap_or(false);
-        if by_moderator { "Removed by a moderator" } else { "Removed by the author" }
+    let label = move || match mod_actions.as_ref() {
+        None => "Removed",
+        Some(query) if !query.loaded() => "Removed",
+        Some(query) if query.get().is_empty() => "Removed by the author",
+        Some(_) => "Removed by a moderator",
     };
     view! { <div class="messageText tombstoneNotice">{label}</div> }
 }

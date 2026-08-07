@@ -165,7 +165,7 @@ the real policy on a real node.
 `user: Ref<User>` and no display name of its own, so a reader who cannot read
 the `user` collection gets the text of every message and the name of nobody —
 including their own would-be neighbours in the member list, which a guest does
-not receive either. Ruled on #65 (2026-08-07): guest mode ships nameless
+not receive either. Ruled on #65 (2026-08-06): guest mode ships nameless
 anyway, and a public name-only projection is the fast-follow. See the client
 section below for what a guest actually sees.
 
@@ -204,13 +204,33 @@ the server cannot tell which, so reading either would mean counting a value
 the caller chose. An operator seeing 429s that look shared across unrelated
 callers should look for callers sending their own `X-Forwarded-For` header.
 
-## Status — the guest boot path (2026-08-07, client lane)
+## Status — the guest boot path (2026-08-06, client lane)
 
 The client now takes the session above. No stored token means
 `POST /auth/guest`, connect, and mount the chat surfaces read-only; the
-sign-in card is what a visitor sees only when they cannot have a session at
-all — a refused mint, or a sign-in they asked for that failed and whose reason
-is still worth reading. A stored member token boots exactly as it did.
+sign-in card is what a visitor sees only when the boot could not hand them
+anything to read with. A stored member token boots exactly as it did.
+
+**Five ways to land on that card, each with its own sentence on it**: a
+refused mint, a browser that would not open IndexedDB, a websocket that never
+joined the remote system, a policy row that never synced, and a sign-in the
+visitor asked for that failed. None of them is a panic and none is a blank
+page — that is the rule the boot is written to, because every one of them is
+the browser or the network saying no rather than a fault in the code. The
+globals the app reads through are set only once the whole connect has
+succeeded, so nothing downstream can reach a half-built session.
+
+**Two of those waits are bounded here rather than upstream.** Neither
+`wait_system_ready` (ankurah-core 0.9.0 parks on a notification) nor the
+policy sync has a timeout of its own, and the join notification only ever
+arrives over the websocket — so HTTP working while the websocket does not (an
+ingress pointed elsewhere, a proxy refusing the upgrade) parked the boot for
+good, and the boot is what mounts the app: a white page, forever, for a
+visitor who would have got the card before any of this existed.
+`SYSTEM_JOIN_TIMEOUT_MS` (8s, sized for a cold handshake on a slow mobile
+connection) and `POLICY_TIMEOUT_MS` (5s, one entity over a socket already up)
+are what turn that into the card. Both poll a flag rather than racing a timer,
+because the wasm build carries no executor offering a select.
 
 **Nothing about a guest session is stored.** A member token lives in
 localStorage because re-acquiring one costs a ceremony; a guest token costs
@@ -229,13 +249,29 @@ handed to `ChatContext`, the mount gates, and the actor stamped on a
 the rate limiter's "Automatic" row).
 
 **What a guest is offered.** Rooms, message text, reactions, link previews,
-the room topic, the connection light, x-ray and the QR code. Absent, rather
-than present-and-refusing: the member roster, the moderation log, the
-notification bell, the display-name editor, the account-settings link, the
-sign-out button and the whole direct-message section. A "Sign in" button takes
-their place. Authors render as **"Unknown"** with a `?` avatar — the nameless
-gap above — while the avatar's colour still comes from the message's own
-author ref, so the same person stays the same colour.
+the room topic, the connection light and the QR code (which encodes
+`location.href` and nothing else). Absent, rather than present-and-refusing:
+the member roster, the moderation log, the notification bell, the
+display-name editor, the account-settings link, the sign-out button, the
+whole direct-message section, and x-ray. A "Sign in" button takes their
+place. Authors render as **"Unknown"** with a `?` avatar — the nameless gap
+above — while the avatar's colour still comes from the message's own author
+ref, so the same person stays the same colour.
+
+**Why x-ray is a member's tool** and not merely an unimportant one: the
+inspector serves a message's event history, which is the text an author
+edited away, and its inspect-by-id row invites probing. Nothing there escapes
+the reader's own claims — a guest's inspector reads through a guest's session
+— so this is not a gap being closed. It is a decision not to widen the
+audience for "I edited that to take something out" from members to anyone at
+all.
+
+**A tombstone says only what it can prove.** Attribution comes from a
+matching public `ModAction` row, and `modaction` is signed-in-only — so a
+guest's query for one is refused, and reading that refusal as "no row exists"
+would print "Removed by the author" over every moderator's removal. A query
+that could not be opened, and one that has not loaded yet, both render a bare
+"Removed".
 
 **Reaching for anything else starts the ceremony.** `ankurah-chat-leptos`
 refuses an anonymous reader the caret and raises the host's auth demand
@@ -243,7 +279,10 @@ instead — a press on the message box, a reaction, a reply — and that is wire
 to the framed ceremony the sign-in card uses, through one shared `SignInFlow`
 (`leptos-app/src/sign_in_ceremony.rs`). Raising it while a ceremony is already
 open is a no-op, which the crate requires of the callback. A completed
-sign-in reloads and boots as the member.
+sign-in reloads and boots as the member. A sign-in that cannot even start —
+no `sessionStorage` for the one-time material — says so in a notice the app
+mounts for the purpose: it is an anonymous reader's only way out of
+read-only, so it must not fail in silence.
 
 **No re-mint at connect.** ankurah's websocket handshake carries no credential
 at all — every request signs itself with the claims of the context it runs

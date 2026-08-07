@@ -64,10 +64,19 @@ impl SignInFlow {
         }
     }
 
-    /// Why the last attempt did not get anywhere, for a host with somewhere to
-    /// put it. The ceremony shows its own failure in the modal and holds it
-    /// there until the visitor dismisses it, so a host without a banner loses
-    /// nothing by not reading this.
+    /// Why the last attempt did not get anywhere.
+    ///
+    /// A HOST MUST PUT THIS SOMEWHERE. Two of the three writers have no modal
+    /// on screen to speak for them: [`SignInFlow::hand_over_the_tab`], when
+    /// `start_sign_in` cannot stash its one-time material, and the ceremony's
+    /// escape hatch handing that same failure up through `on_close`. Both
+    /// leave a visitor pressing a control that does nothing — and for an
+    /// anonymous reader, sign-in is the only way out of read-only, so a
+    /// silent failure there is the whole conversion path failing quietly. The
+    /// card renders this in its own banner; a host without one mounts
+    /// [`SignInFlow::view_with_notice`] rather than [`SignInFlow::view`]. Only
+    /// the third writer — an exchange that failed inside a live ceremony —
+    /// speaks for itself first, in the modal, before landing here.
     pub fn error(&self) -> RwSignal<Option<String>> { self.error }
 
     /// Start a sign-in — and do nothing at all while one is already on screen.
@@ -112,8 +121,35 @@ impl SignInFlow {
         }
     }
 
+    /// The ceremony modal, while an attempt is live, AND a notice carrying
+    /// whatever [`SignInFlow::error`] holds — for a host with nowhere else to
+    /// put one.
+    ///
+    /// The notice is dismissible because it outlives the gesture that caused
+    /// it: nothing else on the page changes when a sign-in fails to start, so
+    /// there is no next action that would clear it, and a reader who has read
+    /// it needs a way to put it down. Starting another attempt clears it too
+    /// (see [`SignInFlow::begin`]).
+    pub fn view_with_notice(self) -> impl IntoView {
+        view! {
+            {self.view()}
+            {move || self.error.get().map(|message| view! {
+                <div class="signInNotice" role="alert">
+                    <span class="signInNoticeText">{message}</span>
+                    <button
+                        class="signInNoticeClose"
+                        aria-label="Dismiss"
+                        on:click=move |_| self.error.set(None)
+                    >"×"</button>
+                </div>
+            })}
+        }
+    }
+
     /// The ceremony modal, while an attempt is live. Mount it once, wherever
-    /// the host wants the overlay to sit.
+    /// the host wants the overlay to sit. The host owns showing
+    /// [`SignInFlow::error`] — see that method before choosing this over
+    /// [`SignInFlow::view_with_notice`].
     pub fn view(self) -> impl IntoView {
         // Closing takes the frame down with the modal and abandons the stashed
         // attempt, so the next raise starts clean. A reason handed back is kept

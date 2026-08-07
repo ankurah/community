@@ -431,7 +431,8 @@ pub async fn complete_sign_in(code: &str, returned_state: &str) -> Result<Minted
         client = enc(CLIENT_ID),
         verifier = enc(&verifier),
     );
-    let token_body = http_post(TOKEN_ENDPOINT, &form, "application/x-www-form-urlencoded").await?;
+    let token_body =
+        http_post(TOKEN_ENDPOINT, &form, "application/x-www-form-urlencoded").await.map_err(|e| e.to_string())?;
     // Parse failures render on screen in the sign-in error text, and a 200
     // body can still carry tokens — the id_token here, the minted session
     // token below — so keep serde's error and leave the body out; the
@@ -441,7 +442,8 @@ pub async fn complete_sign_in(code: &str, returned_state: &str) -> Result<Minted
     // 2) Federate: hand the ID token to our server, which validates + mints.
     let session_url = format!("{origin}/auth/session");
     let session_req = serde_json::json!({ "id_token": tokens.id_token, "nonce": nonce });
-    let session_body = http_post(&session_url, &session_req.to_string(), "application/json").await?;
+    let session_body =
+        http_post(&session_url, &session_req.to_string(), "application/json").await.map_err(|e| e.to_string())?;
     let session: SessionResponse = serde_json::from_str(&session_body).map_err(|e| format!("could not parse session response: {e}"))?;
 
     // Retain the id_token for RP-initiated logout (`id_token_hint`): it
@@ -518,6 +520,37 @@ fn message_field(data: &JsValue, name: &str) -> Option<String> {
     js_sys::Reflect::get(data, &JsValue::from_str(name)).ok()?.as_string().filter(|value| !value.is_empty())
 }
 
+/// Why a guest mint produced no session — and the whole of what leaves
+/// [`mint_guest_token`], on purpose.
+///
+/// FOR: this value is LOGGED rather than shown, so it must carry nothing that
+/// does not belong in a log. A refused mint answers with a status, a URL and
+/// a body; serde's parse error quotes the body it choked on. None of that is
+/// ours to write down, and #84 already settled that for the sign-in path.
+/// What triage actually needs is one bit — did the server answer — so that is
+/// the whole type.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum GuestMintFailure {
+    /// The server answered, and the answer was not a session: the mint budget
+    /// refusing, the mint failing on its own side, or a body that did not
+    /// parse. Whichever it was, the server's log already has the detail and
+    /// this one does not need a copy.
+    Refused,
+    /// No answer at all — offline, name resolution, TLS, a blocked request.
+    Unreachable,
+}
+
+impl GuestMintFailure {
+    /// A stable word for the log. Non-identifying by construction: there are
+    /// two of them and neither comes from the wire.
+    pub fn reason(self) -> &'static str {
+        match self {
+            Self::Refused => "refused",
+            Self::Unreachable => "unreachable",
+        }
+    }
+}
+
 /// Ask our own server for a read-only session: `POST /auth/guest`, no body, no
 /// credential, no IdP round-trip. What comes back is an ankurah session token
 /// signed by the same key `/auth/session` uses, carrying `roles=["guest"]` and
@@ -539,14 +572,15 @@ fn message_field(data: &JsValue, name: &str) -> Option<String> {
 /// under a tab left open past that; recovering there means calling this again
 /// and setting the session pair the handshake reads (`ChatApp`), which is #86.
 /// This function is what #86 calls.
-pub async fn mint_guest_token() -> Result<String, String> {
-    let window = window().ok_or("no window")?;
-    let origin = window.location().origin().map_err(|_| "no origin")?;
-    let body = http_post(&format!("{origin}{GUEST_MINT_PATH}"), "", "application/json").await?;
-    // Keep serde's error and leave the body out: a 200 from either mint route
-    // carries a session token, and neither belongs in a message on screen.
-    let session: SessionResponse =
-        serde_json::from_str(&body).map_err(|e| format!("could not parse the guest session response: {e}"))?;
+pub async fn mint_guest_token() -> Result<String, GuestMintFailure> {
+    let window = window().ok_or(GuestMintFailure::Unreachable)?;
+    let origin = window.location().origin().map_err(|_| GuestMintFailure::Unreachable)?;
+    let body = http_post(&format!("{origin}{GUEST_MINT_PATH}"), "", "application/json")
+        .await
+        .map_err(|failure| if failure.answered() { GuestMintFailure::Refused } else { GuestMintFailure::Unreachable })?;
+    // Discarded rather than wrapped, and that is the point: serde's error
+    // quotes the input it choked on, and the input here is a mint response.
+    let session: SessionResponse = serde_json::from_str(&body).map_err(|_| GuestMintFailure::Refused)?;
     Ok(session.token)
 }
 
@@ -680,25 +714,65 @@ fn token_sub(token: &str) -> Option<String> {
     Some(payload_json(token)?.get("sub")?.as_str()?.to_string())
 }
 
-async fn http_post(url: &str, body: &str, content_type: &str) -> Result<String, String> {
-    let window = window().ok_or("no window")?;
+/// What a POST did not do.
+///
+/// FOR: the two callers want different things out of a failure, and one of
+/// them must not have what the other needs. The OIDC exchange puts its
+/// failure in front of the visitor, where the status and the server's own
+/// words are the whole value of it — [`Display`](std::fmt::Display) is that
+/// sentence, unchanged from when this type was a `String`. The guest mint
+/// shows nothing and LOGS instead, and a response body in the log is the same
+/// mistake #84 fixed for parse failures. So it reads [`answered`] and never
+/// the sentence.
+struct PostFailure {
+    /// The response status, when a response arrived at all. `None` means the
+    /// request never got one: offline, name resolution, TLS, a blocked
+    /// request, or a reply that was not a `Response`.
+    status: Option<u16>,
+    /// The sentence for a caller that shows one. Carries the URL and the
+    /// response body, so a caller that only logs must read `status` instead.
+    message: String,
+}
+
+impl PostFailure {
+    /// A failure with no response behind it.
+    fn unanswered(message: impl Into<String>) -> Self { Self { status: None, message: message.into() } }
+
+    /// Whether the server answered at all. The one thing a caller may read
+    /// without carrying a body along with it.
+    fn answered(&self) -> bool { self.status.is_some() }
+}
+
+impl std::fmt::Display for PostFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str(&self.message) }
+}
+
+async fn http_post(url: &str, body: &str, content_type: &str) -> Result<String, PostFailure> {
+    let unanswered = |e: JsValue| PostFailure::unanswered(js_err(e));
+    let window = window().ok_or_else(|| PostFailure::unanswered("no window"))?;
 
     let opts = RequestInit::new();
     opts.set_method("POST");
     opts.set_body(&JsValue::from_str(body));
-    let headers = Headers::new().map_err(js_err)?;
-    headers.set("Content-Type", content_type).map_err(js_err)?;
+    let headers = Headers::new().map_err(unanswered)?;
+    headers.set("Content-Type", content_type).map_err(unanswered)?;
     opts.set_headers(headers.as_ref());
 
-    let request = Request::new_with_str_and_init(url, &opts).map_err(js_err)?;
-    let response_value = JsFuture::from(window.fetch_with_request(&request)).await.map_err(js_err)?;
-    let response: Response = response_value.dyn_into().map_err(|_| "fetch did not return a Response".to_string())?;
+    let request = Request::new_with_str_and_init(url, &opts).map_err(unanswered)?;
+    let response_value = JsFuture::from(window.fetch_with_request(&request)).await.map_err(unanswered)?;
+    let response: Response =
+        response_value.dyn_into().map_err(|_| PostFailure::unanswered("fetch did not return a Response"))?;
 
-    let text_js = JsFuture::from(response.text().map_err(js_err)?).await.map_err(js_err)?;
+    // Past here the server HAS answered, so every remaining failure carries
+    // its status: a caller deciding "refused" against "never reached us" must
+    // not read a body that failed to arrive as an absent server.
+    let status = response.status();
+    let answered = |e: JsValue| PostFailure { status: Some(status), message: js_err(e) };
+    let text_js = JsFuture::from(response.text().map_err(answered)?).await.map_err(answered)?;
     let text = text_js.as_string().unwrap_or_default();
 
     if !response.ok() {
-        return Err(format!("HTTP {} from {url}: {text}", response.status()));
+        return Err(PostFailure { status: Some(status), message: format!("HTTP {status} from {url}: {text}") });
     }
     Ok(text)
 }

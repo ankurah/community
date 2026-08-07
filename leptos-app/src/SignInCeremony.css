@@ -256,3 +256,60 @@
     padding: var(--sp-4);
   }
 }
+
+/* The flow's failure notice, for a host with no banner of its own.
+
+   FOR: a sign-in that cannot even start writes its reason to the flow's error
+   signal with no modal on screen to carry it — the visitor pressed the message
+   box, or the escape hatch, and nothing happened. On the card that reason
+   lands in `.signInError` inside the layout. In the app there is no such slot,
+   so this is one: bottom-centre, above every surface except the ban lockout,
+   and dismissible because nothing else on the page will clear it.
+
+   `position: fixed` rather than a slot in the header, so it does not reflow
+   the chrome or push the timeline; `max-width` keeps a long reason from
+   spanning a wide screen. */
+.signInNotice {
+  position: fixed;
+  bottom: var(--sp-4);
+  left: 50%;
+  z-index: 1200;
+  display: flex;
+  gap: var(--sp-3);
+  align-items: flex-start;
+  box-sizing: border-box;
+  width: max-content;
+  max-width: min(calc(100% - 2 * var(--sp-4)), 520px);
+  padding: 10px 10px 10px 14px;
+  font-size: 13.5px;
+  line-height: 1.5;
+  color: var(--danger);
+  background: var(--danger-bg);
+  border: 1px solid var(--danger-border);
+  border-radius: 12px;
+  box-shadow: var(--shadow-3);
+  transform: translateX(-50%);
+}
+
+.signInNoticeText {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.signInNoticeClose {
+  flex-shrink: 0;
+  padding: 0 4px;
+  font-size: 16px;
+  line-height: 1.2;
+  color: inherit;
+  cursor: pointer;
+  background: none;
+  border: 0;
+  border-radius: 6px;
+  opacity: 70%;
+}
+
+.signInNoticeClose:hover {
+  opacity: 100%;
+}

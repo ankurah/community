@@ -11,6 +11,9 @@ use ankurah_websocket_client_wasm::WebsocketClient;
 use community_model::{LinkPreviewView, UserView};
 use lazy_static::lazy_static;
 use send_wrapper::SendWrapper;
+use std::cell::Cell;
+use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
 use wasm_bindgen::JsValue;
 use wasm_bindgen_futures::{spawn_local, JsFuture};
@@ -50,7 +53,9 @@ use sidebar::Sidebar;
 lazy_static! {
     static ref NODE: OnceLock<Node<IndexedDBStorageEngine, JwtAgent>> = OnceLock::new();
     static ref CLIENT: OnceLock<SendWrapper<WebsocketClient>> = OnceLock::new();
-    /// The ephemeral policy agent — used to poll `policy_ready()` after connect.
+    /// The ephemeral policy agent. Set only once the boot has waited it out,
+    /// so a reader of this global gets an agent whose policy has arrived;
+    /// x-ray's node card reports `policy_ready` from here.
     static ref AGENT: OnceLock<JwtAgent> = OnceLock::new();
     /// The minted ankurah session token (present once signed in).
     static ref AUTH_TOKEN: RwLock<Option<String>> = RwLock::new(None);
@@ -59,6 +64,38 @@ lazy_static! {
     /// storage suffices — no signal needed.
     static ref AUTH_ERROR: RwLock<Option<String>> = RwLock::new(None);
 }
+
+/// Whether the boot produced a session that can actually read: a token, a node
+/// built on storage the browser allowed, a websocket that joined the remote
+/// system, and the server's policy synced into the local agent.
+///
+/// FOR: `ctx()` and everything under `ChatApp` assume all four, and until this
+/// existed the only thing checked was the token — so a browser that refused
+/// IndexedDB, a websocket that never reached the server, or a policy row that
+/// never arrived each mounted a UI that could not read and then died in an
+/// `.expect`. `App` gates on this instead, and a `false` sends the visitor to
+/// the card with a sentence. Single-threaded wasm, so `Relaxed` is the whole
+/// of the ordering question.
+static SESSION_LIVE: AtomicBool = AtomicBool::new(false);
+
+/// How long to wait for the node to join the remote system before giving up.
+///
+/// It has to cover a cold TCP + TLS + websocket handshake and one round trip
+/// on a slow mobile connection, because the cost of being too eager is telling
+/// a visitor whose connection was merely slow to reload. Eight seconds is the
+/// shortest ceiling that comfortably does; the cost of being too patient is
+/// only that a visitor whose websocket is going nowhere waits that long for
+/// the card.
+const SYSTEM_JOIN_TIMEOUT_MS: i32 = 8_000;
+
+/// How long to wait for the durable node's policy row to reach the ephemeral
+/// agent. Shorter than the join above because the socket is already up by
+/// then: this is one entity arriving over a live connection.
+const POLICY_TIMEOUT_MS: i32 = 5_000;
+
+/// How often the two waits above look. Also the latency each adds to a boot
+/// that succeeds, which is why it is small.
+const POLL_STEP_MS: i32 = 50;
 
 /// Get the global authenticated Ankurah context. Only called from within the
 /// signed-in UI subtree (`ChatApp`), so the token/node are guaranteed present.
@@ -182,12 +219,12 @@ async fn initialize() {
     if AUTH_TOKEN.read().unwrap().is_none() && !sign_in_failed {
         match auth::mint_guest_token().await {
             Ok(token) => *AUTH_TOKEN.write().unwrap() = Some(token),
-            Err(e) => {
-                // The card gets a sentence and the log gets the detail. A
-                // refused mint answers with a status and a reason an operator
-                // wants, and a fetch failure with a browser string — neither
-                // is worth putting in front of a visitor.
-                tracing::warn!("could not mint a guest session: {e}");
+            Err(failure) => {
+                // Both halves are deliberately thin. The card gets a fixed
+                // sentence, and the log gets one of two words — never the
+                // status line, the URL, or the response body, which is what
+                // `GuestMintFailure` exists to keep out of here.
+                tracing::warn!("could not mint a guest session: {}", failure.reason());
                 *AUTH_ERROR.write().unwrap() =
                     Some("Could not start a read-only session — sign in, or reload in a moment.".to_string());
             }
@@ -195,9 +232,14 @@ async fn initialize() {
     }
 
     // Connect only with a session in hand. Without one there is nothing to
-    // present on a request and nothing to read, so the card stands alone.
+    // present on a request and nothing to read, so the card stands alone —
+    // and the same is true of a connect that could not finish, which is why
+    // only a whole one flips the gate the UI reads.
     if AUTH_TOKEN.read().unwrap().is_some() {
-        connect_node().await;
+        match connect_node().await {
+            Ok(()) => SESSION_LIVE.store(true, Ordering::Relaxed),
+            Err(reason) => *AUTH_ERROR.write().unwrap() = Some(reason.to_string()),
+        }
     }
 
     // Install the ReactiveGraphObserver at the base of the Ankurah observer stack
@@ -218,23 +260,50 @@ async fn initialize() {
 
 /// Build the ephemeral node, connect to `/ws`, and wait until the server's
 /// policy (roles + verifying key) has synced into the local agent.
-async fn connect_node() {
-    let storage = IndexedDBStorageEngine::open("community_app").await.expect("failed to open IndexedDB storage");
+///
+/// Every step here is something the browser or the network can refuse, and an
+/// `Err` carries the sentence the sign-in card shows for it — the detail goes
+/// to the log, where an operator wants it. None of these are programming
+/// faults, so none of them may be a panic: the globals are set only once the
+/// node can genuinely read, so a caller that sees `Err` leaves them unset and
+/// nothing downstream can reach a half-built session.
+async fn connect_node() -> Result<(), &'static str> {
+    let storage = match IndexedDBStorageEngine::open("community_app").await {
+        Ok(storage) => storage,
+        Err(e) => {
+            tracing::error!("could not open IndexedDB storage: {e}");
+            return Err("This browser would not let the app store data locally — allow site data here, then reload.");
+        }
+    };
     let agent = JwtAgent::new_ephemeral();
     let node = Node::new(Arc::new(storage), agent.clone());
 
-    let client = WebsocketClient::new(node.clone(), &ws_url()).expect("failed to create WebsocketClient");
+    let client = match WebsocketClient::new(node.clone(), &ws_url()) {
+        Ok(client) => client,
+        Err(e) => {
+            tracing::error!("could not create the websocket client: {e}");
+            return Err("Could not connect to the community — reload in a moment.");
+        }
+    };
 
-    // Wait for the client to join the remote system (metadata, collections, etc.).
-    node.system.wait_system_ready().await;
+    // Wait for the client to join the remote system (metadata, collections,
+    // etc.) — bounded, because the wait itself is not.
+    if !wait_system_joined(&node).await {
+        tracing::error!("the node did not join the remote system within {SYSTEM_JOIN_TIMEOUT_MS}ms — is /ws reaching the server?");
+        return Err("Could not connect to the community — reload in a moment.");
+    }
+
+    // Until the ephemeral agent has synced the durable node's `jwtpolicy`
+    // entity, its local policy is deny-all — so every read would be rejected.
+    if !wait_policy_ready(&agent).await {
+        tracing::error!("the policy row did not sync within {POLICY_TIMEOUT_MS}ms — every read would be denied");
+        return Err("Could not finish connecting to the community — reload in a moment.");
+    }
 
     NODE.set(node).ok().expect("NODE already initialized");
     CLIENT.set(SendWrapper::new(client)).ok().expect("CLIENT already initialized");
     AGENT.set(agent).ok().expect("AGENT already initialized");
-
-    // Until the ephemeral agent has synced the durable node's `jwtpolicy` entity,
-    // its local policy is deny-all — so reads and writes would be rejected.
-    wait_policy_ready().await;
+    Ok(())
 }
 
 /// Same-origin `ws(s)://{host}` by default (trunk proxies `/ws` in dev). A
@@ -253,16 +322,62 @@ fn ws_url() -> String {
     }
 }
 
-/// Poll the ephemeral agent until it has synced policy + verifying key (or time
-/// out after ~5s and proceed — the UI degrades to "no rooms" rather than hanging).
-async fn wait_policy_ready() {
-    for _ in 0..100 {
-        if AGENT.get().map(JwtAgent::policy_ready).unwrap_or(false) {
-            return;
+/// Wait for the node to join the remote system, giving up after
+/// [`SYSTEM_JOIN_TIMEOUT_MS`]. `false` when it did not.
+///
+/// FOR: the bound. `wait_system_ready` parks on a notification with no timeout
+/// of its own (ankurah-core 0.9.0 `system.rs`), and that notification only
+/// ever arrives over the websocket — so a socket that cannot be opened, or an
+/// upgrade a proxy refuses, parks this future for good. The boot is what
+/// mounts the app, so parking it means no app at all: a white page, no
+/// sentence, until the visitor gives up and leaves. Bounding it is what turns
+/// that into the sign-in card. Reachable with nothing exotic — HTTP working
+/// while the websocket does not is an ordinary misconfiguration, and the guest
+/// mint succeeding over HTTP is what gets a first-time visitor this far.
+///
+/// The wait runs as its own task while this polls a flag it sets, because the
+/// wasm build carries no executor offering a select — the same shape the
+/// policy wait below uses, for the same reason. Nothing here can cancel the
+/// abandoned task: it holds a node handle and goes on waiting for a join that
+/// is not coming, until the document does. The caller is on its way to the
+/// card, so that handle outlives nothing that matters.
+async fn wait_system_joined(node: &Node<IndexedDBStorageEngine, JwtAgent>) -> bool {
+    let joined = Rc::new(Cell::new(false));
+    spawn_local({
+        let joined = joined.clone();
+        let node = node.clone();
+        async move {
+            node.system.wait_system_ready().await;
+            joined.set(true);
         }
-        sleep_ms(50).await;
+    });
+
+    for _ in 0..(SYSTEM_JOIN_TIMEOUT_MS / POLL_STEP_MS) {
+        if joined.get() {
+            return true;
+        }
+        sleep_ms(POLL_STEP_MS).await;
     }
-    tracing::warn!("policy not ready after ~5s; proceeding (reads/writes may fail until it syncs)");
+    joined.get()
+}
+
+/// Poll the ephemeral agent until it has synced policy + verifying key, giving
+/// up after [`POLICY_TIMEOUT_MS`]. `false` when it did not.
+///
+/// Until that row arrives the agent's local policy is deny-all, so a boot that
+/// gave up and mounted anyway would leave a reader in front of a shell with no
+/// rooms, no messages and nothing saying why — and it would stay there, since
+/// the chat handshake rebuilds its queries when the session changes and
+/// nothing here changes one. The card, with a sentence, is the honest end of
+/// that path.
+async fn wait_policy_ready(agent: &JwtAgent) -> bool {
+    for _ in 0..(POLICY_TIMEOUT_MS / POLL_STEP_MS) {
+        if agent.policy_ready() {
+            return true;
+        }
+        sleep_ms(POLL_STEP_MS).await;
+    }
+    agent.policy_ready()
 }
 
 /// Await a browser `setTimeout`, so `wait_policy_ready` can yield without busy-looping.
@@ -275,24 +390,26 @@ async fn sleep_ms(ms: i32) {
     let _ = JsFuture::from(promise).await;
 }
 
-/// Top-level gate: chat with a session, the card without one. A session is
-/// now the ordinary case either way — a visitor who has not signed in gets a
-/// guest one at boot — so the card is what a visitor sees when the mint was
-/// refused, or when a sign-in they asked for failed and the reason is still
-/// worth reading. Sign-in and sign-out are both full-page transitions, so this
-/// is resolved once at mount.
+/// Top-level gate: chat with a live session, the card without one. A session
+/// is now the ordinary case either way — a visitor who has not signed in gets
+/// a guest one at boot — so the card is what a visitor sees when the boot
+/// could not give them something to read with: a refused mint, a browser that
+/// refused storage, a websocket that never reached the server, a policy row
+/// that never arrived, or a sign-in they asked for that failed and whose
+/// reason is still worth reading. Every one of those wrote its sentence into
+/// `AUTH_ERROR`, and the card renders it. Sign-in and sign-out are both
+/// full-page transitions, so this is resolved once at mount.
 #[component]
 pub fn App() -> impl IntoView {
-    let has_session = AUTH_TOKEN.read().map(|t| t.is_some()).unwrap_or(false);
-    if has_session {
+    if SESSION_LIVE.load(Ordering::Relaxed) {
         view! { <ChatApp /> }.into_any()
     } else {
         view! { <SignIn /> }.into_any()
     }
 }
 
-/// The sessionless landing view: no guest token to read with, and no member
-/// token either.
+/// The landing view for a visitor with nothing to read through: no session, or
+/// one that could not be connected.
 #[component]
 pub fn SignIn() -> impl IntoView {
     let flow = sign_in_ceremony::SignInFlow::new();
@@ -456,19 +573,28 @@ pub fn ChatApp() -> impl IntoView {
         .hooks(chat_hooks::chat_hooks(previews_by_url, profile))
         .provide();
 
-    // The rooms, for community's own use: the notification sounds want a
-    // per-room window. Read from the chat handshake, which owns that query for
-    // the session — a second subscription here would be a second copy of the
-    // same rows.
+    // Notification sounds, which want a per-room message window. The rooms
+    // come from the chat handshake, which owns that query for the session — a
+    // second subscription here would be a second copy of the same rows.
     //
-    // The NotificationManager then HOLDS this handle for the application's
+    // The NotificationManager then HOLDS that handle for the application's
     // lifetime, which is the anti-pattern the accessor's doc warns about: the
     // handle is a borrow of the session's, and a host that swapped sessions
     // would leave this manager reading through a context the reader had left.
     // It is correct here and only here, because community signs in with a
     // full-page redirect and never swaps a session under a mounted tree. A
     // host that does swap must re-ask.
-    let rooms = chat.rooms().expect("the chat handshake could not open the rooms query");
+    //
+    // TWO WAYS TO GET NOTHING, and both cost the reader chimes rather than the
+    // page. `rooms()` answers `None` when the handshake could not open its
+    // query, which the boot gate rules out — a session that cannot read never
+    // reaches this component — and is kept as a degradation on the same terms
+    // as the header panels: the cost of being wrong about that must not be an
+    // app-wide panic. `NotificationManager::new` answers `None` when the
+    // browser refuses an `AudioContext`, which no gate rules out at all.
+    let notification_manager = chat
+        .rooms()
+        .and_then(|rooms| NotificationManager::new(rooms, current_user.get_untracked().map(|u| u.id().to_base64())));
 
     // Load the signed-in user (the server upserted it before minting our token;
     // the JWT `sub` is that User entity's id). A guest has no row to load and
@@ -489,17 +615,14 @@ pub fn ChatApp() -> impl IntoView {
         });
     }
 
-    // Notification sounds (self-contained: it holds its own room/message
-    // subscriptions; the Effect below keeps it alive for ChatApp's lifetime).
-    let notification_manager = NotificationManager::new(rooms.clone(), current_user.get_untracked().map(|u| u.id().to_base64()));
-
     // `current_user` is resolved asynchronously, so push the id into the
     // NotificationManager once it's available (otherwise it stays None and
-    // treats your own messages as coming from others → chimes on send).
-    Effect::new({
-        let notification_manager = notification_manager.clone();
-        move |_| notification_manager.set_current_user_id(current_user.get().map(|u| u.id().to_base64()))
-    });
+    // treats your own messages as coming from others → chimes on send). The
+    // manager is self-contained — it holds its own room/message subscriptions
+    // — and this Effect is also what keeps it alive for ChatApp's lifetime.
+    if let Some(notification_manager) = notification_manager {
+        Effect::new(move |_| notification_manager.set_current_user_id(current_user.get().map(|u| u.id().to_base64())));
+    }
 
     // Read cursors, the DM thread set, the members list and the reactions
     // query are all the chat handshake's now, built once per session and
@@ -507,7 +630,16 @@ pub fn ChatApp() -> impl IntoView {
     // same as it was without community holding any of them.
 
     view! {
-        <xray::XRayLauncher />
+        // X-ray is a member's tool. Not because an anonymous reader could see
+        // anything their own claims do not already permit — the inspector
+        // reads through the same session as everything else — but because what
+        // it reads is a message's EVENT HISTORY, which is the text an author
+        // edited away, and its inspect-by-id row invites poking at ids. Widening
+        // the audience for "I edited that to take something out" from members
+        // to anyone at all is a choice, and this is it being declined. Nothing
+        // else changes: `xray::attach` still installs the query-registry
+        // observer at boot, and with no launcher there is nothing to turn on.
+        {viewer.map(|_| view! { <xray::XRayLauncher /> })}
         <div class="container">
             // Banned-client self-lock: watches the viewer's own active bans and
             // replaces the UI with a lockout + delayed sign-out (see ban_lock.rs).
@@ -535,8 +667,11 @@ pub fn ChatApp() -> impl IntoView {
                 }
             </div>
             // The sign-in ceremony, raised by the components' auth demand or by
-            // the header's button. One mount for the whole app.
-            {sign_in.view()}
+            // the header's button. One mount for the whole app, and the variant
+            // that carries the flow's own failures: unlike the card, this host
+            // has no banner of its own, and a sign-in that cannot start is the
+            // one failure an anonymous reader must not meet in silence.
+            {sign_in.view_with_notice()}
             // The profile popover, opened from any message row's avatar or
             // author name. It positions itself from the coordinates the row
             // reported, so rendering it here rather than inside the row costs

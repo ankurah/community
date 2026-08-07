@@ -41,11 +41,22 @@ pub fn BanLock(viewer: EntityId) -> impl IntoView {
     // (the read scope pins non-moderators to their own rows anyway) — but a
     // *moderator* viewer sees every ban row, so without it a mod would lock
     // themselves out by banning someone else.
-    let bans = ctx()
-        .query::<BanView>(
-            queries::selection("user = ? AND active = true", [(&viewer).into()]).expect("static ban self-watch selection parses"),
-        )
-        .expect("failed to create BanView LiveQuery");
+    //
+    // A query that cannot be opened leaves the lock unarmed, and this renders
+    // nothing rather than taking the app down over it. That follows from the
+    // scope stated at the top of this file: the lock is UX, and the hard stop
+    // is the server's mint gate, which nothing in this browser affects.
+    // Costing a banned member their lockout screen is the small failure;
+    // costing every member the whole page is the large one.
+    let bans = match ctx().query::<BanView>(
+        queries::selection("user = ? AND active = true", [(&viewer).into()]).expect("static ban self-watch selection parses"),
+    ) {
+        Ok(bans) => bans,
+        Err(e) => {
+            tracing::error!("the ban self-watch could not open its query, so the client-side lock is off: {e:?}");
+            return ().into_any();
+        }
+    };
 
     // `None` while in good standing; `Some(reason)` once banned (first
     // non-empty reason across rows, or an empty string for a reasonless ban).
@@ -78,7 +89,7 @@ pub fn BanLock(viewer: EntityId) -> impl IntoView {
         }
     });
 
-    move || {
+    (move || {
         ban_reason.get().map(|reason| {
             let reason = reason.trim().to_string();
             view! {
@@ -106,5 +117,6 @@ pub fn BanLock(viewer: EntityId) -> impl IntoView {
                 </div>
             }
         })
-    }
+    })
+    .into_any()
 }

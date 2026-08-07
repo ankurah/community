@@ -37,11 +37,19 @@ pub fn NotificationBadge(viewer: EntityId) -> impl IntoView {
     // in both directions. The policy already scopes notification reads to the
     // recipient; the predicate restates it and the count re-checks per row,
     // belt-and-braces.
-    let unseen = ctx()
-        .query::<NotificationView>(
-            queries::selection("recipient = ? AND seen = false", [(&me).into()]).expect("static unseen-notifications selection parses"),
-        )
-        .expect("failed to create NotificationView LiveQuery");
+    //
+    // A refused query means no badge. The bell sits in the header, so this is
+    // the first thing a session that cannot read would reach — and a count
+    // nobody can compute is worth a missing badge, not a dead page.
+    let unseen = match ctx().query::<NotificationView>(
+        queries::selection("recipient = ? AND seen = false", [(&me).into()]).expect("static unseen-notifications selection parses"),
+    ) {
+        Ok(unseen) => unseen,
+        Err(e) => {
+            tracing::error!("the notification badge could not open its query: {e:?}");
+            return ().into_any();
+        }
+    };
 
     // App-lifetime query (the header lives for the whole session), named for
     // whatever observer the app attached — like `rooms (app)`. The guard is
@@ -49,7 +57,7 @@ pub fn NotificationBadge(viewer: EntityId) -> impl IntoView {
     let query_reg = crate::query_registry::register("notifications (bell)", &unseen);
     on_cleanup(move || drop(query_reg));
 
-    move || {
+    (move || {
         let count = unseen.get().iter().filter(|n| is_mine(n, me) && !n.seen().unwrap_or(true)).count();
         (count > 0).then(|| {
             let label = if count > 99 { "99+".to_string() } else { count.to_string() };
@@ -57,7 +65,8 @@ pub fn NotificationBadge(viewer: EntityId) -> impl IntoView {
             // badge is decoration to a screen reader, not the button's name.
             view! { <span class="notifBellBadge" aria-hidden="true">{label}</span> }
         })
-    }
+    })
+    .into_any()
 }
 
 /// The inbox surface: an anchored popover under the header bell on wide
@@ -98,17 +107,33 @@ pub fn NotificationInbox(
     // rows are never deleted (`seen` is the lifecycle), so the LIMIT is what
     // keeps a long-lived account's panel-open cost flat — 200 covers weeks of
     // mentions; anyone scrolling past that wants search, not more inbox.
-    let notifications = ctx()
-        .query::<NotificationView>(
+    let opened = (
+        ctx().query::<NotificationView>(
             queries::selection("recipient = ? ORDER BY created_at DESC LIMIT 200", [(&me).into()])
                 .expect("static notifications selection parses"),
-        )
-        .expect("failed to create NotificationView LiveQuery");
-
-    // The user's single preferences row (created on first change).
-    let prefs = ctx()
-        .query::<NotificationPrefView>(queries::selection("user = ?", [(&me).into()]).expect("static notificationpref selection parses"))
-        .expect("failed to create NotificationPrefView LiveQuery");
+        ),
+        // The user's single preferences row (created on first change).
+        ctx().query::<NotificationPrefView>(
+            queries::selection("user = ?", [(&me).into()]).expect("static notificationpref selection parses"),
+        ),
+    );
+    let (notifications, prefs) = match opened {
+        (Ok(notifications), Ok(prefs)) => (notifications, prefs),
+        (notifications, prefs) => {
+            let refusal =
+                notifications.err().map(|e| format!("{e:?}")).or_else(|| prefs.err().map(|e| format!("{e:?}"))).unwrap_or_default();
+            tracing::error!("the notification inbox could not open its own queries: {refusal}");
+            return view! {
+                <PanelUnavailable
+                    title="Notifications"
+                    note="Notifications are unavailable right now."
+                    content_class="popoverSurface notificationContent"
+                    on_close
+                />
+            }
+            .into_any();
+        }
+    };
 
     // Actor names via the users-map idiom (members panel / mod log), and room
     // names for the "in #room" fragment + the preferences mute list.
