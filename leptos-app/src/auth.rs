@@ -85,6 +85,9 @@ const LS_ID_TOKEN: &str = "community_id_token";
 /// The callback path our SPA fallback serves (also a registered redirect_uri).
 const CALLBACK_PATH: &str = "/auth/callback";
 
+/// Our own server's guest mint (`server/src/guest.rs`).
+const GUEST_MINT_PATH: &str = "/auth/guest";
+
 #[derive(Deserialize)]
 struct TokenResponse {
     id_token: String,
@@ -515,7 +518,40 @@ fn message_field(data: &JsValue, name: &str) -> Option<String> {
     js_sys::Reflect::get(data, &JsValue::from_str(name)).ok()?.as_string().filter(|value| !value.is_empty())
 }
 
-/// Persist the minted ankurah token across reloads.
+/// Ask our own server for a read-only session: `POST /auth/guest`, no body, no
+/// credential, no IdP round-trip. What comes back is an ankurah session token
+/// signed by the same key `/auth/session` uses, carrying `roles=["guest"]` and
+/// the literal `guest` as its subject.
+///
+/// NOTHING IS STORED. A guest token is minted per visit and left in memory
+/// where the rest of the boot can reach it; the reason is that a member token
+/// costs a ceremony to replace and this costs one unattended POST, so keeping
+/// one would buy nothing and leave a session behind in a browser that had
+/// closed the tab. A reload mints again, which is what the mint's budgets are
+/// sized for (ten per address per minute — see `server/src/guest.rs`).
+///
+/// ONE CALL, NO RETRY, and the reason is worth stating because a retry looks
+/// obviously right. Nothing presents this token at connect: ankurah's
+/// websocket handshake carries no credential at all, and every request signs
+/// itself with the claims of the context it runs through — so there is no
+/// connect-time refusal to recover from, and a token minted here has two hours
+/// before anything can reject it. What CAN reject it is a request made later,
+/// under a tab left open past that; recovering there means calling this again
+/// and setting the session pair the handshake reads (`ChatApp`), which is #86.
+/// This function is what #86 calls.
+pub async fn mint_guest_token() -> Result<String, String> {
+    let window = window().ok_or("no window")?;
+    let origin = window.location().origin().map_err(|_| "no origin")?;
+    let body = http_post(&format!("{origin}{GUEST_MINT_PATH}"), "", "application/json").await?;
+    // Keep serde's error and leave the body out: a 200 from either mint route
+    // carries a session token, and neither belongs in a message on screen.
+    let session: SessionResponse =
+        serde_json::from_str(&body).map_err(|e| format!("could not parse the guest session response: {e}"))?;
+    Ok(session.token)
+}
+
+/// Persist the minted ankurah token across reloads. Members only — a guest
+/// token is deliberately never written anywhere (see [`mint_guest_token`]).
 pub fn store_token(token: &str) {
     if let Some(ls) = local_storage() {
         let _ = ls.set_item(LS_TOKEN, token);

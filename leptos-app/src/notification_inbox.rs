@@ -22,13 +22,17 @@ use ankurah::{property::Json, EntityId, LiveQuery};
 use ankurah_signals::{Get as AnkurahGet, Peek};
 use community_model::{NotificationPref, NotificationPrefView, NotificationView, RoomView, UserView};
 
-use crate::{ctx, current_user_id, fmt, queries};
+use crate::{ctx, fmt, panels::PanelUnavailable, queries, viewer};
 
 /// Unseen-notification count for the header bell. Renders nothing at zero —
 /// the badge only exists when there is something to see.
+///
+/// `viewer` is whose count this is. The bell it sits in is a member's (the
+/// header does not offer one to a guest), and nothing is counted without one:
+/// notifications are addressed to a recipient, and a guest is nobody's.
 #[component]
-pub fn NotificationBadge() -> impl IntoView {
-    let me = current_user_id();
+pub fn NotificationBadge(viewer: EntityId) -> impl IntoView {
+    let me = viewer;
     // Rows leave this resultset as they are marked seen, so the count is live
     // in both directions. The policy already scopes notification reads to the
     // recipient; the predicate restates it and the count re-checks per row,
@@ -73,7 +77,22 @@ pub fn NotificationInbox(
     // satisfies it.
     on_close: impl Fn() + Clone + Send + Sync + 'static,
 ) -> impl IntoView {
-    let me = current_user_id();
+    // Whose inbox this is. An inbox needs a recipient, so a session with no
+    // viewer has none — and the `user` query below would be refused for one
+    // anyway (`user` is signed-in-only in policy.json). The header withholds
+    // the bell from a guest; degrading here is what keeps a mistake about that
+    // from being an app-wide panic.
+    let Some(me) = viewer() else {
+        return view! {
+            <PanelUnavailable
+                title="Notifications"
+                note="Sign in to be notified when someone mentions you."
+                content_class="popoverSurface notificationContent"
+                on_close
+            />
+        }
+        .into_any();
+    };
 
     // The user's inbox, newest-first. Self-scoped by policy. Notification
     // rows are never deleted (`seen` is the lifecycle), so the LIMIT is what
@@ -93,8 +112,22 @@ pub fn NotificationInbox(
 
     // Actor names via the users-map idiom (members panel / mod log), and room
     // names for the "in #room" fragment + the preferences mute list.
-    let users = ctx().query::<UserView>("true").expect("failed to create UserView LiveQuery");
-    let rooms = ctx().query::<RoomView>("true ORDER BY name ASC").expect("failed to create RoomView LiveQuery");
+    let (users, rooms) = match (ctx().query::<UserView>("true"), ctx().query::<RoomView>("true ORDER BY name ASC")) {
+        (Ok(users), Ok(rooms)) => (users, rooms),
+        (users, rooms) => {
+            let refusal = users.err().map(|e| format!("{e:?}")).or_else(|| rooms.err().map(|e| format!("{e:?}"))).unwrap_or_default();
+            tracing::error!("the notification inbox could not open its name queries: {refusal}");
+            return view! {
+                <PanelUnavailable
+                    title="Notifications"
+                    note="Notifications are unavailable right now."
+                    content_class="popoverSurface notificationContent"
+                    on_close
+                />
+            }
+            .into_any();
+        }
+    };
 
     // Name the panel's own collections for the app's query-registry observer
     // while the panel is open (transient registrations, dropped on close).
@@ -266,7 +299,7 @@ pub fn NotificationInbox(
                     </div>
                 </Show>
                 <Show when=move || show_prefs.get()>
-                    <NotificationPrefs rooms=rooms.clone() prefs=prefs.clone() />
+                    <NotificationPrefs viewer=me rooms=rooms.clone() prefs=prefs.clone() />
                 </Show>
 
                 <p class="membersNote">
@@ -281,6 +314,7 @@ pub fn NotificationInbox(
             </div>
         </div>
     }
+    .into_any()
 }
 
 /// Belt-and-braces recipient check (the policy already scopes the resultset).
@@ -444,8 +478,14 @@ enum PrefChange {
 /// `muted_rooms` is a JSON array of room id strings the server's fan-out
 /// worker reads.
 #[component]
-fn NotificationPrefs(rooms: LiveQuery<RoomView>, prefs: LiveQuery<NotificationPrefView>) -> impl IntoView {
-    let me = current_user_id();
+fn NotificationPrefs(
+    /// Whose preferences these are, handed down from the inbox that resolved
+    /// it — the row is keyed on the reader, and there is no reader without one.
+    viewer: EntityId,
+    rooms: LiveQuery<RoomView>,
+    prefs: LiveQuery<NotificationPrefView>,
+) -> impl IntoView {
+    let me = viewer;
 
     // The id of a row this client created, so a second change racing the
     // LiveQuery round-trip edits that row instead of creating a twin (the
@@ -489,6 +529,7 @@ fn NotificationPrefs(rooms: LiveQuery<RoomView>, prefs: LiveQuery<NotificationPr
                     prop:checked=mentions_only
                     on:change=move |ev| {
                         update_pref(
+                            me,
                             prefs_for_mentions.clone(),
                             created_for_mentions.clone(),
                             PrefChange::MentionsOnly(event_target_checked(&ev)),
@@ -533,6 +574,7 @@ fn NotificationPrefs(rooms: LiveQuery<RoomView>, prefs: LiveQuery<NotificationPr
                                     prop:checked=checked
                                     on:change=move |ev| {
                                         update_pref(
+                                            me,
                                             prefs.clone(),
                                             created_id.clone(),
                                             PrefChange::Mute(room_id.clone(), event_target_checked(&ev)),
@@ -556,14 +598,14 @@ fn NotificationPrefs(rooms: LiveQuery<RoomView>, prefs: LiveQuery<NotificationPr
 /// single-threaded (tasks interleave only at awaits), so the queue + pump
 /// flag below serialize without locks; the pump applies one change at a time
 /// and each application peeks state AFTER its predecessor committed.
-fn update_pref(prefs: LiveQuery<NotificationPrefView>, created_id: Arc<Mutex<Option<EntityId>>>, change: PrefChange) {
+fn update_pref(me: EntityId, prefs: LiveQuery<NotificationPrefView>, created_id: Arc<Mutex<Option<EntityId>>>, change: PrefChange) {
     PREF_QUEUE.with(|q| q.borrow_mut().push_back(change));
     if PREF_PUMP_RUNNING.with(|r| r.replace(true)) {
         return; // a pump is already draining; it will pick this change up
     }
     wasm_bindgen_futures::spawn_local(async move {
         while let Some(change) = PREF_QUEUE.with(|q| q.borrow_mut().pop_front()) {
-            if let Err(e) = apply_pref_change(&prefs, &created_id, change).await {
+            if let Err(e) = apply_pref_change(me, &prefs, &created_id, change).await {
                 tracing::error!("Failed to update notification preferences: {}", e);
             }
         }
@@ -584,11 +626,11 @@ thread_local! {
 /// then a row this client created that the LiveQuery hasn't delivered yet;
 /// only creates when neither exists.
 async fn apply_pref_change(
+    me: EntityId,
     prefs: &LiveQuery<NotificationPrefView>,
     created_id: &Arc<Mutex<Option<EntityId>>>,
     change: PrefChange,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let me = current_user_id();
     let existing =
         prefs.peek().into_iter().filter(|p| p.user().map(|u| u.id() == me).unwrap_or(false)).min_by_key(|p| p.id().to_base64());
     let existing = match existing {

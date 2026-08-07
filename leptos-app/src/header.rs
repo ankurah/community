@@ -10,7 +10,7 @@ use crate::{
     ctx, editable_text_field::EditableTextField, fmt, members_panel::MembersPanel, mod_log_panel::ModLogPanel,
     notification_inbox::{NotificationBadge, NotificationInbox},
     panels::{panels, Surface},
-    qr_code_modal::QRCodeModal, room_topic::RoomTopic, user_detail_panel::UserDetailPanel, ws_client,
+    qr_code_modal::QRCodeModal, room_topic::RoomTopic, sign_in_ceremony::SignInFlow, user_detail_panel::UserDetailPanel, ws_client,
 };
 
 /// Header component displaying app title, the current room's topic, user
@@ -18,6 +18,13 @@ use crate::{
 /// code / sign-out buttons. Also hosts the exclusive surfaces those buttons
 /// open — one at a time, via the panel manager (#58) — and the app-wide
 /// Escape that closes the open one.
+///
+/// Half of that is a member's. An anonymous reader has no name to edit, no
+/// inbox, no roster and no moderation log to open, and no account at idp.to
+/// to manage or sign out of — so those affordances are absent rather than
+/// present-and-refusing, and the one thing that takes their place is a button
+/// that starts a sign-in. The room topic, the connection light, x-ray and the
+/// QR code stay: they are about the page, not about who is reading it.
 #[component]
 pub fn Header(
     current_user: RwSignal<Option<UserView>>,
@@ -25,6 +32,12 @@ pub fn Header(
     /// The open DM thread, threaded through to the notification inbox so a
     /// kind="dm" row can deep-link into the conversation it announces.
     selected_dm: RwSignal<Option<EntityId>>,
+    /// Who is reading, `None` for a guest — the gate on every member-only
+    /// affordance below.
+    viewer: Option<EntityId>,
+    /// The app's sign-in flow, shared with the chat components' auth demand,
+    /// so the button here and a press on the message box raise one ceremony.
+    sign_in: SignInFlow,
 ) -> impl IntoView {
     // Escape closes the open surface — one window-level listener for every
     // surface, instead of a per-panel handler. Layering: nested dismissables
@@ -114,101 +127,109 @@ pub fn Header(
                             if status.is_empty() { "Disconnected".to_string() } else { status }
                         }}
                     </div>
-                    <div class="userInfo">
-                        <div class=avatar_class aria-hidden="true">{avatar_initials}</div>
-                        <Show
-                            when=move || current_user.get().is_some()
-                            fallback=|| view! { <span class="userName">"Loading..."</span> }
+                    {viewer.map(|_| view! {
+                        <div class="userInfo">
+                            <div class=avatar_class aria-hidden="true">{avatar_initials}</div>
+                            <Show
+                                when=move || current_user.get().is_some()
+                                fallback=|| view! { <span class="userName">"Loading..."</span> }
+                            >
+                                {move || {
+                                    current_user.get().map(|user| {
+                                        let user_for_value = user.clone();
+                                        let user_for_change = user.clone();
+                                        view! {
+                                            <EditableTextField
+                                                value=Signal::derive(move || user_for_value.display_name().unwrap_or_default())
+                                                on_change=move |new_name: String| {
+                                                    let user = user_for_change.clone();
+                                                    wasm_bindgen_futures::spawn_local(async move {
+                                                        let result = async {
+                                                            let trx = ctx().begin();
+                                                            let _ = user.edit(&trx)?.display_name().replace(&new_name);
+                                                            trx.commit().await?;
+                                                            Ok::<_, Box<dyn std::error::Error>>(())
+                                                        }
+                                                        .await;
+                                                        if let Err(e) = result {
+                                                            tracing::error!("Failed to update display_name: {}", e);
+                                                        }
+                                                    });
+                                                }
+                                                class="userName".to_string()
+                                            />
+                                        }
+                                    })
+                                }}
+                            </Show>
+                        </div>
+                    })}
+                    {viewer.map(|_| view! {
+                        <button
+                            class="membersButton"
+                            on:click=move |_| panels().toggle(Surface::Members)
+                            title="Members"
+                            aria-pressed=move || panels().is_open(&Surface::Members).to_string()
                         >
-                            {move || {
-                                current_user.get().map(|user| {
-                                    let user_for_value = user.clone();
-                                    let user_for_change = user.clone();
-                                    view! {
-                                        <EditableTextField
-                                            value=Signal::derive(move || user_for_value.display_name().unwrap_or_default())
-                                            on_change=move |new_name: String| {
-                                                let user = user_for_change.clone();
-                                                wasm_bindgen_futures::spawn_local(async move {
-                                                    let result = async {
-                                                        let trx = ctx().begin();
-                                                        let _ = user.edit(&trx)?.display_name().replace(&new_name);
-                                                        trx.commit().await?;
-                                                        Ok::<_, Box<dyn std::error::Error>>(())
-                                                    }
-                                                    .await;
-                                                    if let Err(e) = result {
-                                                        tracing::error!("Failed to update display_name: {}", e);
-                                                    }
-                                                });
-                                            }
-                                            class="userName".to_string()
-                                        />
-                                    }
-                                })
-                            }}
-                        </Show>
-                    </div>
-                    <button
-                        class="membersButton"
-                        on:click=move |_| panels().toggle(Surface::Members)
-                        title="Members"
-                        aria-pressed=move || panels().is_open(&Surface::Members).to_string()
-                    >
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-                            stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                            <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
-                            <circle cx="9" cy="7" r="4" />
-                            <path d="M23 21v-2a4 4 0 0 0-3-3.87" />
-                            <path d="M16 3.13a4 4 0 0 1 0 7.75" />
-                        </svg>
-                    </button>
-                    <button
-                        class="modLogButton"
-                        on:click=move |_| panels().toggle(Surface::ModLog)
-                        title="Moderation log"
-                        aria-pressed=move || panels().is_open(&Surface::ModLog).to_string()
-                    >
-                        // Gavel — the public record of moderator actions.
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-                            stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                            <path d="m14 13-8.5 8.5a2.12 2.12 0 1 1-3-3L11 10" />
-                            <path d="m16 16 6-6" />
-                            <path d="m8 8 6-6" />
-                            <path d="m9 7 8 8" />
-                            <path d="m21 11-8-8" />
-                        </svg>
-                    </button>
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                                stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
+                                <circle cx="9" cy="7" r="4" />
+                                <path d="M23 21v-2a4 4 0 0 0-3-3.87" />
+                                <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+                            </svg>
+                        </button>
+                    })}
+                    {viewer.map(|_| view! {
+                        <button
+                            class="modLogButton"
+                            on:click=move |_| panels().toggle(Surface::ModLog)
+                            title="Moderation log"
+                            aria-pressed=move || panels().is_open(&Surface::ModLog).to_string()
+                        >
+                            // Gavel — the public record of moderator actions.
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                                stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                <path d="m14 13-8.5 8.5a2.12 2.12 0 1 1-3-3L11 10" />
+                                <path d="m16 16 6-6" />
+                                <path d="m8 8 6-6" />
+                                <path d="m9 7 8 8" />
+                                <path d="m21 11-8-8" />
+                            </svg>
+                        </button>
+                    })}
                     // The bell and its inbox popover share this anchor (#55):
                     // .popoverSurface hangs from the wrapper on wide viewports
                     // with pure CSS — no rect math — so the inbox mounts HERE,
                     // not in the surface match below, and the outside-mousedown
                     // dismiss above checks containment against the wrapper.
-                    <div class="headerPopoverAnchor" node_ref=bell_anchor>
-                        <button
-                            class="notificationButton"
-                            on:click=move |_| panels().toggle(Surface::Inbox)
-                            title="Notifications"
-                            aria-pressed=move || panels().is_open(&Surface::Inbox).to_string()
-                            // Without this, a nonzero badge becomes the button's
-                            // accessible name ("3, button") — the SVG is
-                            // aria-hidden and name-from-content falls to the badge.
-                            aria-label="Notifications"
-                        >
-                            // Bell — your inbox of mentions, with an unseen-count badge.
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-                                stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                                <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" />
-                                <path d="M13.73 21a2 2 0 0 1-3.46 0" />
-                            </svg>
-                            <NotificationBadge />
-                        </button>
-                        {move || {
-                            (panels().current() == Some(Surface::Inbox)).then(|| {
-                                view! { <NotificationInbox selected_room selected_dm on_close=move || panels().close() /> }
-                            })
-                        }}
-                    </div>
+                    {viewer.map(|me| view! {
+                        <div class="headerPopoverAnchor" node_ref=bell_anchor>
+                            <button
+                                class="notificationButton"
+                                on:click=move |_| panels().toggle(Surface::Inbox)
+                                title="Notifications"
+                                aria-pressed=move || panels().is_open(&Surface::Inbox).to_string()
+                                // Without this, a nonzero badge becomes the button's
+                                // accessible name ("3, button") — the SVG is
+                                // aria-hidden and name-from-content falls to the badge.
+                                aria-label="Notifications"
+                            >
+                                // Bell — your inbox of mentions, with an unseen-count badge.
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                                    stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                    <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" />
+                                    <path d="M13.73 21a2 2 0 0 1-3.46 0" />
+                                </svg>
+                                <NotificationBadge viewer=me />
+                            </button>
+                            {move || {
+                                (panels().current() == Some(Surface::Inbox)).then(|| {
+                                    view! { <NotificationInbox selected_room selected_dm on_close=move || panels().close() /> }
+                                })
+                            }}
+                        </div>
+                    })}
                     <button
                         class="xrayButton"
                         on:click=move |_| crate::xray::state().toggle()
@@ -242,26 +263,47 @@ pub fn Header(
                             <path d="M18.5 18.5v.01" />
                         </svg>
                     </button>
-                    <a
-                        class="accountSettingsButton"
-                        href=crate::auth::ACCOUNT_CENTER_URL
-                        title="Account settings"
-                        aria-label="Account settings"
-                    >
-                        // Gear — manage name, passkeys, and recovery at idp.to.
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-                            stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                            <circle cx="12" cy="12" r="3" />
-                            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
-                        </svg>
-                    </a>
-                    <button
-                        class="signOutButton"
-                        on:click=move |_| crate::auth::sign_out()
-                        title="Sign out"
-                    >
-                        "Sign out"
-                    </button>
+                    {viewer.map(|_| view! {
+                        <a
+                            class="accountSettingsButton"
+                            href=crate::auth::ACCOUNT_CENTER_URL
+                            title="Account settings"
+                            aria-label="Account settings"
+                        >
+                            // Gear — manage name, passkeys, and recovery at idp.to.
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                                stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                <circle cx="12" cy="12" r="3" />
+                                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+                            </svg>
+                        </a>
+                    })}
+                    // Sign out for a member; the way in for everyone else. An
+                    // anonymous reader who would rather ask than discover the
+                    // demand by pressing on the message box asks here, and gets
+                    // the same ceremony either way.
+                    {match viewer {
+                        Some(_) => view! {
+                            <button
+                                class="signOutButton"
+                                on:click=move |_| crate::auth::sign_out()
+                                title="Sign out"
+                            >
+                                "Sign out"
+                            </button>
+                        }
+                        .into_any(),
+                        None => view! {
+                            <button
+                                class="signOutButton"
+                                on:click=move |_| sign_in.begin()
+                                title="Sign in with idp.to"
+                            >
+                                "Sign in"
+                            </button>
+                        }
+                        .into_any(),
+                    }}
                 </div>
             </div>
             // The one open surface (#58). Components mount fresh per open —

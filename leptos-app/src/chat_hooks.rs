@@ -123,6 +123,12 @@ fn moderator_delete(message: MessageView, close: Box<dyn Fn()>) {
 
     wasm_bindgen_futures::spawn_local(async move {
         match (|| async {
+            // A removal has to name who made it. `actor: None` is not a
+            // fallback — the log renders it as "Automatic", which is the DM
+            // rate limiter's row, not a moderator's — so a caller with no
+            // viewer is refused here rather than mislabelled. Unreachable in
+            // practice (the menu entry is a moderator's), and cheap to state.
+            let actor = crate::viewer().ok_or("no signed-in moderator to attribute this removal to")?;
             let trx = crate::ctx().begin();
             let mutable = message.edit(&trx)?;
             mutable.deleted().set(&true)?;
@@ -130,7 +136,7 @@ fn moderator_delete(message: MessageView, close: Box<dyn Fn()>) {
             // — the tombstone row survives, the content does not.
             mutable.text().replace("")?;
             trx.create(&ModAction {
-                actor: Some(crate::current_user_id().into()),
+                actor: Some(actor.into()),
                 message: Some(ankurah::Ref::from(&message)),
                 user: None,
                 action: "delete".to_string(),

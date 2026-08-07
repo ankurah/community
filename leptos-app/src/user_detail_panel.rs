@@ -110,7 +110,7 @@ pub fn UserDetailPanel(
     // UI gating only — the server enforces the ban write policy regardless.
     // No self-ban affordance (locking yourself out is a mistake, not
     // moderation), and no actions on yourself at all.
-    let show_mod_actions = crate::can_moderate() && user_id != crate::current_user_id();
+    let show_mod_actions = crate::can_moderate() && crate::viewer() != Some(user_id);
 
     // Start-DM entry point (#30). Offered for every member except yourself: a
     // self-thread has no other participant to show or notify, and the
@@ -125,7 +125,10 @@ pub fn UserDetailPanel(
     // rows — moderators see them all, members at most their own — so it hides
     // the button exactly where the badge appears, and never pretends to be
     // enforcement.
-    let can_message = user_id != crate::current_user_id();
+    // A guest is offered no conversation at all: a thread has two members and
+    // a guest is neither of them, so `viewer()` answering `None` closes this
+    // the same way it closes the DM section in the rail.
+    let can_message = matches!(crate::viewer(), Some(me) if me != user_id);
     let message_user_id = user_id;
 
     let user_id_b64 = user_id.to_base64();
@@ -367,6 +370,10 @@ fn ban_member(user_id: String, user_name: String) {
 
     wasm_bindgen_futures::spawn_local(async move {
         match (|| async {
+            // As at the message-removal call site: a log row with no actor
+            // reads as "Automatic", so a caller with no viewer is refused
+            // rather than recorded as the rate limiter.
+            let actor = crate::viewer().ok_or("no signed-in moderator to attribute this ban to")?;
             let user_eid = EntityId::from_base64(&user_id)?;
             let now = js_sys::Date::now() as i64;
             let trx = ctx().begin();
@@ -379,7 +386,7 @@ fn ban_member(user_id: String, user_name: String) {
             .await?;
             // The lights-on log row (#10): user-targeted, so no message ref.
             trx.create(&ModAction {
-                actor: Some(crate::current_user_id().into()),
+                actor: Some(actor.into()),
                 message: None,
                 user: Some(user_eid.into()),
                 action: "ban".to_string(),
@@ -406,13 +413,14 @@ fn ban_member(user_id: String, user_name: String) {
 fn unban_member(user_id: String, rows: Vec<BanView>) {
     wasm_bindgen_futures::spawn_local(async move {
         match (|| async {
+            let actor = crate::viewer().ok_or("no signed-in moderator to attribute this unban to")?;
             let user_eid = EntityId::from_base64(&user_id)?;
             let trx = ctx().begin();
             for row in &rows {
                 row.edit(&trx)?.active().set(&false)?;
             }
             trx.create(&ModAction {
-                actor: Some(crate::current_user_id().into()),
+                actor: Some(actor.into()),
                 message: None,
                 user: Some(user_eid.into()),
                 action: "unban".to_string(),

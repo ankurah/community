@@ -76,21 +76,47 @@ pub fn ws_client() -> WebsocketClient {
     (**CLIENT.get().expect("Client not initialized")).clone()
 }
 
-/// The signed-in user's entity id (the JWT `sub`). Only call from within the
-/// signed-in UI subtree (`ChatApp`), where the token is guaranteed present.
-pub fn current_user_id() -> EntityId {
-    let token = AUTH_TOKEN.read().expect("auth token lock poisoned").clone().expect("not authenticated");
-    let claims = parse_claims_unverified(&token).expect("stored token is a valid JWT");
-    EntityId::from_base64(&claims.sub).expect("JWT sub is a valid entity id")
+/// The subject every guest token carries, as the server writes it
+/// (`server/src/guest.rs`, `GUEST_SUB`). A literal, never an entity id: a
+/// guest names no `User` row, so nothing keyed on identity can fire for one.
+const GUEST_SUB: &str = "guest";
+
+/// Who is reading, as the session token says: the `User` entity id a member's
+/// token names, or `None` for a guest.
+///
+/// FOR: everything downstream that has to know whether there is somebody to
+/// attribute a read or a write to — the pair handed to the chat handshake, the
+/// mount gates on the member-only surfaces, the author of a moderation record.
+/// It answers `None` rather than panicking because every one of those callers
+/// is a rendering path or a gate, where "nobody is signed in" is both a real
+/// answer and the safe one.
+///
+/// Three ways to get `None`, and only the last is a fault: no session at all,
+/// a guest session, or a token whose subject is neither the guest literal nor
+/// a parseable id. The third is logged and read as anonymous — the alternative
+/// was `.expect`, which took the whole app down with it.
+pub fn viewer() -> Option<EntityId> {
+    let guard = AUTH_TOKEN.read().ok()?;
+    let token = guard.as_deref()?;
+    let claims = parse_claims_unverified(token).ok()?;
+    if claims.sub == GUEST_SUB {
+        return None;
+    }
+    match EntityId::from_base64(&claims.sub) {
+        Ok(id) => Some(id),
+        Err(e) => {
+            tracing::error!("the session token's subject is neither the guest literal nor an entity id: {e}");
+            None
+        }
+    }
 }
 
-/// The signed-in user's roles, as carried by the stored session token. Roles
-/// are managed by the IdP and arrive as lowercase stable keys ("member",
-/// "moderator", "admin"). UI gating only — the server enforces the real
-/// policy at token mint and on every read/write. Unlike `current_user_id`,
-/// this must never panic: it is called from rendering paths where a missing
-/// or unreadable token should simply mean "no privileges", so any failure
-/// yields an empty Vec.
+/// The reader's roles, as carried by the session token. Roles are managed by
+/// the IdP and arrive as lowercase stable keys ("member", "moderator",
+/// "admin"); a guest session carries the single key "guest", which the server
+/// mints and `policy.json` grants the anonymous `view` tier. UI gating only —
+/// the server enforces the real policy at token mint and on every read/write.
+/// Any failure yields an empty Vec, which reads as "no privileges".
 pub fn current_user_roles() -> Vec<String> {
     let Ok(guard) = AUTH_TOKEN.read() else { return Vec::new() };
     let Some(token) = guard.as_deref() else { return Vec::new() };
@@ -140,8 +166,36 @@ async fn initialize() {
         *AUTH_TOKEN.write().unwrap() = Some(token);
     }
 
-    // Only build/connect the node when signed in. Sign-in is a full-page
-    // redirect, so an anonymous connection would just be discarded on click.
+    // Nobody signed in: the visitor reads as a guest. Our own server mints
+    // that session — `POST /auth/guest`, no IdP round-trip and no account —
+    // and `policy.json`'s `view` tier is what it opens: rooms, messages,
+    // reactions and link previews, read-only, with no roster and no author
+    // names (see `docs/auth.md`). This is what replaced the sign-in card as
+    // the default landing: the card is now what a visitor sees only when they
+    // cannot have a session at all.
+    //
+    // A FAILED sign-in is the one thing that keeps the card. The visitor asked
+    // to become a member and something went wrong; dropping them into a
+    // read-only session instead would answer a question they did not ask, and
+    // would carry the reason off the screen with it.
+    let sign_in_failed = AUTH_ERROR.read().map(|error| error.is_some()).unwrap_or(false);
+    if AUTH_TOKEN.read().unwrap().is_none() && !sign_in_failed {
+        match auth::mint_guest_token().await {
+            Ok(token) => *AUTH_TOKEN.write().unwrap() = Some(token),
+            Err(e) => {
+                // The card gets a sentence and the log gets the detail. A
+                // refused mint answers with a status and a reason an operator
+                // wants, and a fetch failure with a browser string — neither
+                // is worth putting in front of a visitor.
+                tracing::warn!("could not mint a guest session: {e}");
+                *AUTH_ERROR.write().unwrap() =
+                    Some("Could not start a read-only session — sign in, or reload in a moment.".to_string());
+            }
+        }
+    }
+
+    // Connect only with a session in hand. Without one there is nothing to
+    // present on a request and nothing to read, so the card stands alone.
     if AUTH_TOKEN.read().unwrap().is_some() {
         connect_node().await;
     }
@@ -221,84 +275,35 @@ async fn sleep_ms(ms: i32) {
     let _ = JsFuture::from(promise).await;
 }
 
-/// Top-level gate: the chat UI requires a signed-in session. Both sign-in and
-/// sign-out are full-page transitions, so this is resolved once at mount.
+/// Top-level gate: chat with a session, the card without one. A session is
+/// now the ordinary case either way — a visitor who has not signed in gets a
+/// guest one at boot — so the card is what a visitor sees when the mint was
+/// refused, or when a sign-in they asked for failed and the reason is still
+/// worth reading. Sign-in and sign-out are both full-page transitions, so this
+/// is resolved once at mount.
 #[component]
 pub fn App() -> impl IntoView {
-    let signed_in = AUTH_TOKEN.read().map(|t| t.is_some()).unwrap_or(false);
-    if signed_in {
+    let has_session = AUTH_TOKEN.read().map(|t| t.is_some()).unwrap_or(false);
+    if has_session {
         view! { <ChatApp /> }.into_any()
     } else {
         view! { <SignIn /> }.into_any()
     }
 }
 
-/// The signed-out landing view.
+/// The sessionless landing view: no guest token to read with, and no member
+/// token either.
 #[component]
 pub fn SignIn() -> impl IntoView {
-    // Sign-in failures used to reach only the console; render them where the
-    // user actually is. Seeded from the callback's failure (set before mount),
-    // and written again if the click itself cannot get off the ground.
-    let auth_error = RwSignal::new(AUTH_ERROR.read().ok().and_then(|guard| guard.clone()));
-
-    // The live framed attempt, if the visitor is in the middle of one.
-    let ceremony = RwSignal::new(None::<auth::FramedAttempt>);
-
-    let top_level = move || {
-        if let Err(e) = auth::start_sign_in() {
-            tracing::error!("failed to start sign-in: {:?}", e);
-            auth_error.set(Some(format!("could not start sign-in: {e:?}")));
-        }
-    };
-    let start = move |_| {
-        // The overlay covers this button for the mouse but not for the
-        // keyboard. A second Enter would restash fresh PKCE material and reload
-        // the frame under a credential prompt already in progress, so while a
-        // ceremony is up this button does nothing.
-        if ceremony.get_untracked().is_some() {
-            return;
-        }
-        // A new attempt starts without the last one's failure over it.
-        auth_error.set(None);
-        match auth::begin_framed_sign_in() {
-            // idp.to frames for this origin: run the ceremony without leaving the page.
-            Ok(Some(attempt)) => ceremony.set(Some(attempt)),
-            // It does not, so a frame would be refused and would say nothing
-            // about it. Hand over the whole tab, which always works.
-            Ok(None) => top_level(),
-            // Setting up the attempt failed (no sessionStorage, say). The
-            // top-level flow needs the same things, so let it fail where the
-            // user can see it.
-            Err(e) => {
-                tracing::error!("failed to set up framed sign-in: {:?}", e);
-                top_level();
-            }
-        }
-    };
-
-    // Closing takes the frame down with the modal and abandons the stashed
-    // attempt, so the next click starts clean. A reason handed back moves to
-    // the card's banner — the modal that was showing it is about to go, and the
-    // visitor still needs to read it.
-    let close_ceremony = move |reason: Option<String>| {
-        auth::cancel_pending_sign_in();
-        if reason.is_some() {
-            auth_error.set(reason);
-        }
-        ceremony.set(None);
-    };
-
-    // Signing in mid-visit: store the token and let the app boot the way it
-    // boots on every other load with a session in hand — `initialize` picks it
-    // up from `stored_token`, connects the node, waits for policy, and mounts
-    // `ChatApp`. Deliberately NOT a swap under the mounted tree: there is one
-    // path into the signed-in UI, and this is it.
-    let signed_in = move |token: String| {
-        auth::store_token(&token);
-        if let Some(w) = window() {
-            let _ = w.location().set_href("/");
-        }
-    };
+    let flow = sign_in_ceremony::SignInFlow::new();
+    // Failures used to reach only the console; render them where the visitor
+    // actually is. Seeded from the callback's failure or a refused guest mint
+    // (both set before mount), and written again if the click itself cannot
+    // get off the ground.
+    let auth_error = flow.error();
+    // The overlay covers this button for the mouse but not for the keyboard,
+    // and `begin` is what swallows the second Enter.
+    let start = move |_| flow.begin();
     view! {
         <div class="signIn">
             <div class="signInGlow signInGlowA" aria-hidden="true"></div>
@@ -356,21 +361,25 @@ pub fn SignIn() -> impl IntoView {
                 </button>
                 <p class="signInFootnote">"Authentication by idp.to — local-first chat, built in Rust + wasm."</p>
             </div>
-            {move || ceremony.get().map(|attempt| view! {
-                <sign_in_ceremony::SignInCeremony
-                    attempt=attempt
-                    on_close=close_ceremony
-                    on_signed_in=signed_in
-                />
-            })}
+            {flow.view()}
         </div>
     }
 }
 
-/// The authenticated chat application (was `App`). Only mounted when signed in,
-/// so `ctx()` is always valid here.
+/// The chat application. Mounted with a session of either kind, so `ctx()` is
+/// always valid here — but `viewer` may be `None`, and everything that needs
+/// somebody to attribute a read or a write to is gated on it.
 #[component]
 pub fn ChatApp() -> impl IntoView {
+    // Who is reading, resolved once: the session is fixed for as long as this
+    // document lives (signing in reloads). `None` is a guest.
+    let viewer = viewer();
+
+    // The way into a sign-in from inside the app. An anonymous reader who
+    // reaches for the message box or any write raises the chat components'
+    // auth demand, and this is what answers it; the header offers the same
+    // flow as a plain button for a reader who would rather ask first.
+    let sign_in = sign_in_ceremony::SignInFlow::new();
     // Where the profile popover opens, when a message row's avatar or author
     // name is clicked. Owned here rather than by the row: the popover is
     // community's chrome (it reads the `userroles` cache, which is community's
@@ -420,25 +429,30 @@ pub fn ChatApp() -> impl IntoView {
     // The handshake the chat components read everything host-shaped through.
     //
     // The session is the host's to own and the host's alone to write, so it is
-    // a signal here. Community is always signed in by the time this mounts
-    // (`App` gates on it), so the pair is known already and nothing sets this
-    // signal today: signing in mid-visit is a real path in the components, but
-    // not one community takes — it signs in with a full-page redirect.
+    // a signal here. Both halves are known by the time this mounts — the
+    // context from the token `initialize` resolved, the viewer from that
+    // token's subject — and nothing sets this signal today: signing in
+    // mid-visit is a real path in the components, but not one community takes.
+    // It reloads, and boots as the member on the way back.
     //
-    // A WRITEABLE SIGNAL ANYWAY, deliberately. `ChatContext::new` takes the
-    // bare pair too and wraps it in a signal that never moves, which is the
-    // honest shape for a session that is fixed for good. This one is an
-    // `RwSignal` because the seam it holds open is where community is heading:
-    // signing out and back in as somebody else without a full-page redirect is
-    // one `session.set((new_context, Some(new_user)))` here and nothing else.
-    // Set the pair as one value when that lands — the components guarantee
-    // what a single read sees, so halves moved separately arrive as two
-    // sessions.
-    let session = RwSignal::new((ctx(), Some(current_user_id())));
+    // A WRITEABLE SIGNAL ANYWAY, deliberately, and now with a second claimant.
+    // `ChatContext::new` takes the bare pair too and wraps it in a signal that
+    // never moves, which is the honest shape for a session that is fixed for
+    // good. This one is an `RwSignal` because of what it holds open: a guest
+    // token expires under a tab left open for two hours, and recovering means
+    // minting a fresh one and setting this pair — `session.set((ctx(),
+    // viewer))` here and nothing else (the expiry work is #86). Set the pair
+    // as one value when that lands: the components guarantee what a single
+    // read sees, so halves moved separately arrive as two sessions.
+    let session = RwSignal::new((ctx(), viewer));
     let chat = ChatContext::new(session)
         .online(|| ws_client().connection_state().get().to_string() == "Connected")
         .moderator(can_moderate)
-        .on_auth_demand(|| tracing::warn!("a chat write was attempted while signed out"))
+        // What an anonymous reader meets. The components refuse the caret and
+        // raise this when somebody with no viewer presses on the composer, and
+        // raise it again on every write they attempt; `begin` is idempotent, so
+        // a raise while the ceremony is already up is a no-op.
+        .on_auth_demand(move || sign_in.begin())
         .hooks(chat_hooks::chat_hooks(previews_by_url, profile))
         .provide();
 
@@ -457,18 +471,23 @@ pub fn ChatApp() -> impl IntoView {
     let rooms = chat.rooms().expect("the chat handshake could not open the rooms query");
 
     // Load the signed-in user (the server upserted it before minting our token;
-    // the JWT `sub` is that User entity's id).
-    Effect::new({
-        let current_user = current_user.clone();
-        move |_| {
-            spawn_local(async move {
-                match load_current_user().await {
-                    Ok(user) => current_user.set(Some(user)),
-                    Err(e) => tracing::error!("Failed to load current user: {}", e),
-                }
-            });
-        }
-    });
+    // the JWT `sub` is that User entity's id). A guest has no row to load and
+    // could not read it if they had — `user` is signed-in-only in policy.json
+    // — so this only runs for a member, and `current_user` simply stays `None`
+    // for everybody else.
+    if let Some(me) = viewer {
+        Effect::new({
+            let current_user = current_user.clone();
+            move |_| {
+                spawn_local(async move {
+                    match load_current_user(me).await {
+                        Ok(user) => current_user.set(Some(user)),
+                        Err(e) => tracing::error!("Failed to load current user: {}", e),
+                    }
+                });
+            }
+        });
+    }
 
     // Notification sounds (self-contained: it holds its own room/message
     // subscriptions; the Effect below keeps it alive for ChatApp's lifetime).
@@ -492,13 +511,19 @@ pub fn ChatApp() -> impl IntoView {
         <div class="container">
             // Banned-client self-lock: watches the viewer's own active bans and
             // replaces the UI with a lockout + delayed sign-out (see ban_lock.rs).
-            <ban_lock::BanLock />
-            <Header current_user selected_room selected_dm />
+            // A guest has no rows to watch and nothing to be banned from —
+            // anonymous identity is free, so the ban table is a member tool.
+            {viewer.map(|me| view! { <ban_lock::BanLock viewer=me /> })}
+            <Header current_user selected_room selected_dm viewer sign_in />
 
             <div class="mainContent">
-                <Sidebar selected_room selected_dm />
+                <Sidebar selected_room selected_dm viewer />
                 // One timeline at a time. Switching rebuilds the pane's
                 // ScrollManager, which is what a room switch already does.
+                // Nothing can open a conversation without a viewer — the one
+                // affordance that sets this signal is a member's — so the DM
+                // branch is a member's too, by way of the signal rather than a
+                // second gate here.
                 {
                     move || {
                         if selected_dm.get().is_some() {
@@ -509,6 +534,9 @@ pub fn ChatApp() -> impl IntoView {
                     }
                 }
             </div>
+            // The sign-in ceremony, raised by the components' auth demand or by
+            // the header's button. One mount for the whole app.
+            {sign_in.view()}
             // The profile popover, opened from any message row's avatar or
             // author name. It positions itself from the coordinates the row
             // reported, so rendering it here rather than inside the row costs
@@ -539,11 +567,9 @@ pub fn ChatApp() -> impl IntoView {
     }
 }
 
-/// Resolve the signed-in `User` from the session token's `sub` (its entity id).
-async fn load_current_user() -> Result<UserView, Box<dyn std::error::Error>> {
-    let token = AUTH_TOKEN.read().unwrap().clone().ok_or("not authenticated")?;
-    let claims = parse_claims_unverified(&token)?;
-    let user_id = EntityId::from_base64(&claims.sub)?;
+/// Resolve the signed-in member's own `User` row. Called only with a viewer in
+/// hand — a guest reaching the `user` collection is refused at the gate.
+async fn load_current_user(user_id: EntityId) -> Result<UserView, Box<dyn std::error::Error>> {
     let user = ctx().get::<UserView>(user_id).await?;
     Ok(user)
 }
