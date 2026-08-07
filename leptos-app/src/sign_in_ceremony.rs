@@ -36,6 +36,153 @@ use web_sys::{window, MessageEvent};
 
 use crate::auth::{self, FramedAttempt, FramedMessage};
 
+/// The app's one way into a sign-in, shared by the two places that offer one:
+/// the card a visitor lands on when they cannot have a session at all, and an
+/// anonymous reader reaching for something only a member can do.
+///
+/// FOR: those two places must behave identically. Both try the framed
+/// ceremony, both hand the tab to idp.to where a frame would be refused, and
+/// both finish the same way. Written once, they cannot drift — and the
+/// idempotence the chat components require of the reader-facing one is a
+/// property of this type rather than of each call site.
+#[derive(Clone, Copy)]
+pub struct SignInFlow {
+    /// The live framed attempt, while one is on screen.
+    attempt: RwSignal<Option<FramedAttempt>>,
+    /// Why the last attempt did not get anywhere. The card renders this under
+    /// its own banner; see [`SignInFlow::error`].
+    error: RwSignal<Option<String>>,
+}
+
+impl SignInFlow {
+    /// A flow with nothing in progress, carrying whatever the OIDC callback
+    /// left behind (set during `initialize`, before Leptos mounts).
+    pub fn new() -> Self {
+        Self {
+            attempt: RwSignal::new(None),
+            error: RwSignal::new(crate::AUTH_ERROR.read().ok().and_then(|guard| guard.clone())),
+        }
+    }
+
+    /// Why the last attempt did not get anywhere.
+    ///
+    /// A HOST MUST PUT THIS SOMEWHERE. Two of the three writers have no modal
+    /// on screen to speak for them: [`SignInFlow::hand_over_the_tab`], when
+    /// `start_sign_in` cannot stash its one-time material, and the ceremony's
+    /// escape hatch handing that same failure up through `on_close`. Both
+    /// leave a visitor pressing a control that does nothing — and for an
+    /// anonymous reader, sign-in is the only way out of read-only, so a
+    /// silent failure there is the whole conversion path failing quietly. The
+    /// card renders this in its own banner; a host without one mounts
+    /// [`SignInFlow::view_with_notice`] rather than [`SignInFlow::view`]. Only
+    /// the third writer — an exchange that failed inside a live ceremony —
+    /// speaks for itself first, in the modal, before landing here.
+    pub fn error(&self) -> RwSignal<Option<String>> { self.error }
+
+    /// Start a sign-in — and do nothing at all while one is already on screen.
+    ///
+    /// IDEMPOTENT BY CONTRACT. `ankurah-chat-leptos` raises the host's auth
+    /// demand once per gesture at the composer *and* on every anonymous write,
+    /// so a reader who presses on the message box and then clicks a reaction
+    /// raises it twice; a reader who dismisses the ceremony and presses again
+    /// raises it again on purpose, which is how they get it back. Answering
+    /// the second raise by starting a second attempt would restash fresh PKCE
+    /// material and reload the frame under a credential prompt already in
+    /// progress — so an open ceremony swallows it, and the card's own button
+    /// gets the same answer for the same reason.
+    pub fn begin(&self) {
+        if self.attempt.get_untracked().is_some() {
+            return;
+        }
+        // A new attempt starts without the last one's failure over it.
+        self.error.set(None);
+        match auth::begin_framed_sign_in() {
+            // idp.to frames for this origin: run the ceremony without leaving the page.
+            Ok(Some(attempt)) => self.attempt.set(Some(attempt)),
+            // It does not, so a frame would be refused and would say nothing
+            // about it. Hand over the whole tab, which always works.
+            Ok(None) => self.hand_over_the_tab(),
+            // Setting up the attempt failed (no sessionStorage, say). The
+            // top-level flow needs the same things, so let it fail where the
+            // visitor can see it.
+            Err(e) => {
+                tracing::error!("failed to set up framed sign-in: {:?}", e);
+                self.hand_over_the_tab();
+            }
+        }
+    }
+
+    /// The flow that has always worked: idp.to gets the whole tab. Only its
+    /// own setup failure returns.
+    fn hand_over_the_tab(&self) {
+        if let Err(e) = auth::start_sign_in() {
+            tracing::error!("failed to start sign-in: {:?}", e);
+            self.error.set(Some(format!("could not start sign-in: {e:?}")));
+        }
+    }
+
+    /// The ceremony modal, while an attempt is live, AND a notice carrying
+    /// whatever [`SignInFlow::error`] holds — for a host with nowhere else to
+    /// put one.
+    ///
+    /// The notice is dismissible because it outlives the gesture that caused
+    /// it: nothing else on the page changes when a sign-in fails to start, so
+    /// there is no next action that would clear it, and a reader who has read
+    /// it needs a way to put it down. Starting another attempt clears it too
+    /// (see [`SignInFlow::begin`]).
+    pub fn view_with_notice(self) -> impl IntoView {
+        view! {
+            {self.view()}
+            {move || self.error.get().map(|message| view! {
+                <div class="signInNotice" role="alert">
+                    <span class="signInNoticeText">{message}</span>
+                    <button
+                        class="signInNoticeClose"
+                        aria-label="Dismiss"
+                        on:click=move |_| self.error.set(None)
+                    >"×"</button>
+                </div>
+            })}
+        }
+    }
+
+    /// The ceremony modal, while an attempt is live. Mount it once, wherever
+    /// the host wants the overlay to sit. The host owns showing
+    /// [`SignInFlow::error`] — see that method before choosing this over
+    /// [`SignInFlow::view_with_notice`].
+    pub fn view(self) -> impl IntoView {
+        // Closing takes the frame down with the modal and abandons the stashed
+        // attempt, so the next raise starts clean. A reason handed back is kept
+        // for a host that shows one — the modal that was displaying it is about
+        // to go, and the visitor may still need to read it.
+        let close = move |reason: Option<String>| {
+            auth::cancel_pending_sign_in();
+            if reason.is_some() {
+                self.error.set(reason);
+            }
+            self.attempt.set(None);
+        };
+        // Signing in mid-visit: store the token and let the app boot the way it
+        // boots on every other load with a member session in hand —
+        // `initialize` picks it up from `stored_token`, connects the node, waits
+        // for policy, and mounts as that member. Deliberately NOT a swap under
+        // the mounted tree: there is one path into a signed-in session, and this
+        // is it. A reload rather than a navigation, so a reader who was looking
+        // at `?room=…` comes back to the same room.
+        let signed_in = move |token: String| {
+            auth::store_token(&token);
+            if let Some(w) = window() {
+                let _ = w.location().reload();
+            }
+        };
+        move || {
+            self.attempt.get().map(|attempt| {
+                view! { <SignInCeremony attempt=attempt on_close=close on_signed_in=signed_in /> }
+            })
+        }
+    }
+}
+
 /// How far the ceremony has got. The frame is on screen for `Waiting` only:
 /// once a code is in hand the frame has done its work, and once the attempt has
 /// failed there is nothing left for it to do.

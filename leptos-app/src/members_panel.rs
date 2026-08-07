@@ -7,7 +7,7 @@ use community_model::{BanView, UserRolesView, UserView};
 
 use crate::{
     ctx, fmt,
-    panels::{panels, Surface},
+    panels::{panels, PanelUnavailable, Surface},
 };
 
 /// Member directory. Every signed-in user sees the same roster: all community
@@ -22,12 +22,33 @@ use crate::{
 /// used to live on a per-row "⋯" menu here.
 #[component]
 pub fn MembersPanel(on_close: impl Fn() + Clone + 'static) -> impl IntoView {
-    // All users, live — new sign-ins appear while the panel is open.
-    let users = ctx().query::<UserView>("true").expect("failed to create UserView LiveQuery");
-
-    // Server-maintained role cache (read-only for clients): one row per user
+    // All users, live — new sign-ins appear while the panel is open — plus the
+    // server-maintained role cache (read-only for clients): one row per user
     // holding the lowercase role keys minted into their latest session token.
-    let user_roles = ctx().query::<UserRolesView>("true").expect("failed to create UserRolesView LiveQuery");
+    // And active bans: what THAT returns depends on who asks, since moderators
+    // get every row (their `moderate` privilege bypasses the read scope) and
+    // everyone else at most their own, so no client-side gating is needed —
+    // the policy already shapes the resultset.
+    //
+    // `user` and `userroles` are both signed-in-only in policy.json, so both
+    // queries answer `Err` for a guest before any row is read. The header
+    // withholds this panel's button from a guest; degrading here is what keeps
+    // a mistake about that from being an app-wide panic. See `PanelUnavailable`.
+    let opened = (ctx().query::<UserView>("true"), ctx().query::<UserRolesView>("true"), ctx().query::<BanView>("active = true"));
+    let (users, user_roles, bans) = match opened {
+        (Ok(users), Ok(user_roles), Ok(bans)) => (users, user_roles, bans),
+        (users, user_roles, bans) => {
+            let refusal = users.err().map(|e| format!("{e:?}"))
+                .or_else(|| user_roles.err().map(|e| format!("{e:?}")))
+                .or_else(|| bans.err().map(|e| format!("{e:?}")))
+                .unwrap_or_default();
+            tracing::error!("the members panel could not open its queries: {refusal}");
+            return view! {
+                <PanelUnavailable title="Members" note="The member list is unavailable right now." on_close />
+            }
+            .into_any();
+        }
+    };
 
     // Name the panel's queries for the app's query-registry observer for as
     // long as the panel is open (transient registrations, dropped on close).
@@ -36,12 +57,6 @@ pub fn MembersPanel(on_close: impl Fn() + Clone + 'static) -> impl IntoView {
         crate::query_registry::register("userroles (members panel)", &user_roles),
     ];
     on_cleanup(move || drop(query_regs));
-
-    // Active bans, live. What this returns depends on who asks — moderators
-    // get every row (their `moderate` privilege bypasses the read scope),
-    // everyone else at most their own. No client-side gating needed: the
-    // policy already shapes the resultset.
-    let bans = ctx().query::<BanView>("active = true").expect("failed to create BanView LiveQuery");
 
     // Collapse the cache into a keyed map (user id → role keys), rebuilt once
     // whenever it changes. Each row then does an O(1) lookup instead of scanning
@@ -149,6 +164,7 @@ pub fn MembersPanel(on_close: impl Fn() + Clone + 'static) -> impl IntoView {
             </div>
         </div>
     }
+    .into_any()
 }
 
 /// One directory row: initials avatar (deterministic hue), display name, and

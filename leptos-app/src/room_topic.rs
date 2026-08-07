@@ -15,7 +15,7 @@ use web_sys::KeyboardEvent;
 use ankurah::EntityId;
 use ankurah_signals::Get as AnkurahGet;
 
-use crate::{can_moderate, ctx, current_user_id};
+use crate::{can_moderate, ctx, viewer};
 
 #[component]
 pub fn RoomTopic(room_id: RwSignal<Option<EntityId>>) -> impl IntoView {
@@ -44,10 +44,15 @@ pub fn RoomTopic(room_id: RwSignal<Option<EntityId>>) -> impl IntoView {
     // remote topic edits (the LWW property signal, via ReactiveGraphObserver).
     let topic = move || room.get().and_then(|r| r.topic().ok().flatten()).filter(|t| !t.trim().is_empty());
 
+    // A guest edits nothing: they hold no `post` privilege, so the write would
+    // be refused, and `viewer()` answering `None` is what says so here. Both
+    // halves must be present for the creator match — a room with no recorded
+    // creator is not everyone's to retitle.
     let can_edit = move || {
         room.get()
             .map(|r| {
-                can_moderate() || r.created_by().ok().flatten().map(|c| c.id()) == Some(current_user_id())
+                can_moderate()
+                    || matches!((r.created_by().ok().flatten(), viewer()), (Some(creator), Some(me)) if creator.id() == me)
             })
             .unwrap_or(false)
     };

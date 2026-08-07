@@ -16,6 +16,7 @@
 use leptos::prelude::*;
 use wasm_bindgen_futures::spawn_local;
 
+use ankurah::EntityId;
 use ankurah_signals::Get as AnkurahGet;
 use community_model::BanView;
 
@@ -30,18 +31,32 @@ const SIGN_OUT_DELAY_MS: i32 = 10_000;
 /// banned; then overlays the entire app (opaque, above every modal) and arms
 /// the delayed sign-out. Unbanned-in-time is handled: the overlay vanishes
 /// and the pending sign-out disarms itself.
+///
+/// `viewer` is whose bans these are, taken as a value rather than read from
+/// the session: this component is only mounted for a member, and a lock with
+/// nobody to lock out is not a thing to reason about.
 #[component]
-pub fn BanLock() -> impl IntoView {
+pub fn BanLock(viewer: EntityId) -> impl IntoView {
     // The viewer's own active bans. The `user = ?` clause is belt-and-braces
     // (the read scope pins non-moderators to their own rows anyway) — but a
     // *moderator* viewer sees every ban row, so without it a mod would lock
     // themselves out by banning someone else.
-    let bans = ctx()
-        .query::<BanView>(
-            queries::selection("user = ? AND active = true", [(&crate::current_user_id()).into()])
-                .expect("static ban self-watch selection parses"),
-        )
-        .expect("failed to create BanView LiveQuery");
+    //
+    // A query that cannot be opened leaves the lock unarmed, and this renders
+    // nothing rather than taking the app down over it. That follows from the
+    // scope stated at the top of this file: the lock is UX, and the hard stop
+    // is the server's mint gate, which nothing in this browser affects.
+    // Costing a banned member their lockout screen is the small failure;
+    // costing every member the whole page is the large one.
+    let bans = match ctx().query::<BanView>(
+        queries::selection("user = ? AND active = true", [(&viewer).into()]).expect("static ban self-watch selection parses"),
+    ) {
+        Ok(bans) => bans,
+        Err(e) => {
+            tracing::error!("the ban self-watch could not open its query, so the client-side lock is off: {e:?}");
+            return ().into_any();
+        }
+    };
 
     // `None` while in good standing; `Some(reason)` once banned (first
     // non-empty reason across rows, or an empty string for a reasonless ban).
@@ -74,7 +89,7 @@ pub fn BanLock() -> impl IntoView {
         }
     });
 
-    move || {
+    (move || {
         ban_reason.get().map(|reason| {
             let reason = reason.trim().to_string();
             view! {
@@ -102,5 +117,6 @@ pub fn BanLock() -> impl IntoView {
                 </div>
             }
         })
-    }
+    })
+    .into_any()
 }

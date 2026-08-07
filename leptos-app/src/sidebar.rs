@@ -77,6 +77,9 @@ pub fn Sidebar(
     selected_room: RwSignal<Option<EntityId>>,
     /// Which correspondent's conversation is open, by id.
     selected_dm: RwSignal<Option<EntityId>>,
+    /// Who is reading, `None` for a guest. Conversations are between two
+    /// members, so the section below is a member's.
+    viewer: Option<EntityId>,
 ) -> impl IntoView {
     // Resolved in the body and handed to the effect. An effect does carry an
     // owner, so this is not a fix for a panic; it is so that the closure below
@@ -94,7 +97,12 @@ pub fn Sidebar(
     view! {
         <div class="sidebar">
             <RoomSelector selected_room=selected_room active=rooms_active on_select=close_dm />
-            <DmSidebar selected_dm=selected_dm />
+            // Not mounted for a guest. The component handles a viewer-less
+            // session by itself — it renders its heading over an empty list —
+            // but a heading promising direct messages to somebody who has no
+            // account offers a room they cannot enter. Guest mode is public
+            // rooms, read-only; conversations are what signing in gets you.
+            {viewer.map(|_| view! { <DmSidebar selected_dm=selected_dm /> })}
         </div>
     }
 }

@@ -14,17 +14,35 @@ use leptos::prelude::*;
 use ankurah_signals::Get as AnkurahGet;
 use community_model::{ModActionView, UserView};
 
-use crate::{ctx, fmt};
+use crate::{ctx, fmt, panels::PanelUnavailable};
 
 #[component]
 pub fn ModLogPanel(on_close: impl Fn() + Clone + 'static) -> impl IntoView {
     // The whole log, live — new actions appear while the panel is open. The
     // log is small by nature (one row per moderator action, ever), so a full
     // subscription is fine; revisit with LIMIT/pagination if it ever grows.
-    let actions = ctx().query::<ModActionView>("true ORDER BY created_at DESC").expect("failed to create ModActionView LiveQuery");
-
-    // Actor names, resolved through the same users-map idiom as MembersPanel.
-    let users = ctx().query::<UserView>("true").expect("failed to create UserView LiveQuery");
+    // Actor names come from the same users-map idiom as MembersPanel.
+    //
+    // `modaction` and `user` are both signed-in-only in policy.json, so both
+    // queries answer `Err` for a guest at the collection gate. The header
+    // withholds this panel's button from a guest; degrading here is what keeps
+    // a mistake about that from being an app-wide panic.
+    let (actions, users) = match (ctx().query::<ModActionView>("true ORDER BY created_at DESC"), ctx().query::<UserView>("true")) {
+        (Ok(actions), Ok(users)) => (actions, users),
+        (actions, users) => {
+            let refusal = actions.err().map(|e| format!("{e:?}")).or_else(|| users.err().map(|e| format!("{e:?}"))).unwrap_or_default();
+            tracing::error!("the moderation log could not open its queries: {refusal}");
+            return view! {
+                <PanelUnavailable
+                    title="Moderation log"
+                    note="The moderation log is unavailable right now."
+                    content_class="modLogContent"
+                    on_close
+                />
+            }
+            .into_any();
+        }
+    };
     let names_by_user = Memo::new(move |_| {
         users
             .get()
@@ -87,6 +105,7 @@ pub fn ModLogPanel(on_close: impl Fn() + Clone + 'static) -> impl IntoView {
             </div>
         </div>
     }
+    .into_any()
 }
 
 /// One log row: actor avatar + name, what they did, the optional reason, and
