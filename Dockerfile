@@ -3,7 +3,7 @@
 ########################################################################
 # community — one image running the durable node (ankurah websocket
 # server + Postgres storage) AND serving the Leptos SPA same-origin.
-# Mirrors idp.to's Cloud Run image: cargo-chef for server dep caching,
+# Mirrors idp.to's production image: cargo-chef for server dep caching,
 # a trunk stage for the wasm SPA, a slim runtime.
 ########################################################################
 
@@ -73,7 +73,7 @@ COPY --from=spa-builder /workspace/leptos-app/dist /app/static
 COPY policy.json /app/policy.json
 ENV STATIC_DIR=/app/static
 ENV POLICY_PATH=/app/policy.json
-# Cloud Run overrides PORT at runtime; 8080 is the default for local runs.
+# Production and local runs both default to port 8080.
 ENV PORT=8080
 EXPOSE 8080
 CMD ["/app/community-server"]

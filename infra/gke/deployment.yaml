@@ -1,0 +1,149 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: community-web
+  namespace: community
+  labels:
+    app.kubernetes.io/name: community-web
+    app.kubernetes.io/part-of: ankurah-community
+spec:
+  replicas: 1
+  # Ankurah currently requires one durable server for this database. Recreate
+  # prevents ordinary rollout overlap; it is not a hard partition fence.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: community-web
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: community-web
+        app.kubernetes.io/part-of: ankurah-community
+    spec:
+      # Keep the standalone NEG in the same known zone as Cloud SQL and the
+      # manually attached load-balancer backend.
+      nodeSelector:
+        topology.kubernetes.io/zone: us-west1-b
+      serviceAccountName: community-web
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: community-web
+          # CI must replace this fail-closed sentinel with an immutable digest.
+          image: invalid.invalid/community-server:deploy-workflow-must-set-digest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          envFrom:
+            - secretRef:
+                name: community-runtime-secrets
+          env:
+            - name: PORT
+              value: "8080"
+            - name: RUST_LOG
+              value: info
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 2
+            timeoutSeconds: 2
+            failureThreshold: 90
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 15
+            timeoutSeconds: 2
+            failureThreshold: 4
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+              ephemeral-storage: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+              ephemeral-storage: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: runtime-tmp
+              mountPath: /tmp
+            - name: cloudsql
+              mountPath: /cloudsql
+              readOnly: true
+        - name: cloud-sql-proxy
+          image: gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.22.0@sha256:fa4c7308245407157c5e9c4e16f1c0f1113899d6f29dc8f8be3e30efae86467f
+          args:
+            - --unix-socket=/cloudsql
+            - --private-ip
+            - --structured-logs
+            - --health-check
+            - --http-address=0.0.0.0
+            - --http-port=9801
+            - synesthetic-1:us-west1:hosting-postgres
+          ports:
+            - name: proxy-health
+              containerPort: 9801
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /readiness
+              port: proxy-health
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /liveness
+              port: proxy-health
+            periodSeconds: 15
+            timeoutSeconds: 2
+            failureThreshold: 4
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+              ephemeral-storage: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+              ephemeral-storage: 128Mi
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: cloudsql
+              mountPath: /cloudsql
+      volumes:
+        - name: runtime-tmp
+          emptyDir: {}
+        - name: cloudsql
+          emptyDir: {}

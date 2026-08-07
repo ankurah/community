@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: community-web
+  namespace: community
+  annotations:
+    cloud.google.com/neg: '{"exposed_ports":{"80":{"name":"community-web-gke-neg"}}}'
+  labels:
+    app.kubernetes.io/name: community-web
+    app.kubernetes.io/part-of: ankurah-community
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: community-web
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP

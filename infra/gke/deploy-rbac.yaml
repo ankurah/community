@@ -1,0 +1,54 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: community-deployer
+  namespace: community
+  labels:
+    app.kubernetes.io/part-of: ankurah-community
+rules:
+  - apiGroups: [""]
+    resources: [serviceaccounts, services]
+    verbs: [create, get, patch]
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list, watch]
+  - apiGroups: [""]
+    resources: [pods/log]
+    verbs: [get]
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [get, list]
+  - apiGroups: [apps]
+    resources: [deployments]
+    verbs: [create, get, list, patch, watch]
+  - apiGroups: [apps]
+    resources: [replicasets]
+    verbs: [get, list, watch]
+  - apiGroups: [networking.k8s.io]
+    resources: [networkpolicies]
+    verbs: [create, get, patch]
+  - apiGroups: [secrets-store.csi.x-k8s.io]
+    resources: [secretproviderclasses]
+    verbs: [create, get, patch]
+  - apiGroups: [secret-sync.gke.io]
+    resources: [secretsyncs]
+    verbs: [create, get, list, patch, watch]
+  - apiGroups: [networking.gke.io]
+    resources: [servicenetworkendpointgroups]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: community-deployer
+  namespace: community
+  labels:
+    app.kubernetes.io/part-of: ankurah-community
+subjects:
+  - kind: User
+    name: community-github-deploy@synesthetic-1.iam.gserviceaccount.com
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: community-deployer

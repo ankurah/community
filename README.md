@@ -90,8 +90,11 @@ npm run test:e2e     # picks free ports, runs Playwright (chat + multi-user)
 
 ## Deployment
 
-The durable node runs on Google Cloud Run (single instance, scale-to-zero) with
-Cloud SQL Postgres; the web client is served same-origin from the same container.
+The durable node runs as one pod in the shared Google Kubernetes Engine
+Autopilot cluster, backed by its own database and credentials in Cloud SQL
+Postgres. The web client is served same-origin from the same container. See
+[`infra/gke/README.md`](infra/gke/README.md) for the deployment boundaries and
+bootstrap contract.
 
 ## License
 

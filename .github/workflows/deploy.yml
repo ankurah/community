@@ -1,43 +1,9 @@
 name: Deploy
 
-# Builds one container (durable node + SPA) and deploys it to Cloud Run.
-# Runs after CI succeeds on main, or on manual dispatch. Authenticates to GCP
-# via Workload Identity Federation — no long-lived service-account keys.
-#
-# Required repo variables (Settings → Actions → Variables) — see docs/deploy.md:
-#   GCP_PROJECT_ID, GCP_REGION, GCP_WORKLOAD_IDENTITY_PROVIDER,
-#   GCP_DEPLOY_SERVICE_ACCOUNT, ARTIFACT_REGISTRY_REPOSITORY, CLOUD_RUN_SERVICE,
-#   CLOUD_RUN_SERVICE_ACCOUNT, CLOUD_SQL_INSTANCE_CONNECTION_NAME,
-#   DATABASE_URL_SECRET, JWT_SIGNING_KEY_SECRET, SMOKE_BASE_URL
-# Optional repo variable:
-#   CI_HOOK_SECRET_NAME — the Secret Manager secret holding the shared HMAC key
-#   for POST /hooks/ci (#66). Left unset, this deploy simply does not mount it
-#   and the endpoint answers 503; nothing else changes.
-#
-#   Turning the channel on means putting ONE value in two places: Secret Manager
-#   here, and the COMMUNITY_CI_HOOK_SECRET Actions secret on ankurah/ankurah,
-#   whose reporter workflow signs each delivery with it. Both sides must hold
-#   the same bytes or every delivery 401s — so generate it once, into a shell
-#   variable, and set both from that variable before discarding it:
-#     secret=$(openssl rand -hex 32)
-#     printf '%s' "${secret}" | gcloud secrets create community-ci-hook-secret \
-#       --project ankurah-community --data-file=-
-#     printf '%s' "${secret}" | gh secret set COMMUNITY_CI_HOOK_SECRET --repo ankurah/ankurah
-#     unset secret
-#   Then let the runtime service account read it, and point this deploy at it:
-#     gcloud secrets add-iam-policy-binding community-ci-hook-secret \
-#       --project ankurah-community \
-#       --member serviceAccount:community-runtime@ankurah-community.iam.gserviceaccount.com \
-#       --role roles/secretmanager.secretAccessor
-#     gh variable set CI_HOOK_SECRET_NAME --repo ankurah/community --body community-ci-hook-secret
-#   The accessor grant is not optional: without it the revision fails to start
-#   rather than falling back to the closed endpoint. Skipping the `gh secret
-#   set` fails quietly instead — the reporter finds no secret, logs a warning,
-#   and every run silently reports nothing.
-# Secret Manager secrets the runtime SA must be able to access:
-#   community-database-url, community-jwt-signing-key (RS256 key that mints
-#   the ankurah session tokens issued by /auth/session), and — once configured —
-#   community-ci-hook-secret.
+# The durable Community server runs as one GKE pod. This workflow builds the
+# exact successful main commit, publishes an immutable image, and deploys that
+# digest through a namespace-limited identity. The old Cloud Run target is
+# intentionally gone; COMMUNITY_DEPLOY_TARGET must explicitly equal `gke`.
 
 on:
   workflow_dispatch:
@@ -52,107 +18,141 @@ permissions:
   id-token: write
 
 concurrency:
-  group: deploy
+  group: community-production-deploy
   cancel-in-progress: false
 
 env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
   DEPLOY_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
-  GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
-  GCP_REGION: ${{ vars.GCP_REGION || 'us-central1' }}
-  ARTIFACT_REGISTRY_REPOSITORY: ${{ vars.ARTIFACT_REGISTRY_REPOSITORY || 'community' }}
-  CLOUD_RUN_SERVICE: ${{ vars.CLOUD_RUN_SERVICE || 'community' }}
-  CLOUD_RUN_SERVICE_ACCOUNT: ${{ vars.CLOUD_RUN_SERVICE_ACCOUNT || '' }}
-  DATABASE_URL_SECRET: ${{ vars.DATABASE_URL_SECRET || 'community-database-url' }}
-  JWT_SIGNING_KEY_SECRET: ${{ vars.JWT_SIGNING_KEY_SECRET || 'community-jwt-signing-key' }}
-  CLOUD_SQL_INSTANCE_CONNECTION_NAME: ${{ vars.CLOUD_SQL_INSTANCE_CONNECTION_NAME || '' }}
-  CI_HOOK_SECRET_NAME: ${{ vars.CI_HOOK_SECRET_NAME || '' }}
-  SMOKE_BASE_URL: ${{ vars.SMOKE_BASE_URL || '' }}
+  GCP_PROJECT_ID: ${{ vars.GKE_GCP_PROJECT_ID || 'synesthetic-1' }}
+  GCP_REGION: ${{ vars.GKE_GCP_REGION || 'us-west1' }}
+  GKE_CLUSTER: ${{ vars.GKE_CLUSTER || 'kube-1' }}
+  ARTIFACT_REGISTRY_REPOSITORY: ${{ vars.GKE_ARTIFACT_REGISTRY_REPOSITORY || 'ankurah-community' }}
 
 jobs:
   deploy:
-    name: Build and Deploy
+    name: Build and deploy to GKE
     runs-on: ubuntu-latest
-    if: ${{ (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success') && vars.GCP_WORKLOAD_IDENTITY_PROVIDER != '' && vars.GCP_DEPLOY_SERVICE_ACCOUNT != '' }}
+    if: >-
+      ${{
+        (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success') &&
+        vars.COMMUNITY_DEPLOY_TARGET == 'gke' &&
+        vars.GKE_GCP_WORKLOAD_IDENTITY_PROVIDER != '' &&
+        vars.GKE_GCP_IMAGE_PUBLISHER_SERVICE_ACCOUNT != '' &&
+        vars.GKE_GCP_DEPLOY_SERVICE_ACCOUNT != ''
+      }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ env.DEPLOY_SHA }}
+          fetch-depth: 0
+          persist-credentials: false
 
-      - name: Authenticate to Google Cloud
-        uses: google-github-actions/auth@v2
+      - name: Verify deploy commit belongs to main
+        run: |
+          if [[ ! "${DEPLOY_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "DEPLOY_SHA must be a full lowercase 40-character Git commit SHA" >&2
+            exit 1
+          fi
+          test "$(git rev-parse HEAD)" = "${DEPLOY_SHA}"
+          git merge-base --is-ancestor "${DEPLOY_SHA}" origin/main
+
+      - name: Authenticate for image publishing
+        uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2
         with:
-          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+          workload_identity_provider: ${{ vars.GKE_GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GKE_GCP_IMAGE_PUBLISHER_SERVICE_ACCOUNT }}
 
       - name: Set up gcloud
-        uses: google-github-actions/setup-gcloud@v2
+        uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       - name: Configure Docker auth
         run: gcloud auth configure-docker "${GCP_REGION}-docker.pkg.dev" --quiet
 
-      - name: Generate image tag
+      - name: Resolve immutable image
         id: image
         run: |
-          image="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${ARTIFACT_REGISTRY_REPOSITORY}/community-server:${DEPLOY_SHA}"
-          echo "image=$image" >> "$GITHUB_OUTPUT"
+          name="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${ARTIFACT_REGISTRY_REPOSITORY}/community-server"
+          digest="$(gcloud artifacts docker images describe \
+            "${name}:${DEPLOY_SHA}" \
+            --project="${GCP_PROJECT_ID}" \
+            --format='value(image_summary.digest)' 2>/dev/null || true)"
+          echo "name=${name}" >> "${GITHUB_OUTPUT}"
+          if [ -n "${digest}" ]; then
+            echo "exists=true" >> "${GITHUB_OUTPUT}"
+            echo "digest=${digest}" >> "${GITHUB_OUTPUT}"
+          else
+            echo "exists=false" >> "${GITHUB_OUTPUT}"
+          fi
 
       - name: Build and push image
-        uses: docker/build-push-action@v6
+        if: ${{ steps.image.outputs.exists != 'true' }}
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           platforms: linux/amd64
           push: true
-          tags: ${{ steps.image.outputs.image }}
+          tags: ${{ steps.image.outputs.name }}:${{ env.DEPLOY_SHA }}
           cache-from: type=gha,scope=community-server
           cache-to: type=gha,mode=max,scope=community-server
 
-      - name: Deploy to Cloud Run
+      - name: Confirm published digest
+        id: published
         run: |
-          # The CI webhook secret is mounted only once CI_HOOK_SECRET_NAME
-          # names a Secret Manager secret. Naming one that does not exist would
-          # fail the deploy, so an unset variable must leave the flag alone —
-          # the server treats an absent CI_HOOK_SECRET as "endpoint closed".
-          secrets="DATABASE_URL=${DATABASE_URL_SECRET}:latest,ANKURAH_JWT_SIGNING_KEY=${JWT_SIGNING_KEY_SECRET}:latest"
-          if [ -n "${CI_HOOK_SECRET_NAME}" ]; then
-            secrets="${secrets},CI_HOOK_SECRET=${CI_HOOK_SECRET_NAME}:latest"
-          fi
+          digest="$(gcloud artifacts docker images describe \
+            "${{ steps.image.outputs.name }}:${DEPLOY_SHA}" \
+            --project="${GCP_PROJECT_ID}" \
+            --format='value(image_summary.digest)')"
+          test -n "${digest}"
+          echo "digest=${digest}" >> "${GITHUB_OUTPUT}"
 
-          # Durable node: a single instance keeps in-memory state coherent
-          # (--max-instances 1), and one instance is always warm
-          # (--min-instances 1). The floor is what keeps the first visitor after
-          # an idle stretch from paying for the whole boot — loading the sled/
-          # postgres node, seeding rooms, starting the workers — which is a
-          # multi-second wait landing on exactly the arrival that matters most.
-          # It costs an always-on instance's CPU/memory allocation.
-          args=(
-            run deploy "${CLOUD_RUN_SERVICE}"
-            --project "${GCP_PROJECT_ID}"
-            --region "${GCP_REGION}"
-            --platform managed
-            --image "${{ steps.image.outputs.image }}"
-            --port 8080
-            --cpu 1
-            --memory 512Mi
-            --concurrency 40
-            --min-instances 1
-            --max-instances 1
-            --timeout 900
-            --no-invoker-iam-check
-            --set-secrets "${secrets}"
-            --quiet
-          )
-          if [ -n "${CLOUD_SQL_INSTANCE_CONNECTION_NAME}" ]; then
-            args+=(--add-cloudsql-instances "${CLOUD_SQL_INSTANCE_CONNECTION_NAME}")
-          fi
-          if [ -n "${CLOUD_RUN_SERVICE_ACCOUNT}" ]; then
-            args+=(--service-account "${CLOUD_RUN_SERVICE_ACCOUNT}")
-          fi
-          gcloud "${args[@]}"
+      - name: Authenticate for GKE deployment
+        uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2
+        with:
+          workload_identity_provider: ${{ vars.GKE_GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GKE_GCP_DEPLOY_SERVICE_ACCOUNT }}
 
-      - name: Smoke health check
-        if: ${{ env.SMOKE_BASE_URL != '' }}
-        run: curl --fail --show-error --silent "${SMOKE_BASE_URL}/health"
+      - name: Get GKE credentials
+        uses: google-github-actions/get-gke-credentials@64bc7249bbcf78056bb92f14d3cedc2da193946c # v2
+        with:
+          cluster_name: ${{ env.GKE_CLUSTER }}
+          location: ${{ env.GCP_REGION }}
+          project_id: ${{ env.GCP_PROJECT_ID }}
+          use_dns_based_endpoint: true
+
+      - name: Apply runtime resources
+        run: |
+          kubectl apply -f infra/gke/network-policy.yaml
+          kubectl apply -f infra/gke/service-account.yaml
+          kubectl apply -f infra/gke/secret-sync-service-account.yaml
+          kubectl apply -f infra/gke/secrets.yaml
+          kubectl apply -f infra/gke/service.yaml
+
+          kubectl wait \
+            --for=condition=Update=True \
+            secretsync/community-runtime-secrets \
+            --namespace=community \
+            --timeout=2m
+
+          kubectl set image \
+            --local \
+            --filename=infra/gke/deployment.yaml \
+            --output=yaml \
+            community-web="${{ steps.image.outputs.name }}@${{ steps.published.outputs.digest }}" \
+            | kubectl apply -f -
+
+          kubectl rollout status deployment/community-web \
+            --namespace=community \
+            --timeout=5m
+
+      - name: Report GKE status
+        if: ${{ always() }}
+        run: |
+          kubectl get deployment,pods,service --namespace=community -o wide || true
+          kubectl get svcneg --namespace=community || true
+          kubectl describe deployment/community-web --namespace=community || true
+          kubectl logs deployment/community-web --namespace=community --all-containers --tail=100 || true
