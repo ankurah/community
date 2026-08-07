@@ -18,6 +18,50 @@ use ankurah::proto::EntityId;
 use leptos::prelude::*;
 use std::sync::OnceLock;
 
+/// What a header surface renders when it cannot open: its own frame, its own
+/// ×, and a line saying so where its list would be.
+///
+/// FOR: three of these surfaces read collections `policy.json` keys on the
+/// `signed_in` privilege — the member roster, the role cache and the
+/// moderation log — and a guest session is refused all three at the collection
+/// gate, synchronously, when the query is created. The header does not offer
+/// those buttons to a guest, so nothing should reach this; what it buys is the
+/// cost of being wrong about that. Before, each panel unwrapped its query with
+/// `.expect`, and one panel mounted under the wrong session took the whole
+/// wasm app down with it. Now it costs the reader one panel, still closable.
+#[component]
+pub fn PanelUnavailable(
+    /// The heading the surface would have carried, so the reader can see which
+    /// one refused to open.
+    title: &'static str,
+    /// One sentence about why there is nothing here.
+    note: &'static str,
+    /// Extra classes on the content box, so a surface keeps its own
+    /// presentation (the inbox is a popover on wide viewports, not a modal).
+    #[prop(default = "")]
+    content_class: &'static str,
+    on_close: impl Fn() + Clone + 'static,
+) -> impl IntoView {
+    let on_close_overlay = on_close.clone();
+    view! {
+        <div class="membersOverlay" on:click=move |_| on_close_overlay()>
+            <div class=format!("membersContent {content_class}") on:click=|e| e.stop_propagation()>
+                <div class="membersHeader">
+                    <div class="membersTitles">
+                        <h2>{title}</h2>
+                    </div>
+                    <button class="membersCloseButton" aria-label="Close" on:click=move |_| on_close()>
+                        "×"
+                    </button>
+                </div>
+                <div class="membersList">
+                    <div class="membersState">{note}</div>
+                </div>
+            </div>
+        </div>
+    }
+}
+
 /// The exclusive header surfaces. At most one is open at a time.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Surface {
