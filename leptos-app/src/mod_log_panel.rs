@@ -35,7 +35,7 @@ pub fn ModLogPanel(on_close: impl Fn() + Clone + 'static) -> impl IntoView {
             return view! {
                 <PanelUnavailable
                     title="Moderation log"
-                    note="Sign in to read the moderation log."
+                    note="The moderation log is unavailable right now."
                     content_class="modLogContent"
                     on_close
                 />

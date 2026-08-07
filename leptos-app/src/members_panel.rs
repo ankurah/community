@@ -44,7 +44,7 @@ pub fn MembersPanel(on_close: impl Fn() + Clone + 'static) -> impl IntoView {
                 .unwrap_or_default();
             tracing::error!("the members panel could not open its queries: {refusal}");
             return view! {
-                <PanelUnavailable title="Members" note="Sign in to see who is here." on_close />
+                <PanelUnavailable title="Members" note="The member list is unavailable right now." on_close />
             }
             .into_any();
         }

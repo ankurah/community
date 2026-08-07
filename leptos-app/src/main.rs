@@ -585,15 +585,20 @@ pub fn ChatApp() -> impl IntoView {
     // full-page redirect and never swaps a session under a mounted tree. A
     // host that does swap must re-ask.
     //
-    // TWO WAYS TO GET NOTHING, and both cost the reader chimes rather than the
-    // page. `rooms()` answers `None` when the handshake could not open its
-    // query, which the boot gate rules out — a session that cannot read never
-    // reaches this component — and is kept as a degradation on the same terms
-    // as the header panels: the cost of being wrong about that must not be an
-    // app-wide panic. `NotificationManager::new` answers `None` when the
-    // browser refuses an `AudioContext`, which no gate rules out at all.
-    let notification_manager = chat
-        .rooms()
+    // THREE WAYS TO GET NOTHING, and all cost the reader chimes rather than
+    // the page. A guest gets no manager at all: the chime is a member
+    // affordance, because the preference that silences it lives in
+    // member-only `notificationpref` rows — a sound the listener cannot turn
+    // off must not play, and with no member id every arriving message would
+    // count as "from others". `rooms()` answers `None` when the handshake
+    // could not open its query, which the boot gate rules out — a session
+    // that cannot read never reaches this component — and is kept as a
+    // degradation on the same terms as the header panels: the cost of being
+    // wrong about that must not be an app-wide panic. `NotificationManager::new`
+    // answers `None` when the browser refuses an `AudioContext`, which no
+    // gate rules out at all.
+    let notification_manager = viewer
+        .and(chat.rooms())
         .and_then(|rooms| NotificationManager::new(rooms, current_user.get_untracked().map(|u| u.id().to_base64())));
 
     // Load the signed-in user (the server upserted it before minting our token;

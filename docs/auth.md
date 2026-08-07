@@ -1,17 +1,19 @@
 # Authentication — current state and the idp.to OIDC plan
 
-## Today: anonymous placeholder
+## Today: OIDC members, guest read-only
 
-The app ships with **no real authentication**, on purpose (deploy-now,
-OIDC-later):
+Both halves are live. A member signs in with idp.to — auth-code + PKCE in the
+browser, then the server federates the id_token and re-mints its own session
+token ("Status — implemented" below, and "the mint is ours" within it). A
+visitor who has not signed in gets a read-only session instead: the client
+mints one from `POST /auth/guest` on boot ("Status — guest sessions" for the
+mint, "Status — the guest boot path" for the client half). Both nodes run
+`JwtAgent` against `policy.json`.
 
-- **Browser** (`leptos-app/src/main.rs`) — `ensure_user()` creates a random
-  `User`, stores its id in `localStorage`, and the node runs
-  `PermissiveAgent::new()` (every operation allowed).
-- **Server** (`server/src/main.rs`) — the durable node also runs
-  `PermissiveAgent::new()`.
-
-That is the exact seam real sign-in replaces.
+The anonymous-placeholder era this document began from — a random local
+`User` in `localStorage` and `PermissiveAgent` on both nodes — is gone. The
+sections below started as its replacement plan and stand as the record of
+what shipped.
 
 ## Target: idp.to OIDC (auth-code + PKCE, public client)
 
@@ -134,8 +136,10 @@ got its token. What differs: `sub` is the literal `guest` and the only role is
 and nothing is written to storage, so a guest leaves no `User` row and no
 history. The token lives two hours (`GUEST_TOKEN_TTL_HOURS`) against the
 member token's twelve, because re-minting costs a guest one unattended POST
-while a member pays an OIDC round-trip. The client re-mints on expiry or
-reconnect.
+while a member pays an OIDC round-trip. The client mints once per boot and
+keeps the token in memory, so a reload mints again; a tab that outlives its
+token re-mints when #86 lands ("Status — the guest boot path" explains why
+there is no connect-time refusal to recover from in the meantime).
 
 **What a guest may read** is a privilege split in `policy.json`, not a rule
 about guests. `view` is the anonymous tier, and what it leaves readable is
