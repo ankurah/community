@@ -165,10 +165,9 @@ the real policy on a real node.
 `user: Ref<User>` and no display name of its own, so a reader who cannot read
 the `user` collection gets the text of every message and the name of nobody —
 including their own would-be neighbours in the member list, which a guest does
-not receive either. That is the client lane's open problem (tracked on #65),
-not a policy gap: whatever it does — render a placeholder, or have the server
-denormalize a display name onto something a guest may read — is a decision
-about the guest UI, and this branch deliberately leaves the client untouched.
+not receive either. Ruled on #65 (2026-08-07): guest mode ships nameless
+anyway, and a public name-only projection is the fast-follow. See the client
+section below for what a guest actually sees.
 
 **How the collection gate closes, stated exactly, because a future role could
 open it.** `can_access_collection` passes when a caller's roles hold the read
@@ -204,6 +203,64 @@ That is deliberate: the front end appends its address to one of the lines and
 the server cannot tell which, so reading either would mean counting a value
 the caller chose. An operator seeing 429s that look shared across unrelated
 callers should look for callers sending their own `X-Forwarded-For` header.
+
+## Status — the guest boot path (2026-08-07, client lane)
+
+The client now takes the session above. No stored token means
+`POST /auth/guest`, connect, and mount the chat surfaces read-only; the
+sign-in card is what a visitor sees only when they cannot have a session at
+all — a refused mint, or a sign-in they asked for that failed and whose reason
+is still worth reading. A stored member token boots exactly as it did.
+
+**Nothing about a guest session is stored.** A member token lives in
+localStorage because re-acquiring one costs a ceremony; a guest token costs
+one unattended POST, so every load mints and a closed tab leaves nothing
+behind. That is what the mint's ten-per-address-per-minute budget is sized
+for; the eleventh reload inside a minute lands on the card with one sentence
+saying so.
+
+**Who is reading** is `viewer()` in `leptos-app/src/main.rs`: the `User`
+entity id a member's token names, or `None`. A guest token's subject is the
+literal `guest`, which is not an entity id, so this is also the one place that
+could have lied — it answers `None` for the literal and logs loudly for
+anything else unparseable. Everything member-shaped hangs off it: the pair
+handed to `ChatContext`, the mount gates, and the actor stamped on a
+`ModAction` (which refuses to write rather than record a moderator action as
+the rate limiter's "Automatic" row).
+
+**What a guest is offered.** Rooms, message text, reactions, link previews,
+the room topic, the connection light, x-ray and the QR code. Absent, rather
+than present-and-refusing: the member roster, the moderation log, the
+notification bell, the display-name editor, the account-settings link, the
+sign-out button and the whole direct-message section. A "Sign in" button takes
+their place. Authors render as **"Unknown"** with a `?` avatar — the nameless
+gap above — while the avatar's colour still comes from the message's own
+author ref, so the same person stays the same colour.
+
+**Reaching for anything else starts the ceremony.** `ankurah-chat-leptos`
+refuses an anonymous reader the caret and raises the host's auth demand
+instead — a press on the message box, a reaction, a reply — and that is wired
+to the framed ceremony the sign-in card uses, through one shared `SignInFlow`
+(`leptos-app/src/sign_in_ceremony.rs`). Raising it while a ceremony is already
+open is a no-op, which the crate requires of the callback. A completed
+sign-in reloads and boots as the member.
+
+**No re-mint at connect.** ankurah's websocket handshake carries no credential
+at all — every request signs itself with the claims of the context it runs
+through — so a token is not presented until the first query, and one minted
+milliseconds earlier cannot be stale. A token that expires under a tab left
+open past two hours is real, and recovering means calling
+`auth::mint_guest_token()` again and setting the session pair `ChatApp` holds.
+That is #86.
+
+**Known rough edge, in the crate rather than here.** The components resolve
+author names through one shared `user` LiveQuery, and a refusal is logged
+without being cached — so a guest's console collects
+`Failed to create the shared members LiveQuery: AccessDenied(CollectionDenied
+("user"))` roughly three or four times per rendered message row, for as long
+as the session lasts. Nothing breaks; the rows render nameless as designed.
+The fix belongs to `ankurah-chat-leptos` (cache the refusal per session
+generation) and rides its own pin bump.
 
 ## Status — sign-out hint ownership (2026-08-06)
 
