@@ -4,7 +4,10 @@
 //! FOR: the community should see whether ankurah's CI is green without leaving
 //! chat, and the personal-website embed (#46) wants that status as a live
 //! surface. A GitHub Actions job POSTs a workflow's conclusion here the moment
-//! it finishes; this module turns that POST into one chat message.
+//! it finishes; this module turns that POST into one chat message. A
+//! successful release-branch publish arrives on the same path carrying the
+//! version and notes it shipped, and renders as a release announcement rather
+//! than a status line (see [`format_release_announcement`]).
 //!
 //! # Trust boundary
 //!
@@ -203,6 +206,14 @@ struct CiReport {
     conclusion: String,
     /// Link to the run page on github.com.
     run_url: String,
+    /// The version a successful release-branch publish shipped, e.g. `0.9.2`.
+    /// The reporter attaches it only to a green `Publish Crates` run on a
+    /// `release/*` branch; every ordinary conclusion omits it, and a reporter
+    /// that predates the field parses here as `None`.
+    release_version: Option<String>,
+    /// The RELEASES notes line for that version. Rendered only alongside
+    /// `release_version`.
+    release_notes: Option<String>,
 }
 
 /// Why a delivery was refused. `reason` is client-visible on purpose — someone
@@ -390,11 +401,20 @@ async fn post_message(hook: &CiHook, text: &str) -> Result<EntityId> {
     Ok(id)
 }
 
-/// Render a report as chat text: a status line, then the run link.
+/// Render a report as chat text: a status line, then the run link — except
+/// that a successful release-branch publish renders as a release announcement,
+/// the one conclusion a reader is actually waiting for (see
+/// [`format_release_announcement`]).
 ///
 /// Every interpolated field is [`sanitize`]d first — see the module header for
 /// why a signed payload is still untrusted content.
 fn format_message(report: &CiReport) -> String {
+    if report.conclusion == "success" {
+        if let Some(version) = report.release_version.as_deref() {
+            return format_release_announcement(report, version);
+        }
+    }
+
     let icon = match report.conclusion.as_str() {
         "success" => "✅",
         // A timeout is a red build to everyone who reads this channel.
@@ -417,6 +437,34 @@ fn format_message(report: &CiReport) -> String {
         Some(url) => format!("{status}\n{url}"),
         None => status,
     }
+}
+
+/// Render a successful release-branch publish as an announcement: the version
+/// is the headline, the RELEASES notes line is the body, the run link closes.
+///
+/// Only [`format_message`]'s `success` arm reaches here — the reporter attaches
+/// the release fields solely to green publishes, but a signed payload is still
+/// caller-shaped, so a failed publish carrying them renders as a red status
+/// line like any other failure. The notes are the one field here that is prose
+/// rather than an identifier, so they get a longer [`sanitize`] budget; a blank
+/// or absent notes field drops the line rather than printing `unknown` where
+/// silence is the truth.
+fn format_release_announcement(report: &CiReport, version: &str) -> String {
+    let repo = sanitize(&report.repo, 64);
+    let version = sanitize(version, 32);
+    let branch = sanitize(&report.branch, 64);
+    let sha = short_sha(&report.sha);
+
+    let mut message = format!("📦 {repo} · {version} released · {branch} @ {sha}");
+    if let Some(notes) = report.release_notes.as_deref().filter(|notes| !notes.trim().is_empty()) {
+        message.push('\n');
+        message.push_str(&sanitize(notes, 300));
+    }
+    if let Some(url) = safe_run_url(&report.run_url) {
+        message.push('\n');
+        message.push_str(url);
+    }
+    message
 }
 
 /// Punctuation allowed to survive into message text. What is missing is the
@@ -717,6 +765,18 @@ mod tests {
             sha: "abc1234def5678".into(),
             conclusion: conclusion.into(),
             run_url: run_url.into(),
+            release_version: None,
+            release_notes: None,
+        }
+    }
+
+    /// [`report`], plus the fields the reporter attaches to a green publish.
+    fn release_report(version: &str, notes: &str) -> CiReport {
+        CiReport {
+            workflow: "Publish Crates".into(),
+            release_version: Some(version.into()),
+            release_notes: Some(notes.into()),
+            ..report("release/0.9", "success", RUN_URL)
         }
     }
 
@@ -792,6 +852,59 @@ mod tests {
         let text = format_message(&report(&"a".repeat(500), "success", RUN_URL));
         assert!(text.contains('…'), "{text}");
         assert!(text.lines().next().unwrap().chars().count() < 160, "{text}");
+    }
+
+    #[test]
+    fn a_release_publish_renders_as_an_announcement() {
+        assert_eq!(
+            format_message(&release_report("0.9.2", "retrieve privilege: by-id reads below scan")),
+            format!("📦 ankurah/ankurah · 0.9.2 released · release/0.9 @ abc1234\nretrieve privilege by-id reads below scan\n{RUN_URL}")
+        );
+    }
+
+    #[test]
+    fn release_fields_on_a_failed_publish_stay_a_status_line() {
+        // The reporter only attaches the fields to a green publish, but the
+        // payload is caller-shaped: a red publish claiming a version must not
+        // read as a shipped release.
+        let mut failed = release_report("0.9.2", "notes");
+        failed.conclusion = "failure".into();
+        let text = format_message(&failed);
+        assert!(text.starts_with("❌"), "{text}");
+        assert!(!text.contains("released"), "{text}");
+    }
+
+    #[test]
+    fn blank_or_absent_notes_drop_the_notes_line() {
+        let mut quiet = release_report("0.9.2", "   ");
+        assert_eq!(format_message(&quiet).lines().count(), 2, "blank notes must not render as a line");
+        quiet.release_notes = None;
+        assert_eq!(format_message(&quiet).lines().count(), 2, "absent notes must not render as a line");
+    }
+
+    #[test]
+    fn release_notes_cannot_smuggle_links_or_mentions() {
+        // The notes line is a new splice point for payload prose, so it gets
+        // the same proof as the branch name: no mention token survives, and
+        // the only fetchable URL left in the message is the run link.
+        let text = format_message(&release_report("0.9.2", "see [docs](https://evil.example) <@AZk3jW0RvkW8pTGnQxYzAA>"));
+        assert!(community_model::parse_mentions(&text).is_empty(), "{text}");
+        assert_eq!(community_model::extract_urls(&text), vec![RUN_URL.to_string()], "{text}");
+    }
+
+    #[test]
+    fn payloads_with_and_without_release_fields_both_parse() {
+        // Deploy-order freedom in both directions: yesterday's reporter omits
+        // the fields, tomorrow's sends them.
+        let old: CiReport = serde_json::from_slice(BODY).unwrap();
+        assert_eq!(old.release_version, None);
+
+        let with_fields: CiReport = serde_json::from_str(
+            r#"{"repo":"ankurah/ankurah","workflow":"Publish Crates","branch":"release/0.9","sha":"abc1234","conclusion":"success","run_url":"https://github.com/ankurah/ankurah/actions/runs/42","release_version":"0.9.2","release_notes":"notes"}"#,
+        )
+        .unwrap();
+        assert_eq!(with_fields.release_version.as_deref(), Some("0.9.2"));
+        assert_eq!(with_fields.release_notes.as_deref(), Some("notes"));
     }
 }
 
