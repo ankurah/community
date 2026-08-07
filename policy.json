@@ -8,6 +8,7 @@
   "collections": {
     "user": {
       "read": "signed_in",
+      "retrieve": "view",
       "write": "post",
       "scope": [
         { "filter": "oidc_sub = $jwt.custom.oidc_sub", "applies_to": "write", "unless_privilege": "moderate" }

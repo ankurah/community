@@ -148,11 +148,19 @@ async fn a_guest_reads_the_conversation() {
     assert!(guest.get::<LinkPreviewView>(preview).await.is_ok());
 }
 
-/// The no-roster ruling, executable. `user` and `userroles` are the membership
-/// list and its badges; `modaction` is the moderation record. All three sit
-/// behind the signed-in read privilege, so the collection gate refuses a guest
-/// before any row is considered — which is why these are errors rather than
-/// empty resultsets.
+/// The no-roster ruling, executable, in its post-retrieve form. `user` rows
+/// are public to whoever can NAME one — `retrieve: view` admits a by-id get,
+/// which is how a guest renders an author's name — but the roster itself
+/// stays a member privilege: a guest's user QUERY is refused. (Refused with
+/// an error rather than an empty resultset, and the texture is worth a
+/// sentence: user carries a write-only scope rule, which routes its scans
+/// through jwt-auth's scoped composition, and a caller with no
+/// scan-privileged credential is refused there; a scope-free collection
+/// would answer empty instead — ankurah#465 tracks unifying the two. The
+/// shipped client asks neither way: nothing opens a roster for a guest
+/// since the author rework.) `userroles` and `modaction` carry no retrieve
+/// field, so their collection gates refuse a guest before any row is
+/// considered, exactly as before — and ids buy nothing there.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_guest_reads_no_roster_and_no_moderation_log() {
     let (node, root) = guest_node().await;
@@ -179,12 +187,15 @@ async fn a_guest_reads_no_roster_and_no_moderation_log() {
     trx.commit().await.unwrap();
 
     let guest = guest(&node);
-    assert!(guest.fetch::<UserView>("true").await.is_err(), "no roster for a guest");
+    assert!(guest.fetch::<UserView>("true").await.is_err(), "no roster for a guest: the scan is refused (see the doc comment for the texture)");
     assert!(guest.fetch::<UserRolesView>("true").await.is_err(), "no role badges for a guest");
     assert!(guest.fetch::<ModActionView>("true").await.is_err(), "the moderation log is community business");
 
-    // Knowing an id buys nothing: the gate is on the collection, not the query.
-    assert!(guest.get::<UserView>(author).await.is_err());
+    // Naming a user row is exactly what buys it — the retrieve tier is the
+    // guest author-names feature, live through a real node.
+    assert!(guest.get::<UserView>(author).await.is_ok(), "a guest follows an author ref it holds");
+    // For everything else, knowing an id still buys nothing: no retrieve
+    // field, so the gate is on the collection, not the query.
     assert!(guest.get::<UserRolesView>(roles).await.is_err());
     assert!(guest.get::<ModActionView>(action).await.is_err());
 
