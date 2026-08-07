@@ -581,16 +581,19 @@ fn members_can_write_dm_collections_at_the_collection_gate() {
 
 /// The whole guest posture in one privilege split. `view` is the read tier an
 /// anonymous visitor gets — rooms, messages, reactions, link previews, the
-/// things a page has to render to be worth arriving at. `signed_in` is the tier
-/// the bearer must have signed in for, and exactly three collections sit behind
-/// it:
-/// `user` and `userroles` (no roster for the street — a guest reads the
-/// conversation, not the membership list) and `modaction` (moderation records
-/// are community business).
+/// things a page has to render to be worth arriving at — plus, since `user`
+/// gained `retrieve: view` (ankurah-jwt-auth 0.9.2), a user row the guest can
+/// NAME: message refs carry author ids, and following one is how a guest
+/// renders "Ada" instead of "Unknown". `signed_in` is the tier the bearer must
+/// have signed in for, and it still guards what it always guarded — the
+/// roster boundary moved from `user`'s entry gate to its scan check (listing
+/// and querying), while `userroles` (membership list by another door) and
+/// `modaction` (moderation records are community business) stay entirely
+/// behind the gate.
 ///
-/// Both halves are asserted, because either one alone would pass while the
-/// feature was broken: a guest with too much reads the roster, and a guest with
-/// too little sees an empty room.
+/// Every half is asserted, because any one alone would pass while the feature
+/// was broken: a guest with too much lists the roster, and a guest with too
+/// little sees an empty room and nameless authors.
 #[test]
 fn the_guest_read_tier_covers_the_conversation_and_stops_at_the_roster() {
     let config = policy();
@@ -603,10 +606,18 @@ fn the_guest_read_tier_covers_the_conversation_and_stops_at_the_roster() {
             "a guest must be able to read {collection} — it is part of what an anonymous reader sees"
         );
     }
-    for collection in ["user", "userroles", "modaction"] {
+    assert!(
+        config.can_access_collection(&guest, &"user".into()),
+        "a guest reaches user's entry gate: the retrieve tier is what lets a ref follow resolve an author"
+    );
+    assert!(
+        !config.can_scan_collection(&guest, &"user".into()),
+        "a guest must NOT scan user: retrieve admits naming a row, never listing the roster"
+    );
+    for collection in ["userroles", "modaction"] {
         assert!(
             !config.can_access_collection(&guest, &collection.into()),
-            "a guest must NOT reach {collection}: the collection gate is what keeps the roster and the mod log signed-in-only"
+            "a guest must NOT reach {collection}: no retrieve field, so the collection gate refuses as it always did"
         );
     }
 }
@@ -647,27 +658,43 @@ fn signed_in_roles_keep_every_collection_they_could_read_before() {
 }
 
 /// The invariant that has to keep holding as roles are added, and the reason it
-/// needs stating at all: `can_access_collection` passes on the read privilege
-/// OR the write one. `signed_in` shuts the roster and the mod log today only
-/// because no role holds `post`, `moderate` or `system` without also holding
-/// `signed_in` — add `"contributor": ["view", "post"]` and it would read the
-/// roster through `user`'s WRITE gate, having been granted no read privilege
-/// for it at all.
+/// needs stating at all: a SCAN — listing, querying, subscribing — passes on
+/// the read privilege OR the write one. `signed_in` shuts the roster and the
+/// mod log today only because no role holds `post`, `moderate` or `system`
+/// without also holding `signed_in` — add `"contributor": ["view", "post"]`
+/// and it would scan the roster through `user`'s WRITE gate, having been
+/// granted no read privilege for it at all.
 ///
 /// So this asserts the biconditional over every role in the file, the ones
-/// there now and the ones somebody adds later: reaching one of the three is
-/// exactly holding `signed_in`.
+/// there now and the ones somebody adds later: SCANNING one of the three is
+/// exactly holding `signed_in`. The entry gate is asserted separately,
+/// because `user`'s is deliberately wider — `retrieve: view` admits a
+/// by-name ref follow (that is the guest author-names feature) — and this
+/// pins that it is exactly that wide and no wider, while `userroles` and
+/// `modaction` keep gate == signed_in with no widening at all.
 #[test]
-fn only_signed_in_roles_reach_the_signed_in_collections() {
+fn only_signed_in_roles_scan_the_signed_in_collections() {
     let config = policy();
     for role in config.roles.keys() {
         let roles = [role.clone()];
         let signed_in = config.roles_have_privilege(&roles, "signed_in");
         for collection in ["user", "userroles", "modaction"] {
             assert_eq!(
+                config.can_scan_collection(&roles, &collection.into()),
+                signed_in,
+                "role '{role}' scans {collection} iff it holds signed_in — a role that may WRITE a collection also passes its scan check"
+            );
+        }
+        assert_eq!(
+            config.can_access_collection(&roles, &"user".into()),
+            signed_in || config.roles_have_privilege(&roles, "view"),
+            "role '{role}' reaches user's entry gate iff it holds signed_in or view — retrieve: view is the only widening"
+        );
+        for collection in ["userroles", "modaction"] {
+            assert_eq!(
                 config.can_access_collection(&roles, &collection.into()),
                 signed_in,
-                "role '{role}' reaches {collection} iff it holds signed_in — a role that may WRITE a collection also passes its read gate"
+                "role '{role}' reaches {collection} iff it holds signed_in — no retrieve field, the gate is still the boundary"
             );
         }
     }
