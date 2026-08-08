@@ -1,7 +1,10 @@
 //! Validation of idp.to OIDC ID tokens (the "federate" half of
 //! federate-and-remint). We verify the RS256 signature against idp.to's JWKS,
-//! plus `iss` / `aud` / `exp` (and the `nonce` when the client supplies it),
-//! then hand the extracted identity to the mint step in `main.rs`.
+//! then the OIDC Core §3.1.3.7 claim set: `iss` and `aud` present and correct,
+//! `exp` unexpired, `nbf` respected, `azp` naming us on a multi-audience
+//! token, `iat` not in the future, and the `nonce` when the client supplies
+//! it. Only then is the extracted identity handed to the mint step in
+//! `main.rs`.
 //!
 //! This is deliberately *not* `ankurah_jwt_auth` — that crate verifies a single
 //! local PEM (our own minting key). idp.to publishes a rotating JWKS keyed by
@@ -9,11 +12,17 @@
 //! ankurah session token signed with our own `SigningKeys`.
 
 use std::collections::HashMap;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context, Result};
 use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
 use serde::Deserialize;
 use tokio::sync::RwLock;
+
+/// Clock skew tolerated on every time-based claim — `exp`, `nbf`, and our own
+/// `iat`-not-in-the-future check. One minute is the usual allowance for a
+/// client and the IdP disagreeing about the wall clock.
+const CLOCK_SKEW_SECS: u64 = 60;
 
 /// idp.to config, overridable by env for testing / future re-pointing.
 const DEFAULT_ISSUER: &str = "https://id.idp.to";
@@ -35,8 +44,10 @@ pub struct VerifiedIdentity {
     pub roles: Vec<String>,
 }
 
-/// Only the claims we read. `jsonwebtoken` validates `iss`/`aud`/`exp`
-/// separately via `Validation`, so they need not appear here.
+/// Only the claims we read. `jsonwebtoken` validates `iss`/`aud`/`exp`/`nbf`
+/// (presence and value) via `Validation`, so those are here only where we
+/// ALSO inspect them ourselves — `aud` to enforce the multi-audience `azp`
+/// rule, which `jsonwebtoken` does not cover.
 #[derive(Debug, Deserialize)]
 struct IdTokenClaims {
     sub: String,
@@ -46,6 +57,22 @@ struct IdTokenClaims {
     name: Option<String>,
     #[serde(default)]
     nonce: Option<String>,
+    /// Audience, read back raw only to tell a single-audience token from a
+    /// multi-audience one. `jsonwebtoken` already enforces that `aud` is
+    /// present and contains our client_id; the count is what decides whether
+    /// `azp` is required (see [`check_authorized_party`]).
+    #[serde(default)]
+    aud: Option<serde_json::Value>,
+    /// Authorized party. Present when the IdP minted the token for one party
+    /// among several audiences; when present it must be our client_id, and a
+    /// multi-audience token must carry it. See [`check_authorized_party`].
+    #[serde(default)]
+    azp: Option<String>,
+    /// Issued-at, sanity-checked against the clock: a token stamped in the
+    /// future is malformed or from a badly-skewed issuer. See
+    /// [`check_issued_at`].
+    #[serde(default)]
+    iat: Option<i64>,
     /// Per-Application `roles` claim: a JSON array of stable lowercase role
     /// keys (e.g. `["member","moderator"]`), gated by the idp.to `roles`
     /// scope. Captured as a raw `Value` — not `Vec<String>` — so token PARSING
@@ -81,6 +108,43 @@ fn extract_roles(claim: Option<&serde_json::Value>) -> Result<Vec<String>> {
         .collect()
 }
 
+/// OIDC Core §3.1.3.7 (4)-(5), the party-confusion guard `jsonwebtoken` does
+/// not cover. `jsonwebtoken` has already established that `aud` contains our
+/// client_id; this adds the rest: an `azp` present at all must name us, and a
+/// token audienced to more than one party must carry `azp` (so that a token
+/// legitimately minted for some other party, merely listing us among its
+/// audiences, cannot be replayed into our flow).
+fn check_authorized_party(aud: Option<&serde_json::Value>, azp: Option<&str>, client_id: &str) -> Result<()> {
+    if let Some(azp) = azp {
+        if azp != client_id {
+            return Err(anyhow!("id_token `azp` names a different authorized party"));
+        }
+        return Ok(());
+    }
+    // No azp: only allowed for a single-audience token.
+    let multi = matches!(aud, Some(serde_json::Value::Array(entries)) if entries.len() > 1);
+    if multi {
+        return Err(anyhow!("id_token carries multiple audiences but no `azp`"));
+    }
+    Ok(())
+}
+
+/// `iat` must be present and not meaningfully in the future — a future stamp
+/// means a malformed token or a badly-skewed issuer. A past `iat` is normal
+/// (tokens age within their `exp`), so no lower bound is imposed here: `exp`,
+/// which `jsonwebtoken` requires and validates, is what bounds token life.
+fn check_issued_at(iat: Option<i64>, now: i64, leeway: i64) -> Result<()> {
+    let iat = iat.ok_or_else(|| anyhow!("id_token has no `iat` claim"))?;
+    if iat > now + leeway {
+        return Err(anyhow!("id_token `iat` is in the future"));
+    }
+    Ok(())
+}
+
+fn now_unix_secs() -> i64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
+}
+
 #[derive(Debug, Deserialize)]
 struct Jwks {
     keys: Vec<Jwk>,
@@ -108,9 +172,17 @@ pub struct OidcVerifier {
 impl OidcVerifier {
     /// Build from env with idp.to defaults.
     pub fn from_env() -> Self {
-        let issuer = env_or("OIDC_ISSUER", DEFAULT_ISSUER);
-        let client_id = env_or("OIDC_CLIENT_ID", DEFAULT_CLIENT_ID);
-        let jwks_uri = env_or("OIDC_JWKS_URI", DEFAULT_JWKS_URI);
+        Self::new(
+            env_or("OIDC_ISSUER", DEFAULT_ISSUER),
+            env_or("OIDC_CLIENT_ID", DEFAULT_CLIENT_ID),
+            env_or("OIDC_JWKS_URI", DEFAULT_JWKS_URI),
+        )
+    }
+
+    /// Construct with explicit config. `from_env` is the production path; tests
+    /// use this to point the verifier at a locally-generated key instead of
+    /// idp.to's JWKS.
+    pub(crate) fn new(issuer: String, client_id: String, jwks_uri: String) -> Self {
         Self { issuer, client_id, jwks_uri, http: reqwest::Client::new(), keys: RwLock::new(HashMap::new()) }
     }
 
@@ -124,14 +196,33 @@ impl OidcVerifier {
         let kid = header.kid.ok_or_else(|| anyhow!("ID token has no `kid` header"))?;
 
         let key = self.key_for_kid(&kid).await?;
+        self.verify_with_key(id_token, &key, expected_nonce)
+    }
 
+    /// The claim-validation half, given the decoding key already resolved —
+    /// the seam `verify` reaches after the JWKS fetch, and the one the tests
+    /// drive against a locally-generated key. Everything OIDC Core §3.1.3.7
+    /// asks of an id_token happens here.
+    fn verify_with_key(&self, id_token: &str, key: &DecodingKey, expected_nonce: Option<&str>) -> Result<VerifiedIdentity> {
         let mut validation = Validation::new(Algorithm::RS256);
         validation.set_issuer(&[self.issuer.as_str()]);
         validation.set_audience(&[self.client_id.as_str()]);
-        // `exp` is validated by default.
+        // Require these PRESENT, not merely valid-when-present: jsonwebtoken
+        // defaults to requiring `exp` alone, which would admit a token that
+        // simply omits `iss` or `aud`. An OIDC id_token must carry both.
+        validation.set_required_spec_claims(&["exp", "iss", "aud"]);
+        // Honor `nbf` (off by default): a token is not usable before its
+        // not-before time. Optional in OIDC, so this checks it only when
+        // present rather than requiring it.
+        validation.validate_nbf = true;
+        // One explicit skew for every time-based check.
+        validation.leeway = CLOCK_SKEW_SECS;
 
-        let data = decode::<IdTokenClaims>(id_token, &key, &validation).context("ID token failed validation")?;
+        let data = decode::<IdTokenClaims>(id_token, key, &validation).context("ID token failed validation")?;
         let claims = data.claims;
+
+        check_authorized_party(claims.aud.as_ref(), claims.azp.as_deref(), &self.client_id)?;
+        check_issued_at(claims.iat, now_unix_secs(), CLOCK_SKEW_SECS as i64)?;
 
         if let Some(expected) = expected_nonce {
             match claims.nonce.as_deref() {
@@ -273,5 +364,174 @@ mod tests {
             extract_roles(claims.roles.as_ref()).unwrap(),
             vec!["member".to_string(), "moderator".to_string()]
         );
+    }
+
+    // ---- authorized-party guard (OIDC §3.1.3.7 (4)-(5)) --------------------
+
+    #[test]
+    fn azp_guard_matrix() {
+        let me = "client-abc";
+        // Single audience, no azp: fine.
+        assert!(check_authorized_party(Some(&json!("client-abc")), None, me).is_ok());
+        assert!(check_authorized_party(Some(&json!(["client-abc"])), None, me).is_ok());
+        // Multiple audiences with no azp: refused.
+        assert!(check_authorized_party(Some(&json!(["client-abc", "other"])), None, me).is_err());
+        // Multiple audiences, azp names us: fine.
+        assert!(check_authorized_party(Some(&json!(["client-abc", "other"])), Some("client-abc"), me).is_ok());
+        // Any azp that is not us: refused, even single-audience.
+        assert!(check_authorized_party(Some(&json!("client-abc")), Some("other"), me).is_err());
+    }
+
+    #[test]
+    fn iat_guard() {
+        assert!(check_issued_at(Some(100), 100, 60).is_ok(), "iat == now");
+        assert!(check_issued_at(Some(40), 100, 60).is_ok(), "past iat is normal");
+        assert!(check_issued_at(Some(160), 100, 60).is_ok(), "at the leeway boundary");
+        assert!(check_issued_at(Some(161), 100, 60).is_err(), "beyond leeway into the future");
+        assert!(check_issued_at(None, 100, 60).is_err(), "absent iat");
+    }
+
+    // ---- end-to-end token validation against a locally-generated key -------
+    //
+    // A test RSA keypair (server/tests/fixtures/oidc_test_{priv,pub}.pem)
+    // stands in for idp.to's JWKS: we sign tokens with the private half and
+    // drive `verify_with_key` with a `DecodingKey` from the public half, so
+    // the whole §3.1.3.7 check runs with no network.
+
+    use jsonwebtoken::{encode, EncodingKey, Header};
+    use std::sync::OnceLock;
+
+    const TEST_ISS: &str = "https://issuer.test";
+    const TEST_AUD: &str = "client-abc";
+
+    /// A throwaway RSA keypair, minted once per test run rather than committed:
+    /// this repo's `.gitignore` forbids key material in the tree, so the test
+    /// fixtures are generated at runtime instead. Returns the (private, public)
+    /// PEM pair that `sign` and `test_key` share.
+    fn test_pems() -> &'static (String, String) {
+        static PEMS: OnceLock<(String, String)> = OnceLock::new();
+        PEMS.get_or_init(|| {
+            let keys = ankurah_jwt_auth::SigningKeys::generate().expect("generate test signing keys");
+            (keys.private_key_pem().expect("test private pem"), keys.public_key_pem().expect("test public pem"))
+        })
+    }
+
+    fn test_verifier() -> OidcVerifier {
+        OidcVerifier::new(TEST_ISS.to_string(), TEST_AUD.to_string(), "unused".to_string())
+    }
+
+    fn test_key() -> DecodingKey {
+        DecodingKey::from_rsa_pem(test_pems().1.as_bytes()).expect("test public key parses")
+    }
+
+    fn sign(claims: serde_json::Value) -> String {
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = Some("test-kid".to_string());
+        encode(&header, &claims, &EncodingKey::from_rsa_pem(test_pems().0.as_bytes()).expect("test private key parses"))
+            .expect("test token signs")
+    }
+
+    fn base_claims() -> serde_json::Value {
+        let now = now_unix_secs();
+        json!({
+            "sub": "idp-sub-1",
+            "iss": TEST_ISS,
+            "aud": TEST_AUD,
+            "exp": now + 3600,
+            "iat": now,
+            "nonce": "n-1",
+            "roles": ["member"],
+        })
+    }
+
+    fn without(mut claims: serde_json::Value, key: &str) -> serde_json::Value {
+        claims.as_object_mut().unwrap().remove(key);
+        claims
+    }
+
+    fn with(mut claims: serde_json::Value, key: &str, value: serde_json::Value) -> serde_json::Value {
+        claims[key] = value;
+        claims
+    }
+
+    #[test]
+    fn valid_token_accepted() {
+        let identity = test_verifier().verify_with_key(&sign(base_claims()), &test_key(), Some("n-1")).unwrap();
+        assert_eq!(identity.sub, "idp-sub-1");
+        assert_eq!(identity.roles, vec!["member".to_string()]);
+    }
+
+    #[test]
+    fn missing_iss_rejected() {
+        assert!(test_verifier().verify_with_key(&sign(without(base_claims(), "iss")), &test_key(), None).is_err());
+    }
+
+    #[test]
+    fn missing_aud_rejected() {
+        assert!(test_verifier().verify_with_key(&sign(without(base_claims(), "aud")), &test_key(), None).is_err());
+    }
+
+    #[test]
+    fn wrong_iss_rejected() {
+        let token = sign(with(base_claims(), "iss", json!("https://evil.test")));
+        assert!(test_verifier().verify_with_key(&token, &test_key(), None).is_err());
+    }
+
+    #[test]
+    fn foreign_single_aud_rejected() {
+        let token = sign(with(base_claims(), "aud", json!("someone-else")));
+        assert!(test_verifier().verify_with_key(&token, &test_key(), None).is_err());
+    }
+
+    #[test]
+    fn multi_aud_with_matching_azp_accepted() {
+        let claims = with(with(base_claims(), "aud", json!([TEST_AUD, "other"])), "azp", json!(TEST_AUD));
+        assert!(test_verifier().verify_with_key(&sign(claims), &test_key(), Some("n-1")).is_ok());
+    }
+
+    #[test]
+    fn multi_aud_with_foreign_azp_rejected() {
+        let claims = with(with(base_claims(), "aud", json!([TEST_AUD, "other"])), "azp", json!("other"));
+        assert!(test_verifier().verify_with_key(&sign(claims), &test_key(), None).is_err());
+    }
+
+    #[test]
+    fn multi_aud_without_azp_rejected() {
+        let claims = with(base_claims(), "aud", json!([TEST_AUD, "other"]));
+        assert!(test_verifier().verify_with_key(&sign(claims), &test_key(), None).is_err());
+    }
+
+    #[test]
+    fn future_nbf_rejected() {
+        let token = sign(with(base_claims(), "nbf", json!(now_unix_secs() + 3600)));
+        assert!(test_verifier().verify_with_key(&token, &test_key(), None).is_err());
+    }
+
+    #[test]
+    fn past_nbf_accepted() {
+        let token = sign(with(base_claims(), "nbf", json!(now_unix_secs() - 60)));
+        assert!(test_verifier().verify_with_key(&token, &test_key(), Some("n-1")).is_ok());
+    }
+
+    #[test]
+    fn future_iat_rejected() {
+        let token = sign(with(base_claims(), "iat", json!(now_unix_secs() + 3600)));
+        assert!(test_verifier().verify_with_key(&token, &test_key(), None).is_err());
+    }
+
+    #[test]
+    fn missing_iat_rejected() {
+        assert!(test_verifier().verify_with_key(&sign(without(base_claims(), "iat")), &test_key(), None).is_err());
+    }
+
+    #[test]
+    fn expired_token_rejected() {
+        let token = sign(with(base_claims(), "exp", json!(now_unix_secs() - 3600)));
+        assert!(test_verifier().verify_with_key(&token, &test_key(), None).is_err());
+    }
+
+    #[test]
+    fn nonce_mismatch_rejected() {
+        assert!(test_verifier().verify_with_key(&sign(base_claims()), &test_key(), Some("wrong")).is_err());
     }
 }
