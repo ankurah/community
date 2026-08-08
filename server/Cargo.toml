@@ -42,7 +42,12 @@ tracing-subscriber = "0.3"
 # reqwest is rustls-only (no openssl) and doubles as the unfurl worker's
 # HTTP client; `url` is reqwest's own URL type (same crate, zero new code)
 # taken directly so the SSRF guard can match on url::Host.
-jsonwebtoken = "9"
+# jsonwebtoken floor is 10.3: before that, a wrong-JSON-typed `exp`/`nbf`
+# (e.g. a string) was treated as absent rather than invalid (CVE-2026-25537),
+# which voids `validate_nbf` for exactly the malformed tokens it should catch.
+# The `rust_crypto` backend (v10 makes the choice mandatory) keeps the build
+# pure-Rust: aws_lc_rs would add a second, native crypto stack beside ring.
+jsonwebtoken = { version = "10.3", features = ["rust_crypto"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
