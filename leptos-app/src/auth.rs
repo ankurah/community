@@ -640,7 +640,30 @@ pub fn sign_out() {
                     redirect = enc(&format!("{origin}/")),
                 )
             }
-            _ => "/".to_string(),
+            // The degrade path: local state is already cleared, but the idp.to
+            // session is left standing, so the next "Sign in" may re-admit
+            // without a passkey. This is silent by nature — a reload to "/" —
+            // and a silent no-op is exactly what hides a broken sign-out, so
+            // name the reason. Two ways to land here: the discovery document
+            // advertised no `end_session_endpoint` (nothing we can call), or
+            // this tab held no id_token hint it owned (the pairing guards
+            // against presenting another session's hint — see
+            // `take_id_token_if_owned`; a reader holding several accounts can
+            // reach this even with a live session).
+            (None, _) => {
+                tracing::warn!(
+                    "sign-out: idp.to discovery advertises no end_session_endpoint; \
+                     signed out locally only, the idp.to session is left standing"
+                );
+                "/".to_string()
+            }
+            (Some(_), None) => {
+                tracing::warn!(
+                    "sign-out: no owned id_token hint for this session; \
+                     signed out locally only, the idp.to session is left standing"
+                );
+                "/".to_string()
+            }
         };
         let _ = w.location().set_href(&target);
     });
