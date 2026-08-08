@@ -393,10 +393,10 @@ mod tests {
 
     // ---- end-to-end token validation against a locally-generated key -------
     //
-    // A test RSA keypair (server/tests/fixtures/oidc_test_{priv,pub}.pem)
-    // stands in for idp.to's JWKS: we sign tokens with the private half and
-    // drive `verify_with_key` with a `DecodingKey` from the public half, so
-    // the whole §3.1.3.7 check runs with no network.
+    // A runtime-generated RSA keypair (see `test_pems`) stands in for idp.to's
+    // JWKS: we sign tokens with the private half and drive `verify_with_key`
+    // with a `DecodingKey` from the public half, so the whole §3.1.3.7 check
+    // runs with no network.
 
     use jsonwebtoken::{encode, EncodingKey, Header};
     use std::sync::OnceLock;
@@ -511,6 +511,24 @@ mod tests {
     fn past_nbf_accepted() {
         let token = sign(with(base_claims(), "nbf", json!(now_unix_secs() - 60)));
         assert!(test_verifier().verify_with_key(&token, &test_key(), Some("n-1")).is_ok());
+    }
+
+    #[test]
+    fn string_nbf_rejected() {
+        // jsonwebtoken before 10.3.0 classified a wrong-JSON-typed `nbf` as
+        // absent (CVE-2026-25537), silently skipping the not-before check for
+        // exactly the malformed tokens it should catch; 10.3+ rejects the
+        // token instead. This pins the rejection.
+        let token = sign(with(base_claims(), "nbf", json!("99999999999")));
+        assert!(test_verifier().verify_with_key(&token, &test_key(), None).is_err());
+    }
+
+    #[test]
+    fn string_exp_rejected() {
+        // The `exp` flavor of the same type confusion: a string `exp` must
+        // invalidate the token, not evaporate the expiry check.
+        let token = sign(with(base_claims(), "exp", json!("99999999999")));
+        assert!(test_verifier().verify_with_key(&token, &test_key(), None).is_err());
     }
 
     #[test]
