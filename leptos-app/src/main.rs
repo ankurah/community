@@ -570,7 +570,7 @@ pub fn ChatApp() -> impl IntoView {
         // raise it again on every write they attempt; `begin` is idempotent, so
         // a raise while the ceremony is already up is a no-op.
         .on_auth_demand(move || sign_in.begin())
-        .hooks(chat_hooks::chat_hooks(previews_by_url, profile))
+        .hooks(chat_hooks::chat_hooks(previews_by_url, profile, viewer))
         .provide();
 
     // Notification sounds, which want a per-room message window. The rooms

@@ -37,16 +37,24 @@ pub type ProfileAnchor = RwSignal<Option<(EntityId, i32, i32)>>;
 
 /// Assemble the hooks. `previews` is the app-wide url → row map the link cards
 /// look themselves up in; `profile` is the signal `ChatApp` renders the
-/// popover from.
-pub fn chat_hooks(previews: Memo<HashMap<String, LinkPreviewView>>, profile: ProfileAnchor) -> ChatHooks {
+/// popover from; `viewer` is who is reading, `None` for a guest.
+///
+/// The profile popover and the member-detail panel both open on member-only
+/// data (the popover reads `userroles`, the panel the roster), so both are
+/// withheld from a guest: passing `None` for those hooks makes the crate
+/// render the avatar and `@mention` as inert text rather than a button that
+/// opens an empty surface — a button only where it leads somewhere.
+pub fn chat_hooks(previews: Memo<HashMap<String, LinkPreviewView>>, profile: ProfileAnchor, viewer: Option<EntityId>) -> ChatHooks {
+    let signed_in = viewer.is_some();
     ChatHooks {
         message_extras: Some(Box::new(move |message: MessageView| {
             view! { <LinkPreviewCard message=message previews=previews /> }.into_any()
         })),
         tombstone_body: Some(Box::new(|message: MessageView| view! { <TombstoneNotice message=message /> }.into_any())),
         moderator_delete: Some(Box::new(moderator_delete)),
-        member_preview: Some(Box::new(move |user: EntityId, x: i32, y: i32| profile.set(Some((user, x, y))))),
-        member_detail: Some(Box::new(|user: EntityId| panels().open(Surface::UserDetail(user)))),
+        member_preview: signed_in
+            .then(|| Box::new(move |user: EntityId, x: i32, y: i32| profile.set(Some((user, x, y)))) as Box<dyn Fn(EntityId, i32, i32)>),
+        member_detail: signed_in.then(|| Box::new(|user: EntityId| panels().open(Surface::UserDetail(user))) as Box<dyn Fn(EntityId)>),
         menu_actions: Some(Box::new(inspect_entry)),
     }
 }
