@@ -319,3 +319,26 @@ generation) and rides its own pin bump.
   of their next sign-out. The ceremony's cancel compare
   (`remove_id_token_if_matches`) reads the pair and matches its `id_token`
   field, so a cancelled exchange still takes back exactly its own write.
+
+## Status — framed delivery is web_message (2026-08-09)
+
+- **The framed authorize result is posted, not couriered.** idp.to's embedded
+  page now delivers the authorization response itself:
+  `{type: "authorization_response", response}` posted from the frame to the
+  parent window, `response` carrying the OAuth fields verbatim
+  (`code`/`state`, or `error`/`error_description`/`state`). The ceremony's
+  listener accepts the message only from the property host
+  (`https://ankurah.login.idp.to`) and only for the `state` it is holding; the
+  code then takes the same `complete_sign_in` path it always has. Only the
+  single-use code travels — never a token.
+- **`response_mode=query` is gone from the framed URL.** Dropping it was the
+  adoption switch (#103 pinned it while our listener did not exist), and with
+  it went the in-frame courier: `/auth/callback` relays nothing to a parent
+  any more and serves the top-level flow alone. The framed path never
+  navigates to our origin now, which also removes the Local Network Access
+  refusal that the in-frame callback navigation hit on `http://127.0.0.1:5173`
+  dev.
+- **The card follows the form's height.** The framed page reports
+  `{type: "idp-embed-size", height}` on layout changes; the ceremony applies
+  it (bounded) to the frame's seat, so the card hugs the form. A frame that
+  never loads never reports, and keeps the fixed fallback shape.

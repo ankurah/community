@@ -211,6 +211,11 @@ pub fn SignInCeremony(
 ) -> impl IntoView {
     let phase = RwSignal::new(Phase::Waiting);
 
+    // idp.to's reported form height, once a size report has arrived; the
+    // stage's stylesheet fallback holds until then — and holds for good in a
+    // frame that never loads, since a refused document reports nothing.
+    let reported_height = RwSignal::new(None::<f64>);
+
     // Set once the visitor has asked to stop. The exchange is a spawned future
     // that owns everything it needs before its first await, so unmounting the
     // modal cannot stop it — without this it would run to completion and sign
@@ -227,6 +232,16 @@ pub fn SignInCeremony(
         let on_signed_in = on_signed_in.clone();
         let abandoned = abandoned.clone();
         move |event: MessageEvent| {
+            // The frame's size reports arrive on the same channel as its
+            // result. The stage follows them so the card hugs the form
+            // instead of holding the guessed fallback — clamped, because the
+            // report is a measurement from the framed document, not an
+            // instruction, and the ceremony bounds what it is willing to be.
+            if let Some(height) = auth::read_embed_size(&event) {
+                reported_height.set(Some(height.clamp(240.0, 640.0)));
+                return;
+            }
+
             let verdict = expected_state
                 .try_update_value(|expected| auth::read_framed_message(&event, expected))
                 .unwrap_or(FramedMessage::Ignored);
@@ -357,7 +372,11 @@ pub fn SignInCeremony(
                     on:click=move |_| close_button()
                 >"×"</button>
 
-                <div class="ceremonyStage">
+                <div
+                    class="ceremonyStage"
+                    style:height=move || reported_height.get().map(|h| format!("{h}px")).unwrap_or_default()
+                    style:min-height=move || reported_height.get().map(|_| "0".to_string()).unwrap_or_default()
+                >
                     {move || match phase.get() {
                         Phase::Waiting => view! {
                             <iframe
