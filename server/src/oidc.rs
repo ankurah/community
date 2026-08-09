@@ -68,12 +68,11 @@ struct IdTokenClaims {
     /// (§3.1.3.7 (5)); any other present shape — `null` included — is a
     /// malformed claim and invalidates the token, the same
     /// wrong-type-must-reject rule the `exp`/`nbf` handling follows. Captured
-    /// presence-aware ([`present`]) because serde's plain `Option` folds an
-    /// explicit `null` into "absent", which would let a wrong-typed `azp`
-    /// evaporate instead of failing. The old pairing rule — a multi-audience
-    /// token must carry `azp` — retired when every audience entry became
-    /// required to be us: no multi-party token survives the audience check to
-    /// need it. See [`check_audience_trust`].
+    /// presence-aware ([`present`]) for exactly the `null` case: serde's
+    /// plain `Option` folds an explicit `null` into "absent", while every
+    /// other wrong-typed shape already arrives as a value. The old
+    /// multi-audience-requires-`azp` rule is gone on spec grounds — see
+    /// [`check_audience_trust`].
     #[serde(default, deserialize_with = "present")]
     azp: Option<serde_json::Value>,
     /// Issued-at, sanity-checked against the clock: a token stamped in the
@@ -86,8 +85,12 @@ struct IdTokenClaims {
     /// scope. Captured as a raw `Value` — not `Vec<String>` — so token PARSING
     /// tolerates any shape; `extract_roles` then strictly validates it and
     /// rejects the sign-in with a purposeful error (a well-formed roles array
-    /// is REQUIRED — absent/malformed fails verification).
-    #[serde(default)]
+    /// is REQUIRED — absent/malformed fails verification). Presence-aware
+    /// ([`present`]) like `azp`, so an explicit `"roles": null` is reported
+    /// as "not an array" rather than as a missing claim or scope — the
+    /// message an operator would otherwise chase into the IdP's scope
+    /// config for a claim that is in fact present.
+    #[serde(default, deserialize_with = "present")]
     roles: Option<serde_json::Value>,
 }
 
@@ -134,11 +137,14 @@ fn extract_roles(claim: Option<&serde_json::Value>) -> Result<Vec<String>> {
 /// the client does not trust, and community trusts no audience but itself —
 /// so every entry must be our client_id (a token minted for some other party,
 /// merely listing us among its audiences, cannot be replayed into our flow).
-/// That leaves no multi-party token to admit, which retired the old rule
-/// pairing `azp` presence with audience count; the `azp` rule that remains
-/// (§3.1.3.7 (5)) is that a present `azp` must be a string naming us — any
-/// other present shape (`null` included) is a malformed claim and refuses
-/// the token rather than being read as absent.
+/// The old multi-audience-requires-`azp` rule is dropped on spec grounds,
+/// not merely because self-trust made it unreachable: §3.1.3.7 (4) ties
+/// that check to extensions that define an authorized party, and none is in
+/// use here — so widening trust to a second audience someday must not
+/// resurrect it. What remains is item (5)'s check on a present `azp`: it
+/// must be a string naming us (§2 defines `azp` as a string value), and any
+/// other present shape — `null` included — refuses the token as wrong-typed
+/// rather than being read as absent.
 fn check_audience_trust(aud: Option<&serde_json::Value>, azp: Option<&serde_json::Value>, client_id: &str) -> Result<()> {
     match azp {
         None => {}
@@ -514,20 +520,22 @@ mod tests {
         // any claim check — must refuse it, however valid the claims read.
         let other = ankurah_jwt_auth::SigningKeys::generate().expect("generate second test keypair");
         let other_private = other.private_key_pem().expect("second private pem");
+        let other_key = EncodingKey::from_rsa_pem(other_private.as_bytes()).expect("second private key parses");
         let mut header = Header::new(Algorithm::RS256);
         header.kid = Some("test-kid".to_string());
-        let token = encode(&header, &base_claims(), &EncodingKey::from_rsa_pem(other_private.as_bytes()).expect("second private key parses"))
-            .expect("second-key token signs");
+        let token = encode(&header, &base_claims(), &other_key).expect("second-key token signs");
         assert!(test_verifier().verify_with_key(&token, &test_key(), None).is_err());
     }
 
     #[test]
     fn wrong_algorithm_rejected() {
-        // An HS256 token must be refused outright: the verifier pins RS256,
-        // so no symmetric-key route exists regardless of the claims carried.
+        // The classic RS256→HS256 confusion shape: an HS256 token HMAC'd
+        // over the very public-key bytes the verifier holds. Refused
+        // outright — the verifier pins RS256, so no symmetric-key route
+        // exists regardless of the claims carried.
         let mut header = Header::new(Algorithm::HS256);
         header.kid = Some("test-kid".to_string());
-        let token = encode(&header, &base_claims(), &EncodingKey::from_secret(b"shared-secret"))
+        let token = encode(&header, &base_claims(), &EncodingKey::from_secret(test_pems().1.as_bytes()))
             .expect("HS256 token signs");
         assert!(test_verifier().verify_with_key(&token, &test_key(), None).is_err());
     }
@@ -562,6 +570,19 @@ mod tests {
         // the extra audience.
         let claims = with(with(base_claims(), "aud", json!([TEST_AUD, "other"])), "azp", json!(TEST_AUD));
         assert!(test_verifier().verify_with_key(&sign(claims), &test_key(), Some("n-1")).is_err());
+    }
+
+    #[test]
+    fn null_roles_rejected() {
+        // An explicit `"roles": null` must refuse the token AND say why
+        // accurately: presence-aware capture routes it to extract_roles's
+        // "not an array" arm instead of the missing-claim/scope message.
+        let claims = with(base_claims(), "roles", json!(null));
+        let err = match test_verifier().verify_with_key(&sign(claims), &test_key(), Some("n-1")) {
+            Err(err) => err,
+            Ok(_) => panic!("null roles must refuse the token"),
+        };
+        assert!(err.to_string().contains("not an array"), "got: {err}");
     }
 
     #[test]
