@@ -131,10 +131,8 @@ pub fn is_callback() -> bool {
 /// and hand the tab to idp.to. Navigates away on success, so it only returns on
 /// setup failure.
 ///
-/// This is also the ceremony's escape hatch. A frame that the browser refuses
-/// to display raises no event the parent can hear, so the visitor must always
-/// have this within reach; taking it regenerates every one-time value, which is
-/// why an abandoned framed attempt cannot spoil the next try.
+/// Every call regenerates the one-time values and overwrites the stash, so an
+/// earlier abandoned attempt cannot spoil this one.
 pub fn start_sign_in() -> Result<(), JsValue> {
     let window = window().ok_or_else(|| JsValue::from_str("no window"))?;
     let pending = stash_new_pending(&window)?;
@@ -213,24 +211,15 @@ fn registered_embed_origin() -> Option<&'static str> {
 /// minting a session nobody is waiting for.
 ///
 /// Blunt on purpose, and therefore only safe from a caller that knows no other
-/// attempt can own the stash. Closing the ceremony is very nearly such a
-/// caller: the sign-in button does nothing while a ceremony is up, so no
-/// successor can be started from there. A caller that resumes after an await is
-/// NOT — by then its own material is long consumed and anything present belongs
-/// to a later attempt.
-///
-/// The stash that precondition misses sits right beside the caller. The
-/// ceremony's escape hatch calls [`start_sign_in`], which stashes the top-level
-/// attempt's material and then only *begins* a cross-origin navigation: the
-/// document stays interactive until that navigation commits, with the × and
-/// Escape still live. A close inside that window clears material the visitor is
-/// seconds from spending at idp.to, and they come back to "no saved state
-/// (stale callback?)". The window is narrow and predates the ceremony's cancel
-/// handling — the same clear ran from the same call site before any of it — so
-/// it is left standing rather than patched around here. The durable fix is for
-/// the escape to mark the stash as handed off, so a later close skips the
-/// clear. Written down rather than left for the next caller to rediscover from
-/// a rule that does not quite hold.
+/// attempt can own the stash. Closing the ceremony is such a caller: the
+/// sign-in button does nothing while a ceremony is up, and the card carries no
+/// other control that starts an attempt, so whatever is stashed is the closed
+/// attempt's own. (The card's retired top-level fallback button was the
+/// exception — its [`start_sign_in`] stash sat exposed to a close for the
+/// beat between stashing and its navigation committing. Re-adding any control
+/// to the card that stashes fresh material re-opens that window.) A caller
+/// that resumes after an await is NOT safe — by then its own material is long
+/// consumed and anything present belongs to a later attempt.
 ///
 /// The next attempt generates its own material, so this never blocks a retry.
 pub fn cancel_pending_sign_in() {

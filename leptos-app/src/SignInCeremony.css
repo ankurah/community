@@ -4,13 +4,17 @@
    card is not: idp.to's page inside the frame follows the visitor's own
    light/dark preference, and a card that ignored it would put a bright panel
    around a dark document. So the surround uses the theme tokens and lands on
-   whichever side the frame does. */
+   whichever side the frame does.
 
-/* Scrolls, because the escape hatch has to be reachable at every height the
-   app runs at. A short landscape phone cannot fit the card, and the page
-   behind cannot scroll for it — html/body are fixed and overflow-hidden — so
-   without this the one control that works when the frame does not would sit
-   below the fold with no way to reach it.
+   idp.to's side of the frame is bare on purpose — chromeless, transparent
+   background, zero margin — and the breathing room around the form is this
+   card's to provide: its padding is the frame's visible margin, owned by the
+   parent rather than the framed page. */
+
+/* Scrolls, because the × has to be reachable at every height the app runs
+   at. A short landscape phone cannot fit the card, and the page behind
+   cannot scroll for it — html/body are fixed and overflow-hidden — so
+   without this the way out could sit off-screen with no way to reach it.
 
    `touch-action: pan-y` names the one gesture this box wants. It is not
    undoing body's blanket `none`: a pan is permitted by the values from the
@@ -44,8 +48,8 @@
 }
 
 /* `margin: auto` rather than the overlay centring it: a flex item centred with
-   `align-items` has its overflowing top clipped away, and the header and the ×
-   live up there. */
+   `align-items` has its overflowing top clipped away, and the × lives up
+   there. */
 .ceremonyCard {
   display: flex;
   flex-direction: column;
@@ -73,31 +77,10 @@
   }
 }
 
-.ceremonyHeader {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: var(--sp-3);
-  margin-bottom: var(--sp-4);
-}
-
-.ceremonyHeader h2 {
-  margin: 0;
-  font-size: var(--fs-lg);
-  font-weight: 750;
-  letter-spacing: -0.01em;
-  color: var(--text);
-}
-
-.ceremonySubtitle {
-  margin: 3px 0 0;
-  font-size: var(--fs-md);
-  line-height: 1.5;
-  color: var(--text-3);
-}
-
 .ceremonyClose {
   flex-shrink: 0;
+  align-self: flex-end;
+  margin-bottom: var(--sp-2);
   width: 32px;
   height: 32px;
   display: flex;
@@ -119,17 +102,15 @@
 
 /* The frame's seat. A fixed height rather than one that follows the frame:
    a refused document leaves the element zero-sized and its own height
-   unreadable, so the box has to hold its shape either way. */
+   unreadable, so the box has to hold its shape either way. Undecorated — no
+   border, no fill — so the card's padding reads as the frame's margin and
+   nothing around the form looks like chrome. */
 .ceremonyStage {
   display: flex;
   align-items: center;
   justify-content: center;
   min-height: 420px;
-  padding: 0;
   overflow: hidden;
-  background: var(--surface-3);
-  border: 1px solid var(--border);
-  border-radius: var(--r-lg);
 }
 
 .ceremonyFrame {
@@ -171,62 +152,9 @@
   }
 }
 
-.ceremonyHint {
-  margin: var(--sp-3) 0 0;
-  font-size: var(--fs-sm);
-  line-height: 1.5;
-  text-align: center;
-  color: var(--text-faint);
-}
-
-/* Always on screen, never conditional: a document the browser refuses to
-   frame raises no event, so there is nothing to react to — the way out has to
-   be there before anything goes wrong. */
-.ceremonyEscape {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: var(--sp-2);
-  width: 100%;
-  min-height: 42px;
-  margin-top: var(--sp-3);
-  padding: 0 var(--sp-4);
-  font-size: var(--fs-base);
-  font-weight: 650;
-  color: var(--text);
-  background: var(--surface-2);
-  border: 1px solid var(--border-strong);
-  border-radius: 12px;
-  transition:
-    background-color var(--t-fast) var(--ease),
-    border-color var(--t-fast) var(--ease);
-}
-
-.ceremonyEscape:hover:not(:disabled) {
-  background: var(--surface-3);
-  border-color: var(--primary);
-}
-
-/* Held shut for the seconds the exchange takes, and it has to look it. A
-   button that lights up under the cursor and then does nothing reads as the
-   way out being broken — which is the one thing this control must never
-   look like. */
-.ceremonyEscape:disabled {
-  color: var(--text-faint);
-  border-color: var(--border);
-  cursor: default;
-  opacity: 0.65;
-}
-
-.ceremonyEscape svg {
-  width: 15px;
-  height: 15px;
-  color: var(--text-3);
-}
-
 /* Give the frame back what the viewport does not have. The overlay scrolls
-   whatever is still too tall, but a shorter frame means less scrolling between
-   the visitor and the button underneath it. */
+   whatever is still too tall, but a shorter frame keeps the whole card —
+   frame and × — on screen together where it can. */
 @media (max-height: 720px) {
   .ceremonyStage {
     min-height: 320px;
@@ -261,7 +189,7 @@
 
    FOR: a sign-in that cannot even start writes its reason to the flow's error
    signal with no modal on screen to carry it — the visitor pressed the message
-   box, or the escape hatch, and nothing happened. On the card that reason
+   box and nothing happened. On the card that reason
    lands in `.signInError` inside the layout. In the app there is no such slot,
    so this is one: bottom-centre, above every surface except the ban lockout,
    and dismissible because nothing else on the page will clear it.

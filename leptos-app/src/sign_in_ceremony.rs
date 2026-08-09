@@ -16,9 +16,13 @@
 //! ceremony only opens on an origin idp.to has registered as an embedder — the
 //! rest go straight to the top-level flow — but registration is not a promise:
 //! a browser or extension that blocks framed documents, or trouble on idp.to's
-//! side, lands in the same silence. That is why the way out is a button that is
-//! always on screen rather than something offered once a failure is detected:
-//! there is no failure to detect.
+//! side, lands in the same silence. The card used to answer that case with a
+//! permanent way out — a button to the top-level flow, permanent because with
+//! no failure to detect there is no moment to offer it. It was removed on a
+//! ruling that the card is the frame and nothing else, so on a registered
+//! origin a blocked frame now has no in-app fallback: the visitor closes the
+//! ceremony, and sign-in waits until frames work. The top-level flow still
+//! serves origins idp.to has not registered.
 //!
 //! Custody stays where it was. This component holds the attempt's `state` and
 //! nothing else; the PKCE verifier and nonce stay in `sessionStorage` where
@@ -66,17 +70,16 @@ impl SignInFlow {
 
     /// Why the last attempt did not get anywhere.
     ///
-    /// A HOST MUST PUT THIS SOMEWHERE. Two of the three writers have no modal
-    /// on screen to speak for them: [`SignInFlow::hand_over_the_tab`], when
-    /// `start_sign_in` cannot stash its one-time material, and the ceremony's
-    /// escape hatch handing that same failure up through `on_close`. Both
-    /// leave a visitor pressing a control that does nothing — and for an
-    /// anonymous reader, sign-in is the only way out of read-only, so a
-    /// silent failure there is the whole conversion path failing quietly. The
-    /// card renders this in its own banner; a host without one mounts
-    /// [`SignInFlow::view_with_notice`] rather than [`SignInFlow::view`]. Only
-    /// the third writer — an exchange that failed inside a live ceremony —
-    /// speaks for itself first, in the modal, before landing here.
+    /// A HOST MUST PUT THIS SOMEWHERE. One of the two writers has no modal on
+    /// screen to speak for it: [`SignInFlow::hand_over_the_tab`], when
+    /// `start_sign_in` cannot stash its one-time material. That leaves a
+    /// visitor pressing a control that does nothing — and for an anonymous
+    /// reader, sign-in is the only way out of read-only, so a silent failure
+    /// there is the whole conversion path failing quietly. The card renders
+    /// this in its own banner; a host without one mounts
+    /// [`SignInFlow::view_with_notice`] rather than [`SignInFlow::view`]. The
+    /// other writer — an exchange that failed inside a live ceremony — speaks
+    /// for itself first, in the modal, before landing here.
     pub fn error(&self) -> RwSignal<Option<String>> { self.error }
 
     /// Start a sign-in — and do nothing at all while one is already on screen.
@@ -196,11 +199,10 @@ enum Phase {
 /// The modal that holds the frame. Mounted while an attempt is live; closing it
 /// unmounts the frame and the message listener together.
 ///
-/// `on_close` abandons the attempt — the × and Escape take it, and a failure
-/// leaves it as one of the two ways on, beside the escape hatch. Its argument
-/// is a message the visitor should still be able to read once the modal is
-/// gone: why the attempt failed, or why the escape hatch could not open.
-/// `on_signed_in` receives the minted ankurah session token.
+/// `on_close` abandons the attempt — the × and Escape take it, and after a
+/// failure they are what is left to press. Its argument is a message the
+/// visitor should still be able to read once the modal is gone: why the
+/// attempt failed. `on_signed_in` receives the minted ankurah session token.
 #[component]
 pub fn SignInCeremony(
     attempt: FramedAttempt,
@@ -285,7 +287,6 @@ pub fn SignInCeremony(
     // Stop, whatever is in flight: mark the attempt abandoned, then hand up
     // whatever the visitor should still be able to read once the modal is gone.
     let close = {
-        let on_close = on_close.clone();
         let abandoned = abandoned.clone();
         move || {
             abandoned.set(true);
@@ -326,22 +327,6 @@ pub fn SignInCeremony(
         }
     });
 
-    let escape = {
-        let on_close = on_close.clone();
-        move |_| {
-            // The flow that has always worked: hand the whole tab to idp.to. It
-            // regenerates every one-time value on the way out, so an attempt
-            // abandoned here cannot spoil this one.
-            if let Err(e) = auth::start_sign_in() {
-                // This is the control for when everything else has failed, so
-                // its own failure cannot be swallowed. Close and put the reason
-                // on the card, where the visitor is left standing.
-                tracing::error!("the ceremony's escape hatch could not start top-level sign-in: {:?}", e);
-                on_close(Some(format!("could not open the idp.to sign-in page: {e:?}")));
-            }
-        }
-    };
-
     // Focus starts inside the modal. Otherwise it stays on the button that
     // opened it, one Enter away from restashing fresh material and reloading
     // the frame under a credential prompt already in progress.
@@ -357,21 +342,20 @@ pub fn SignInCeremony(
     view! {
         // No dismiss-on-scrim-click, unlike the app's other modals: a stray
         // click while the credential prompt is up would take the ceremony down
-        // mid-touch. The × and the escape below are the ways out.
+        // mid-touch. The × (and Escape while the parent page holds focus) is
+        // the way out.
+        //
+        // The dialog keeps an accessible name although the card shows no
+        // title: the visible words live on idp.to's page inside the frame,
+        // and a name has to come from this document.
         <div class="ceremonyOverlay" role="dialog" aria-modal="true" aria-label="Sign in with idp.to">
             <div class="ceremonyCard">
-                <div class="ceremonyHeader">
-                    <div>
-                        <h2>"Sign in with idp.to"</h2>
-                        <p class="ceremonySubtitle">"Use the passkey you already have — this page stays where it is."</p>
-                    </div>
-                    <button
-                        class="ceremonyClose"
-                        aria-label="Close"
-                        node_ref=close_ref
-                        on:click=move |_| close_button()
-                    >"×"</button>
-                </div>
+                <button
+                    class="ceremonyClose"
+                    aria-label="Close"
+                    node_ref=close_ref
+                    on:click=move |_| close_button()
+                >"×"</button>
 
                 <div class="ceremonyStage">
                     {move || match phase.get() {
@@ -397,35 +381,6 @@ pub fn SignInCeremony(
                         }.into_any(),
                     }}
                 </div>
-
-                // A refused frame paints its own blank rectangle and the parent
-                // cannot restyle it or hear about it, so the panel above can sit
-                // there empty with nothing to explain it. This line is that
-                // explanation, and it is permanent for the same reason the
-                // button below is: there is no refusal to detect.
-                {move || matches!(phase.get(), Phase::Waiting).then(|| view! {
-                    <p class="ceremonyHint">
-                        "Panel still blank? Some browsers refuse to show idp.to inside another page."
-                    </p>
-                })}
-
-                // Held shut only while the exchange is in flight, so a click
-                // cannot navigate away from a session that is seconds from
-                // being minted. The × beside it is never held shut, so this is
-                // not a moment the visitor can be stuck in.
-                <button
-                    class="ceremonyEscape"
-                    disabled=move || matches!(phase.get(), Phase::Exchanging)
-                    on:click=escape
-                >
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"
-                        stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                        <path d="M14 4h6v6" />
-                        <path d="M20 4 11 13" />
-                        <path d="M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5" />
-                    </svg>
-                    "Open the idp.to sign-in page instead"
-                </button>
             </div>
         </div>
     }
