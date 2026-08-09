@@ -64,12 +64,18 @@ struct IdTokenClaims {
     /// [`check_audience_trust`]).
     #[serde(default)]
     aud: Option<serde_json::Value>,
-    /// Authorized party. When present it must name us (§3.1.3.7 (5)). The old
-    /// pairing rule — a multi-audience token must carry `azp` — retired when
-    /// every audience entry became required to be us: no multi-party token
-    /// survives the audience check to need it. See [`check_audience_trust`].
-    #[serde(default)]
-    azp: Option<String>,
+    /// Authorized party. When present it must be a string naming us
+    /// (§3.1.3.7 (5)); any other present shape — `null` included — is a
+    /// malformed claim and invalidates the token, the same
+    /// wrong-type-must-reject rule the `exp`/`nbf` handling follows. Captured
+    /// presence-aware ([`present`]) because serde's plain `Option` folds an
+    /// explicit `null` into "absent", which would let a wrong-typed `azp`
+    /// evaporate instead of failing. The old pairing rule — a multi-audience
+    /// token must carry `azp` — retired when every audience entry became
+    /// required to be us: no multi-party token survives the audience check to
+    /// need it. See [`check_audience_trust`].
+    #[serde(default, deserialize_with = "present")]
+    azp: Option<serde_json::Value>,
     /// Issued-at, sanity-checked against the clock: a token stamped in the
     /// future is malformed or from a badly-skewed issuer. See
     /// [`check_issued_at`].
@@ -83,6 +89,18 @@ struct IdTokenClaims {
     /// is REQUIRED — absent/malformed fails verification).
     #[serde(default)]
     roles: Option<serde_json::Value>,
+}
+
+/// Keeps a present-but-`null` claim distinct from an absent one: serde's
+/// plain `Option` deserializes JSON `null` to `None`, indistinguishable from
+/// the field not appearing at all. Mapping whatever value IS present into
+/// `Some` preserves the difference, so validation can reject the wrong-typed
+/// claim rather than skip it.
+fn present<'de, D>(deserializer: D) -> Result<Option<serde_json::Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    serde::Deserialize::deserialize(deserializer).map(Some)
 }
 
 /// Pull the REQUIRED `roles` claim into a `Vec<String>`. Strict by design:
@@ -118,12 +136,17 @@ fn extract_roles(claim: Option<&serde_json::Value>) -> Result<Vec<String>> {
 /// merely listing us among its audiences, cannot be replayed into our flow).
 /// That leaves no multi-party token to admit, which retired the old rule
 /// pairing `azp` presence with audience count; the `azp` rule that remains
-/// (§3.1.3.7 (5)) is that a present `azp` must name us.
-fn check_audience_trust(aud: Option<&serde_json::Value>, azp: Option<&str>, client_id: &str) -> Result<()> {
-    if let Some(azp) = azp {
-        if azp != client_id {
+/// (§3.1.3.7 (5)) is that a present `azp` must be a string naming us — any
+/// other present shape (`null` included) is a malformed claim and refuses
+/// the token rather than being read as absent.
+fn check_audience_trust(aud: Option<&serde_json::Value>, azp: Option<&serde_json::Value>, client_id: &str) -> Result<()> {
+    match azp {
+        None => {}
+        Some(serde_json::Value::String(party)) if party == client_id => {}
+        Some(serde_json::Value::String(_)) => {
             return Err(anyhow!("id_token `azp` names a different authorized party"));
         }
+        Some(_) => return Err(anyhow!("id_token `azp` is present but is not a string")),
     }
     let all_trusted = match aud {
         Some(serde_json::Value::String(single)) => single == client_id,
@@ -230,7 +253,7 @@ impl OidcVerifier {
         let data = decode::<IdTokenClaims>(id_token, key, &validation).context("ID token failed validation")?;
         let claims = data.claims;
 
-        check_audience_trust(claims.aud.as_ref(), claims.azp.as_deref(), &self.client_id)?;
+        check_audience_trust(claims.aud.as_ref(), claims.azp.as_ref(), &self.client_id)?;
         check_issued_at(claims.iat, now_unix_secs(), CLOCK_SKEW_SECS as i64)?;
 
         if let Some(expected) = expected_nonce {
@@ -383,17 +406,23 @@ mod tests {
         // Sole audience is us, no azp: fine (string or one-element array).
         assert!(check_audience_trust(Some(&json!("client-abc")), None, me).is_ok());
         assert!(check_audience_trust(Some(&json!(["client-abc"])), None, me).is_ok());
-        // A present azp must name us; when it does, a sole-audience token passes.
-        assert!(check_audience_trust(Some(&json!("client-abc")), Some("client-abc"), me).is_ok());
-        assert!(check_audience_trust(Some(&json!("client-abc")), Some("other"), me).is_err());
+        // A present azp must be a string naming us; when it is, a
+        // sole-audience token passes.
+        assert!(check_audience_trust(Some(&json!("client-abc")), Some(&json!("client-abc")), me).is_ok());
+        assert!(check_audience_trust(Some(&json!("client-abc")), Some(&json!("other")), me).is_err());
+        // A present-but-wrong-typed azp is malformed, not absent: refused
+        // (`null` is the shape serde's plain Option would have swallowed).
+        assert!(check_audience_trust(Some(&json!("client-abc")), Some(&json!(null)), me).is_err());
+        assert!(check_audience_trust(Some(&json!("client-abc")), Some(&json!(42)), me).is_err());
+        assert!(check_audience_trust(Some(&json!("client-abc")), Some(&json!(["client-abc"])), me).is_err());
         // Any audience entry that is not us: refused, whatever the azp says —
         // we trust no other audience (§3.1.3.7 (3)).
         assert!(check_audience_trust(Some(&json!(["client-abc", "other"])), None, me).is_err());
-        assert!(check_audience_trust(Some(&json!(["client-abc", "other"])), Some("client-abc"), me).is_err());
-        assert!(check_audience_trust(Some(&json!(["client-abc", "other"])), Some("other"), me).is_err());
+        assert!(check_audience_trust(Some(&json!(["client-abc", "other"])), Some(&json!("client-abc")), me).is_err());
+        assert!(check_audience_trust(Some(&json!(["client-abc", "other"])), Some(&json!("other")), me).is_err());
         // A degenerate repeat of us alone still lists only trusted parties.
         assert!(check_audience_trust(Some(&json!(["client-abc", "client-abc"])), None, me).is_ok());
-        // Malformed shapes: refused.
+        // Malformed audience shapes: refused.
         assert!(check_audience_trust(Some(&json!([])), None, me).is_err());
         assert!(check_audience_trust(Some(&json!(["client-abc", 7])), None, me).is_err());
         assert!(check_audience_trust(Some(&json!(42)), None, me).is_err());
@@ -532,6 +561,15 @@ mod tests {
         // and we trust only ourselves — a matching `azp` no longer admits
         // the extra audience.
         let claims = with(with(base_claims(), "aud", json!([TEST_AUD, "other"])), "azp", json!(TEST_AUD));
+        assert!(test_verifier().verify_with_key(&sign(claims), &test_key(), Some("n-1")).is_err());
+    }
+
+    #[test]
+    fn null_azp_rejected() {
+        // An explicit `"azp": null` is a malformed claim and must refuse the
+        // token — presence-aware capture keeps it from being read as absent
+        // (the wrong-type-must-reject rule `exp`/`nbf` already follow).
+        let claims = with(base_claims(), "azp", json!(null));
         assert!(test_verifier().verify_with_key(&sign(claims), &test_key(), Some("n-1")).is_err());
     }
 
