@@ -1,10 +1,10 @@
 //! Validation of idp.to OIDC ID tokens (the "federate" half of
 //! federate-and-remint). We verify the RS256 signature against idp.to's JWKS,
 //! then the OIDC Core §3.1.3.7 claim set: `iss` and `aud` present and correct,
-//! `exp` unexpired, `nbf` respected, `azp` naming us on a multi-audience
-//! token, `iat` not in the future, and the `nonce` when the client supplies
-//! it. Only then is the extracted identity handed to the mint step in
-//! `main.rs`.
+//! every audience entry our own client_id (we trust no other party's
+//! audience), `exp` unexpired, `nbf` respected, a present `azp` naming us,
+//! `iat` not in the future, and the `nonce` when the client supplies it.
+//! Only then is the extracted identity handed to the mint step in `main.rs`.
 //!
 //! This is deliberately *not* `ankurah_jwt_auth` — that crate verifies a single
 //! local PEM (our own minting key). idp.to publishes a rotating JWKS keyed by
@@ -46,8 +46,8 @@ pub struct VerifiedIdentity {
 
 /// Only the claims we read. `jsonwebtoken` validates `iss`/`aud`/`exp`/`nbf`
 /// (presence and value) via `Validation`, so those are here only where we
-/// ALSO inspect them ourselves — `aud` to enforce the multi-audience `azp`
-/// rule, which `jsonwebtoken` does not cover.
+/// ALSO inspect them ourselves — `aud` to enforce the audience-trust rule,
+/// which `jsonwebtoken` does not cover.
 #[derive(Debug, Deserialize)]
 struct IdTokenClaims {
     sub: String,
@@ -57,15 +57,17 @@ struct IdTokenClaims {
     name: Option<String>,
     #[serde(default)]
     nonce: Option<String>,
-    /// Audience, read back raw only to tell a single-audience token from a
-    /// multi-audience one. `jsonwebtoken` already enforces that `aud` is
-    /// present and contains our client_id; the count is what decides whether
-    /// `azp` is required (see [`check_authorized_party`]).
+    /// Audience, read back raw to apply the trust rule `jsonwebtoken` leaves
+    /// uncovered: it enforces only that `aud` is present and CONTAINS our
+    /// client_id, while §3.1.3.7 (3) also rejects audiences the client does
+    /// not trust — and we trust no audience but ourselves (see
+    /// [`check_audience_trust`]).
     #[serde(default)]
     aud: Option<serde_json::Value>,
-    /// Authorized party. Present when the IdP minted the token for one party
-    /// among several audiences; when present it must be our client_id, and a
-    /// multi-audience token must carry it. See [`check_authorized_party`].
+    /// Authorized party. When present it must name us (§3.1.3.7 (5)). The old
+    /// pairing rule — a multi-audience token must carry `azp` — retired when
+    /// every audience entry became required to be us: no multi-party token
+    /// survives the audience check to need it. See [`check_audience_trust`].
     #[serde(default)]
     azp: Option<String>,
     /// Issued-at, sanity-checked against the clock: a token stamped in the
@@ -108,23 +110,30 @@ fn extract_roles(claim: Option<&serde_json::Value>) -> Result<Vec<String>> {
         .collect()
 }
 
-/// OIDC Core §3.1.3.7 (4)-(5), the party-confusion guard `jsonwebtoken` does
-/// not cover. `jsonwebtoken` has already established that `aud` contains our
-/// client_id; this adds the rest: an `azp` present at all must name us, and a
-/// token audienced to more than one party must carry `azp` (so that a token
-/// legitimately minted for some other party, merely listing us among its
-/// audiences, cannot be replayed into our flow).
-fn check_authorized_party(aud: Option<&serde_json::Value>, azp: Option<&str>, client_id: &str) -> Result<()> {
+/// OIDC Core §3.1.3.7 (3)-(5), the audience-trust guard `jsonwebtoken` does
+/// not cover. `jsonwebtoken` has already established that `aud` CONTAINS our
+/// client_id; §3.1.3.7 (3) further says to reject a token carrying audiences
+/// the client does not trust, and community trusts no audience but itself —
+/// so every entry must be our client_id (a token minted for some other party,
+/// merely listing us among its audiences, cannot be replayed into our flow).
+/// That leaves no multi-party token to admit, which retired the old rule
+/// pairing `azp` presence with audience count; the `azp` rule that remains
+/// (§3.1.3.7 (5)) is that a present `azp` must name us.
+fn check_audience_trust(aud: Option<&serde_json::Value>, azp: Option<&str>, client_id: &str) -> Result<()> {
     if let Some(azp) = azp {
         if azp != client_id {
             return Err(anyhow!("id_token `azp` names a different authorized party"));
         }
-        return Ok(());
     }
-    // No azp: only allowed for a single-audience token.
-    let multi = matches!(aud, Some(serde_json::Value::Array(entries)) if entries.len() > 1);
-    if multi {
-        return Err(anyhow!("id_token carries multiple audiences but no `azp`"));
+    let all_trusted = match aud {
+        Some(serde_json::Value::String(single)) => single == client_id,
+        Some(serde_json::Value::Array(entries)) => {
+            !entries.is_empty() && entries.iter().all(|entry| entry.as_str() == Some(client_id))
+        }
+        _ => false,
+    };
+    if !all_trusted {
+        return Err(anyhow!("id_token lists an audience other than this client"));
     }
     Ok(())
 }
@@ -221,7 +230,7 @@ impl OidcVerifier {
         let data = decode::<IdTokenClaims>(id_token, key, &validation).context("ID token failed validation")?;
         let claims = data.claims;
 
-        check_authorized_party(claims.aud.as_ref(), claims.azp.as_deref(), &self.client_id)?;
+        check_audience_trust(claims.aud.as_ref(), claims.azp.as_deref(), &self.client_id)?;
         check_issued_at(claims.iat, now_unix_secs(), CLOCK_SKEW_SECS as i64)?;
 
         if let Some(expected) = expected_nonce {
@@ -366,20 +375,29 @@ mod tests {
         );
     }
 
-    // ---- authorized-party guard (OIDC §3.1.3.7 (4)-(5)) --------------------
+    // ---- audience-trust guard (OIDC §3.1.3.7 (3)-(5)) ----------------------
 
     #[test]
-    fn azp_guard_matrix() {
+    fn audience_trust_matrix() {
         let me = "client-abc";
-        // Single audience, no azp: fine.
-        assert!(check_authorized_party(Some(&json!("client-abc")), None, me).is_ok());
-        assert!(check_authorized_party(Some(&json!(["client-abc"])), None, me).is_ok());
-        // Multiple audiences with no azp: refused.
-        assert!(check_authorized_party(Some(&json!(["client-abc", "other"])), None, me).is_err());
-        // Multiple audiences, azp names us: fine.
-        assert!(check_authorized_party(Some(&json!(["client-abc", "other"])), Some("client-abc"), me).is_ok());
-        // Any azp that is not us: refused, even single-audience.
-        assert!(check_authorized_party(Some(&json!("client-abc")), Some("other"), me).is_err());
+        // Sole audience is us, no azp: fine (string or one-element array).
+        assert!(check_audience_trust(Some(&json!("client-abc")), None, me).is_ok());
+        assert!(check_audience_trust(Some(&json!(["client-abc"])), None, me).is_ok());
+        // A present azp must name us; when it does, a sole-audience token passes.
+        assert!(check_audience_trust(Some(&json!("client-abc")), Some("client-abc"), me).is_ok());
+        assert!(check_audience_trust(Some(&json!("client-abc")), Some("other"), me).is_err());
+        // Any audience entry that is not us: refused, whatever the azp says —
+        // we trust no other audience (§3.1.3.7 (3)).
+        assert!(check_audience_trust(Some(&json!(["client-abc", "other"])), None, me).is_err());
+        assert!(check_audience_trust(Some(&json!(["client-abc", "other"])), Some("client-abc"), me).is_err());
+        assert!(check_audience_trust(Some(&json!(["client-abc", "other"])), Some("other"), me).is_err());
+        // A degenerate repeat of us alone still lists only trusted parties.
+        assert!(check_audience_trust(Some(&json!(["client-abc", "client-abc"])), None, me).is_ok());
+        // Malformed shapes: refused.
+        assert!(check_audience_trust(Some(&json!([])), None, me).is_err());
+        assert!(check_audience_trust(Some(&json!(["client-abc", 7])), None, me).is_err());
+        assert!(check_audience_trust(Some(&json!(42)), None, me).is_err());
+        assert!(check_audience_trust(None, None, me).is_err());
     }
 
     #[test]
@@ -484,9 +502,13 @@ mod tests {
     }
 
     #[test]
-    fn multi_aud_with_matching_azp_accepted() {
+    fn multi_aud_with_matching_azp_rejected() {
+        // Flipped from `..._accepted` by the audience-trust tightening:
+        // §3.1.3.7 (3) says to reject audiences the client does not trust,
+        // and we trust only ourselves — a matching `azp` no longer admits
+        // the extra audience.
         let claims = with(with(base_claims(), "aud", json!([TEST_AUD, "other"])), "azp", json!(TEST_AUD));
-        assert!(test_verifier().verify_with_key(&sign(claims), &test_key(), Some("n-1")).is_ok());
+        assert!(test_verifier().verify_with_key(&sign(claims), &test_key(), Some("n-1")).is_err());
     }
 
     #[test]
