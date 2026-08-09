@@ -4,8 +4,14 @@
 //! `moderate`). The messages branch writes the rows at moderation time; this
 //! panel only renders them.
 //!
-//! The message reference is a short id with the full id as hover title —
-//! deep-linking/scroll-to-message can come later.
+//! The log names the act, never the target message: a moderator-deleted
+//! message fully disappears for everyone without `moderate` (the message
+//! read scope in policy.json withholds deleted rows from queries and by-id
+//! reads alike), and this panel shows no id, link, or content that would
+//! point back at it. An earlier revision rendered the message's short id
+//! with the full id on hover and planned deep-linking; that was retracted
+//! by ruling — the row data still carries the `message` ref for moderator
+//! tooling, but for every other reader it must stay a dead pointer.
 
 use std::collections::HashMap;
 
@@ -109,8 +115,8 @@ pub fn ModLogPanel(on_close: impl Fn() + Clone + 'static) -> impl IntoView {
 }
 
 /// One log row: actor avatar + name, what they did, the optional reason, and
-/// when. Message-targeted rows carry the message's short id (full id on
-/// hover); user-targeted rows ("ban"/"unban") name the member instead.
+/// when. User-targeted rows ("ban"/"unban") name the member; message-targeted
+/// rows deliberately name nothing (see the module doc).
 #[component]
 fn ModLogRow(action: ModActionView, names_by_user: Memo<HashMap<String, String>>) -> impl IntoView {
     // `actor` is `None` on automated rows — today the DM rate limiter, which
@@ -147,15 +153,6 @@ fn ModLogRow(action: ModActionView, names_by_user: Memo<HashMap<String, String>>
         other => format!("{} — message", other),
     };
 
-    // Legacy rows always have `message`; user-targeted rows never do.
-    let message_id = action.message().ok().flatten().map(|m| m.id().to_base64());
-    let message_chip = message_id.map(|id| {
-        let short = id.chars().take(8).collect::<String>();
-        view! {
-            <span class="modLogMsgRef" title=format!("Message {}", id)>{format!("⟨{}⟩", short)}</span>
-        }
-    });
-
     let ts = action.created_at().unwrap_or(0);
     let when = format!("{} · {}", fmt::day_label(ts), fmt::clock_time(ts));
     let when_title = fmt::full_stamp(ts);
@@ -174,7 +171,6 @@ fn ModLogRow(action: ModActionView, names_by_user: Memo<HashMap<String, String>>
                     <span class="modLogVerb">{verb}</span>
                     " "
                     {target_name.map(|name| view! { <span class="modLogActor">{name}</span> })}
-                    {message_chip}
                 </div>
                 {reason.map(|r| view! { <div class="modLogReason">{format!("“{}”", r)}</div> })}
                 <div class="modLogWhen" title=when_title>{when}</div>

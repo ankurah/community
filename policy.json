@@ -25,7 +25,8 @@
       "read": "view",
       "write": "post",
       "scope": [
-        { "filter": "user = $jwt.sub OR collaborative = true", "applies_to": "write", "unless_privilege": "moderate" }
+        { "filter": "user = $jwt.sub OR collaborative = true", "applies_to": "write", "unless_privilege": "moderate" },
+        { "filter": "deleted = false", "applies_to": "read", "unless_privilege": "moderate" }
       ]
     },
     "userroles": {

@@ -43,17 +43,6 @@
   color: var(--text-2);
 }
 
-/* Short message id — monospace chip, full id in the hover title. */
-.modLogMsgRef {
-  font-family: var(--font-mono);
-  font-size: var(--fs-xs);
-  color: var(--text-3);
-  background: var(--surface-3);
-  border-radius: var(--r-sm);
-  padding: 1px 5px;
-  white-space: nowrap;
-}
-
 .modLogReason {
   font-size: var(--fs-md);
   font-style: italic;
