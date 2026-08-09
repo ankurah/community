@@ -178,8 +178,16 @@ pub fn begin_framed_sign_in() -> Result<Option<FramedAttempt>, JsValue> {
     // than strand this tab — an un-allowlisted origin costs us the assigned
     // mode, never the sign-up. We return to the origin we embed from; a
     // deeper return path would need its own allowlist entry.
+    //
+    // `response_mode=query`: pin the delivery this flow already handles —
+    // idp.to redirects the frame to our in-frame callback, which relays the
+    // code up to the ceremony — because idp.to's EMBEDDED default is flipping
+    // to `web_message` (the frame posts the code straight to our parent
+    // window, no callback navigation). The parent has no listener for that
+    // shape yet; dropping this parameter IS the adoption switch, once it
+    // does.
     let authorize_url = format!(
-        "{FRAMED_AUTHORIZE_ENDPOINT}?{query}&embed_origin={embed}&signup_launch=redirect&return_url={ret}",
+        "{FRAMED_AUTHORIZE_ENDPOINT}?{query}&embed_origin={embed}&signup_launch=redirect&return_url={ret}&response_mode=query",
         query = authorize_query(&pending),
         embed = enc(embed_origin),
         ret = enc(embed_origin),
