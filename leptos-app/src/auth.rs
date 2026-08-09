@@ -152,7 +152,8 @@ pub struct FramedAttempt {
 }
 
 /// Begin sign-in in a frame: same one-time material as [`start_sign_in`], same
-/// parameters, but addressed to the property host and carrying `embed_origin`.
+/// parameters, but addressed to the property host and carrying `embed_origin`
+/// plus the sign-up launch mode (redirect, with our origin as the return leg).
 /// Returns rather than navigating — the caller mounts the frame.
 ///
 /// `Ok(None)` when idp.to does not frame for the origin we are served from. The
@@ -166,10 +167,22 @@ pub fn begin_framed_sign_in() -> Result<Option<FramedAttempt>, JsValue> {
     let pending = stash_new_pending(&window)?;
     // Exactly one `embed_origin`: a duplicate or unlisted value is refused the
     // same way a missing one is.
+    //
+    // `signup_launch=redirect` + `return_url`: community's assigned launch
+    // mode for the Sign Up affordance inside idp.to's framed page — clicking
+    // it navigates THIS tab, top-level, to the sign-up page, and idp.to sends
+    // the visitor back to `return_url` when sign-up completes, so the whole
+    // round trip stays in what reads as one site. The return leg is what
+    // makes redirect mode usable: if the value fails the property's return
+    // allowlist, idp.to deliberately downgrades the launch to a popup rather
+    // than strand this tab — an un-allowlisted origin costs us the assigned
+    // mode, never the sign-up. We return to the origin we embed from; a
+    // deeper return path would need its own allowlist entry.
     let authorize_url = format!(
-        "{FRAMED_AUTHORIZE_ENDPOINT}?{query}&embed_origin={embed}",
+        "{FRAMED_AUTHORIZE_ENDPOINT}?{query}&embed_origin={embed}&signup_launch=redirect&return_url={ret}",
         query = authorize_query(&pending),
         embed = enc(embed_origin),
+        ret = enc(embed_origin),
     );
     Ok(Some(FramedAttempt { authorize_url, state: pending.state }))
 }
