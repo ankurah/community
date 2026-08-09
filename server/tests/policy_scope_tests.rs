@@ -46,9 +46,14 @@ fn message_write_predicate(caller: EntityId) -> ankurah::ankql::ast::Predicate {
 /// A message row as the scope evaluator sees it. `collaborative: None` models
 /// both a legacy row (property never existed) and a row created with
 /// `collaborative: None` — the LWW backend returns no value for either.
+/// `deleted` is different: required at creation and in the model since
+/// ankurah-chat's first model commit, so no real row lacks it — `None` here
+/// exists only for the fail-closed pin in
+/// [`absent_deleted_denies_via_error_path`].
 struct FakeMessage {
     user: EntityId,
     collaborative: Option<bool>,
+    deleted: Option<bool>,
 }
 
 impl Filterable for FakeMessage {
@@ -59,6 +64,7 @@ impl Filterable for FakeMessage {
         match name {
             "user" => Some(Value::EntityId(self.user)),
             "collaborative" => self.collaborative.map(Value::Bool),
+            "deleted" => self.deleted.map(Value::Bool),
             _ => None,
         }
     }
@@ -67,7 +73,7 @@ impl Filterable for FakeMessage {
 #[test]
 fn author_edit_allowed_even_when_collaborative_absent() {
     let me = EntityId::new();
-    let msg = FakeMessage { user: me, collaborative: None };
+    let msg = FakeMessage { user: me, collaborative: None, deleted: Some(false) };
     // Left disjunct is true, OR short-circuits: the absent property is never
     // touched. This is what keeps every pre-existing message editable by its
     // author after the schema gained `collaborative`.
@@ -78,7 +84,7 @@ fn author_edit_allowed_even_when_collaborative_absent() {
 fn non_author_denied_on_absent_collaborative_via_error_path() {
     let me = EntityId::new();
     let author = EntityId::new();
-    let msg = FakeMessage { user: author, collaborative: None };
+    let msg = FakeMessage { user: author, collaborative: None, deleted: Some(false) };
     // Left disjunct false → right disjunct touches the absent property and
     // errors. enforce_write_scope turns any evaluator error into
     // AccessDenied, so the outcome is a (correct) denial.
@@ -89,10 +95,10 @@ fn non_author_denied_on_absent_collaborative_via_error_path() {
 fn non_author_allowed_exactly_when_collaborative_true() {
     let me = EntityId::new();
     let author = EntityId::new();
-    let opted_in = FakeMessage { user: author, collaborative: Some(true) };
+    let opted_in = FakeMessage { user: author, collaborative: Some(true), deleted: Some(false) };
     assert_eq!(evaluate_predicate(&opted_in, &message_write_predicate(me)), Ok(true));
 
-    let opted_out = FakeMessage { user: author, collaborative: Some(false) };
+    let opted_out = FakeMessage { user: author, collaborative: Some(false), deleted: Some(false) };
     assert_eq!(evaluate_predicate(&opted_out, &message_write_predicate(me)), Ok(false));
 }
 
@@ -109,6 +115,54 @@ fn message_scope_rule_shape_unchanged() {
         "author check must be the left disjunct of the message write scope, got: {}",
         rule.filter
     );
+}
+
+/// Build the message read-scope predicate the way the agent does. No `$jwt`
+/// variable in this one — the filter is the constant `deleted = false` — but
+/// the same build-from-policy.json discipline keeps the test pinned to the
+/// shipped rule rather than a copy of it.
+fn message_read_predicate() -> ankurah::ankql::ast::Predicate {
+    let config = policy();
+    let rule = &config.collections["message"].scope[1];
+    parse_selection(&rule.filter).expect("message read-scope filter parses").predicate
+}
+
+/// A moderator-deleted message fails the read scope: non-moderator queries
+/// have this predicate ANDed in (`filter_predicate`), and a by-id fetch
+/// evaluates it against the entity state (`check_read`), so the row is
+/// unreachable both ways — including by entity id.
+#[test]
+fn deleted_messages_fail_the_read_scope() {
+    let deleted = FakeMessage { user: EntityId::new(), collaborative: None, deleted: Some(true) };
+    assert_eq!(evaluate_predicate(&deleted, &message_read_predicate()), Ok(false));
+}
+
+#[test]
+fn live_messages_pass_the_read_scope() {
+    let live = FakeMessage { user: EntityId::new(), collaborative: None, deleted: Some(false) };
+    assert_eq!(evaluate_predicate(&live, &message_read_predicate()), Ok(true));
+}
+
+/// `deleted` is required at creation and predates every prod row, so no real
+/// message lacks it. If one ever did, the evaluator errors and jwt-auth maps
+/// the error to a denial — pinned so the fail-closed direction never
+/// silently flips.
+#[test]
+fn absent_deleted_denies_via_error_path() {
+    let msg = FakeMessage { user: EntityId::new(), collaborative: None, deleted: None };
+    assert_eq!(evaluate_predicate(&msg, &message_read_predicate()), Err(FilterError::PropertyNotFound("deleted".to_string())));
+}
+
+/// The read-scope rule's shape: reads only (writes have their own rule at
+/// index 0), moderators bypass — their tooling (timeline, x-ray, restore)
+/// still needs deleted rows visible.
+#[test]
+fn message_read_scope_rule_shape() {
+    let config = policy();
+    let rule = &config.collections["message"].scope[1];
+    assert_eq!(rule.filter, "deleted = false");
+    assert_eq!(rule.unless_privilege.as_deref(), Some("moderate"), "moderators keep deleted rows for restore/review");
+    assert!(rule.applies_to.applies_to_reads() && !rule.applies_to.applies_to_writes(), "message read scope gates reads only");
 }
 
 #[test]
