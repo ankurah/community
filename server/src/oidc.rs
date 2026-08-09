@@ -480,6 +480,30 @@ mod tests {
     }
 
     #[test]
+    fn wrong_key_signature_rejected() {
+        // Signed with a second, unrelated keypair: the signature gate — not
+        // any claim check — must refuse it, however valid the claims read.
+        let other = ankurah_jwt_auth::SigningKeys::generate().expect("generate second test keypair");
+        let other_private = other.private_key_pem().expect("second private pem");
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = Some("test-kid".to_string());
+        let token = encode(&header, &base_claims(), &EncodingKey::from_rsa_pem(other_private.as_bytes()).expect("second private key parses"))
+            .expect("second-key token signs");
+        assert!(test_verifier().verify_with_key(&token, &test_key(), None).is_err());
+    }
+
+    #[test]
+    fn wrong_algorithm_rejected() {
+        // An HS256 token must be refused outright: the verifier pins RS256,
+        // so no symmetric-key route exists regardless of the claims carried.
+        let mut header = Header::new(Algorithm::HS256);
+        header.kid = Some("test-kid".to_string());
+        let token = encode(&header, &base_claims(), &EncodingKey::from_secret(b"shared-secret"))
+            .expect("HS256 token signs");
+        assert!(test_verifier().verify_with_key(&token, &test_key(), None).is_err());
+    }
+
+    #[test]
     fn missing_iss_rejected() {
         assert!(test_verifier().verify_with_key(&sign(without(base_claims(), "iss")), &test_key(), None).is_err());
     }
@@ -547,8 +571,11 @@ mod tests {
 
     #[test]
     fn string_exp_rejected() {
-        // The `exp` flavor of the same type confusion: a string `exp` must
-        // invalidate the token, not evaporate the expiry check.
+        // A string `exp` must also invalidate the token — though unlike the
+        // `nbf` case above, this never regressed: pre-10.3 the wrong-typed
+        // value was classified absent, and `exp` sits in
+        // `required_spec_claims`, so the token failed on missing-`exp`
+        // instead. Pinned so the rejection survives either mechanism.
         let token = sign(with(base_claims(), "exp", json!("99999999999")));
         assert!(test_verifier().verify_with_key(&token, &test_key(), None).is_err());
     }
