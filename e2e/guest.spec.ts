@@ -83,6 +83,15 @@ test.describe.configure({ mode: 'serial' });
 
 test.describe('Guest flows (#79)', () => {
   test.beforeAll(async ({ browser }) => {
+    // The suite's one page load pays the wasm compile, and on a shared
+    // two-vCPU CI runner that is the slow part: the ~20MB module (trunk
+    // serve skips the wasm-opt pass the deploy pipeline runs) compiles
+    // while the server, trunk, and the runner share the same cores. Proven
+    // from an uploaded trace — every asset landed within 200ms and the page
+    // then sat out the whole default window without the module finishing.
+    // The bound is for the runner's worst day; local runs never come near it.
+    test.setTimeout(240_000);
+
     context = await browser.newContext();
 
     // The outer fence: any host that is not this run's own server. Registered
@@ -123,11 +132,11 @@ test.describe('Guest flows (#79)', () => {
     });
 
     await page.goto('/');
-    // The boot resolves a session, connects the node, and waits for the
-    // server's policy before it mounts anything at all, so the first thing to
-    // wait for is the app itself. Generously bounded: on a cold CI runner this
-    // covers a websocket handshake and one policy row over it.
-    await expect(page.locator('.container')).toBeVisible({ timeout: 30_000 });
+    // The boot compiles the module, resolves a session, connects the node,
+    // and waits for the server's policy before it mounts anything at all, so
+    // the first thing to wait for is the app itself — bounded by the wasm
+    // compile above, not by any of our own machinery.
+    await expect(page.locator('.container')).toBeVisible({ timeout: 180_000 });
   });
 
   test.afterAll(async () => {
