@@ -386,12 +386,8 @@ pub fn XRayInspector(target: InspectTarget) -> impl IntoView {
             // On first load, select the newest head tip so the detail pane
             // opens on the latest change rather than empty. A later refetch
             // (new events) leaves an existing selection alone.
-            if let Phase::Ready(h) = &result {
-                if selected.get_untracked().is_none() {
-                    if let Some(tip) = h.head.iter().next() {
-                        selected.set(Some(tip.clone()));
-                    }
-                }
+            if let Phase::Ready(h) = &result && selected.get_untracked().is_none() && let Some(tip) = h.head.iter().next() {
+                selected.set(Some(tip.clone()));
             }
             let _ = phase.try_set(result);
         });

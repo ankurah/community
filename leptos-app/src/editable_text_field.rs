@@ -25,12 +25,10 @@ pub fn EditableTextField(
 
     // Focus and set cursor position when entering edit mode.
     Effect::new(move |_| {
-        if is_editing.get() {
-            if let Some(input_el) = input_ref.get() {
-                let _ = input_el.focus();
-                let pos = cursor_pos.get() as u32;
-                let _ = input_el.set_selection_range(pos, pos);
-            }
+        if is_editing.get() && let Some(input_el) = input_ref.get() {
+            let _ = input_el.focus();
+            let pos = cursor_pos.get() as u32;
+            let _ = input_el.set_selection_range(pos, pos);
         }
     });
 
@@ -92,7 +90,6 @@ pub fn EditableTextField(
         >
             {
                 let handle_change = handle_change.clone();
-                let handle_key_down = handle_key_down.clone();
                 let class_name = class_name.clone();
                 move || view! {
                     <input
@@ -101,7 +98,7 @@ pub fn EditableTextField(
                         class=format!("editableInput {}", class_name)
                         prop:value=move || local_value.get()
                         on:input=handle_change.clone()
-                        on:keydown=handle_key_down.clone()
+                        on:keydown=handle_key_down
                         on:blur=move |_| end_edit()
                     />
                 }

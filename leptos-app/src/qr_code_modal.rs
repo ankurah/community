@@ -7,10 +7,7 @@ use qrcode::render::svg;
 pub fn QRCodeModal(url: String, on_close: impl Fn() + Clone + 'static) -> impl IntoView {
     // Generate QR code SVG
     let qr_svg = match QrCode::new(&url) {
-        Ok(code) => {
-            let svg_string = code.render::<svg::Color>().min_dimensions(256, 256).build();
-            svg_string
-        }
+        Ok(code) => code.render::<svg::Color>().min_dimensions(256, 256).build(),
         Err(_) => String::from("<svg></svg>"),
     };
 

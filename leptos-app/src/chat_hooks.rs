@@ -145,7 +145,7 @@ fn moderator_delete(message: MessageView, close: Box<dyn Fn()>) {
     };
 
     wasm_bindgen_futures::spawn_local(async move {
-        match (|| async {
+        match async {
             // A removal has to name who made it. `actor: None` is not a
             // fallback — the log renders it as "Automatic", which is the DM
             // rate limiter's row, not a moderator's — so a caller with no
@@ -169,7 +169,7 @@ fn moderator_delete(message: MessageView, close: Box<dyn Fn()>) {
             .await?;
             trx.commit().await?;
             Ok::<_, Box<dyn std::error::Error>>(())
-        })()
+        }
         .await
         {
             Ok(_) => tracing::info!("Message deleted"),
