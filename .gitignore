@@ -50,3 +50,6 @@ yarn-error.log*
 *.pem
 signing-key*
 leptos-app/Trunk.dev.toml
+# The same rendered proxy table, written by e2e/playwright.config.ts for a test
+# run rather than by dev.sh for a dev session.
+leptos-app/Trunk.e2e.toml
