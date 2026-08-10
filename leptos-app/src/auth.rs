@@ -304,9 +304,11 @@ fn stash_new_pending(window: &web_sys::Window) -> Result<PendingAuth, JsValue> {
 }
 
 /// The authorization parameters, identical in both flows. `redirect_uri` is the
-/// live origin's callback (production, or a registered loopback port in dev) —
-/// unlike `embed_origin`, it has to name where the browser actually is, and
-/// idp.to matches it against the registered set.
+/// live origin's callback (production, or a registered loopback port in dev),
+/// and idp.to matches it against the registered set in both legs — but only the
+/// top-level flow ever lands on it. The framed flow's browser never goes there:
+/// the value rides along as a matching token, required again at the token
+/// endpoint, naming a place nothing navigates to.
 fn authorize_query(pending: &PendingAuth) -> String {
     format!(
         "response_type=code&client_id={client}&redirect_uri={redirect}\

@@ -354,6 +354,15 @@ pub fn SignInCeremony(
 
     let close_button = close.clone();
 
+    // The reported height sizes the frame, and the frame is on screen for
+    // Waiting only; the status phases keep the stylesheet minimums, so a
+    // failure sentence wraps and grows instead of clipping inside a short
+    // reported box — a compact form's height is no measure of an error's.
+    let frame_height = move || match (phase.get(), reported_height.get()) {
+        (Phase::Waiting, Some(height)) => Some(height),
+        _ => None,
+    };
+
     view! {
         // No dismiss-on-scrim-click, unlike the app's other modals: a stray
         // click while the credential prompt is up would take the ceremony down
@@ -374,8 +383,8 @@ pub fn SignInCeremony(
 
                 <div
                     class="ceremonyStage"
-                    style:height=move || reported_height.get().map(|h| format!("{h}px")).unwrap_or_default()
-                    style:min-height=move || reported_height.get().map(|_| "0".to_string()).unwrap_or_default()
+                    style:height=move || frame_height().map(|h| format!("{h}px")).unwrap_or_default()
+                    style:min-height=move || frame_height().map(|_| "0".to_string()).unwrap_or_default()
                 >
                     {move || match phase.get() {
                         Phase::Waiting => view! {
