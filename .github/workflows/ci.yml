@@ -12,9 +12,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # PINNED, and load-bearing rather than hygiene: rustc 1.97's v0
+      # symbol-mangling default makes wasm-bindgen =0.2.105 (the repo's pinned
+      # family) emit DUPLICATE closure-converter declarations into the JS glue
+      # — a SyntaxError that kills the SPA at load (wasm-bindgen#4820). Every
+      # trunk build this job made on a newer stable produced that dead
+      # artifact; the e2e guest suite was the first thing to ever execute one
+      # and caught it. 1.95 predates the mangling default; the production
+      # Dockerfile is separately safe on rust:1.88. RETIRE this pin when the
+      # wasm-bindgen family moves past the upstream fix (#4818/#4822,
+      # releases ≥ 0.2.12x) — a harness task tracks that bump and the
+      # leptos-compat validation the family pin exists for.
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: 1.95.0
           targets: wasm32-unknown-unknown
 
       - name: Cache Rust dependencies
