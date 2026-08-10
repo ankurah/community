@@ -124,3 +124,38 @@ jobs:
       # carries the reasoning for each entry.
       - name: Audit the lockfile
         run: cargo audit
+
+  # The SPA's own unit tests (`leptos-app/src/auth/tests.rs`). They need a real
+  # browser rather than node — they build `MessageEvent`s and call
+  # `encodeURIComponent` — and the `build` job's Playwright suite is no
+  # substitute: it drives a live idp.to ceremony, so it covers the path where a
+  # sign-in succeeds and none of the paths where a message is refused.
+  #
+  # The runner image already ships Chrome and a matching chromedriver on PATH,
+  # so wasm-pack is the only tool to install; it fetches the wasm-bindgen build
+  # matching the version the crate pins.
+  wasm-test:
+    name: SPA unit tests (wasm)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install wasm-pack
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack
+
+      # From the crate directory for the same reason the clippy step is:
+      # `leptos-app/.cargo/config.toml` carries the getrandom backend cfg, and
+      # cargo resolves that file against the invocation directory.
+      - name: Test SPA (headless Chrome)
+        working-directory: leptos-app
+        run: wasm-pack test --headless --chrome
