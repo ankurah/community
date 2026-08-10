@@ -124,11 +124,19 @@ export default defineConfig({
       // trunk builds the Leptos app to wasm, serves it on $WEB_PORT, and
       // proxies the backend paths listed in the generated config above, so the
       // client talks to one same-origin URL.
-      command: `trunk serve --config ${TRUNK_CONFIG} --address 0.0.0.0 --port ${WEB_PORT}`,
+      //
+      // `--release` is load-bearing, not an optimization: the dev-profile
+      // wasm is heavy enough that a CI runner cannot fetch and compile it
+      // inside the specs' boot timeout — the page sits at a blank mount while
+      // the module compiles, and every retry re-pays it (proven from a run's
+      // trace: all assets 200, the wasm fetch never completing, no app
+      // request ever made). The release module is what production serves
+      // anyway, and CI's earlier release build makes this serve incremental.
+      command: `trunk serve --release --config ${TRUNK_CONFIG} --address 0.0.0.0 --port ${WEB_PORT}`,
       cwd: '../leptos-app',
       port: parseInt(WEB_PORT),
       reuseExistingServer: !process.env.CI,
-      timeout: 180000,
+      timeout: 300000,
     },
   ],
 });
