@@ -42,9 +42,7 @@ type Storage = SledStorageEngine;
 type Storage = Postgres;
 
 #[cfg(all(feature = "sled", not(feature = "postgres")))]
-async fn make_storage() -> Result<Storage> {
-    Ok(SledStorageEngine::with_homedir_folder(".community")?)
-}
+async fn make_storage() -> Result<Storage> { SledStorageEngine::with_homedir_folder(".community") }
 
 #[cfg(feature = "postgres")]
 async fn make_storage() -> Result<Storage> {
