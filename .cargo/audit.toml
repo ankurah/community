@@ -1,0 +1,37 @@
+# cargo-audit's ignore list, read by the `Dependency advisories` CI job.
+#
+# FOR: an advisory with no fixed release would red the gate forever, which
+# trains everyone to stop reading it. An entry here is a claim that we looked at
+# the advisory, traced it to what this app actually does, and decided it does not
+# describe a defect we have. Every entry states that reasoning, and an advisory
+# we have NOT reasoned through does not belong here — it belongs in a bump.
+[advisories]
+ignore = [
+    # RUSTSEC-2023-0071 — `rsa` 0.9.10, the Marvin timing sidechannel.
+    # `patched = []` upstream: there is no version to move to, and the crate
+    # reaches community by two paths (verified with `cargo tree -i rsa`):
+    #
+    #   rsa ── jsonwebtoken 11 ── community-server
+    #      └─ superboring ── jwt-simple ── ankurah-jwt-auth ── community-server
+    #
+    # The advisory describes information about an RSA PRIVATE key leaking
+    # through the time a private-key operation takes on inputs the measuring
+    # party chose. Neither path gives anyone that measurement:
+    #
+    #   - jsonwebtoken validates idp.to's OIDC id_token, RS256 against their
+    #     published JWKS. That is a public-key verification; no private key
+    #     exists on this path for a timing signal to be about.
+    #   - ankurah-jwt-auth does hold a private key — `SigningKeys` is an
+    #     RS256-4096 keypair and it signs our own session tokens with it — but
+    #     the bytes entering the private-key operation are the claim set the
+    #     server just built, never a caller's.
+    #
+    # And nothing here decrypts: RSA appears in this tree only as JWS
+    # sign/verify. jwt-simple implements no JWE, and community calls no RSA
+    # encryption or decryption of its own — so the chosen-ciphertext oracle the
+    # Marvin work measures has no counterpart in this app.
+    #
+    # RETIRE THIS ENTRY when `rsa` ships the constant-time implementation
+    # tracked in RustCrypto/RSA#626, or when the session tokens move off RS256.
+    "RUSTSEC-2023-0071",
+]

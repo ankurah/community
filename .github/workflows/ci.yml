@@ -97,3 +97,30 @@ jobs:
       - name: Clippy SPA (wasm)
         working-directory: leptos-app
         run: cargo clippy -p leptos-app --target wasm32-unknown-unknown --all-targets --locked -- -D warnings
+
+  # The other class of review-bot comment: an advisory filed against something
+  # in `Cargo.lock`. Failing the build is the point — a dependency with a known
+  # defect should stop a merge, not sit in a comment thread.
+  #
+  # `cargo audit` fails on vulnerabilities and only warns about unmaintained,
+  # unsound and yanked crates. Left that way deliberately: those three are
+  # facts about a crate's upkeep rather than a defect in it, and nine of them
+  # are true of this lockfile today (bincode, fxhash, instant, paste,
+  # proc-macro-error2, smallstr, event-listener, lru, spin), every one of them
+  # transitive. Turning them into failures would gate community's merges on
+  # other people's release schedules.
+  audit:
+    name: Dependency advisories
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+
+      # Reads the ignore list from `.cargo/audit.toml`, which is committed and
+      # carries the reasoning for each entry.
+      - name: Audit the lockfile
+        run: cargo audit
