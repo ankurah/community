@@ -57,10 +57,25 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 url = "2"
 
+# The device-token registry's Postgres half (server/src/push/store.rs). Device
+# tokens are NOT an ankurah collection, so the table is reached through the
+# connection pool directly; both crates are already in the build under this
+# feature (ankurah-storage-postgres owns them), and `main::make_storage` builds
+# the one pool that the storage engine and the registry then share.
+bb8 = { version = "0.9", optional = true }
+bb8-postgres = { version = "0.9", optional = true }
+# And the registry's sled half, for the same reason: it holds a `sled::Tree`
+# opened on the database the node already has open (sled locks its directory, so
+# there can only be the one). Already in the build under this feature —
+# ankurah-storage-sled owns it — and pinned to the version that engine uses.
+sled = { version = "0.34", optional = true }
+
 [features]
 # Storage engine for the durable (server) node. `cargo generate` sets `default`
 # to your choice (Sled or Postgres); dev.sh reads it back to decide whether to
 # bring up a Postgres container. Change the default here to switch engines.
 default = ["postgres"]
-sled = ["dep:ankurah-storage-sled"]
-postgres = ["dep:ankurah-storage-postgres"]
+sled = ["dep:ankurah-storage-sled", "dep:sled"]
+# `bb8`/`bb8-postgres` ride along because the device-token registry reads and
+# writes its own table on this engine's connection pool (see push/store.rs).
+postgres = ["dep:ankurah-storage-postgres", "dep:bb8", "dep:bb8-postgres"]
