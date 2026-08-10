@@ -42,6 +42,10 @@ web-sys = { version = "=0.3.82", features = [
     # whatever else in the graph happens to enable them — a dependency shuffle
     # would take that away without touching this file.
     "MessageEvent", "KeyboardEvent", "HtmlButtonElement",
+    # The mobile shell asks the browser to keep this origin's storage rather
+    # than evict it (shell.rs): inside the app that IndexedDB store is the
+    # member's history, not a cache of a site they visited.
+    "Navigator", "StorageManager",
 ] }
 js-sys = "=0.3.82"
 tracing-wasm = "0.2.1"

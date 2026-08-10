@@ -1,23 +1,28 @@
 //! Client-side OIDC (Authorization Code + PKCE, public client) against idp.to,
 //! plus the federate call to our own `/auth/session`.
 //!
-//! Two ways in, one exchange. [`start_sign_in`] hands the whole tab to idp.to
+//! Three ways in, one exchange. [`start_sign_in`] hands the whole tab to idp.to
 //! and gets it back at `/auth/callback`; [`begin_framed_sign_in`] puts the same
 //! authorization request in a frame on the page the visitor is already looking
 //! at, and idp.to's framed page posts the authorization response straight up to
-//! this window (`web_message` delivery, their #93) — no callback navigation.
-//! Both generate one PKCE verifier/challenge + `state` + `nonce` into
-//! `sessionStorage`, and both finish in [`complete_sign_in`], which exchanges
-//! the `code` for an `id_token` at idp.to's token endpoint and POSTs it to our
-//! `/auth/session`, which validates it and mints an ankurah session token.
+//! this window (`web_message` delivery, their #93) — no callback navigation;
+//! [`start_native_sign_in`] runs inside the mobile shell, where the same
+//! request goes to the system's sign-in sheet and comes back on the app's own
+//! URL scheme. All three generate one PKCE verifier/challenge + `state` +
+//! `nonce` into `sessionStorage`, and all three finish in [`complete_sign_in`],
+//! which exchanges the `code` for an `id_token` at idp.to's token endpoint and
+//! POSTs it to our `/auth/session`, which validates it and mints an ankurah
+//! session token.
 //!
 //! The framed request is the special case in three respects only: it must start
 //! at the property host (see [`FRAMED_AUTHORIZE_ENDPOINT`]) and carry an
 //! `embed_origin` from [`EMBED_ORIGINS`], it is available on those origins
 //! alone, and its result arrives as the frame's message (see
-//! [`read_framed_message`]) rather than on a redirect. Everything else — the
-//! parameters, the custody of the one-time material, the exchange, the
-//! federate call, token storage — is the flow that was already here.
+//! [`read_framed_message`]) rather than on a redirect. The native request
+//! differs in one respect: where it says it will come back (see
+//! [`NATIVE_REDIRECT_URI`]). Everything else — the parameters, the custody of
+//! the one-time material, the exchange, the federate call, token storage — is
+//! the flow that was already here.
 //!
 //! No client secret and no server-side session: a static SPA does the whole
 //! dance. All crypto here is pure-Rust (sha2) + the browser's CSPRNG (getrandom
@@ -28,7 +33,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::{spawn_local, JsFuture};
-use web_sys::{window, Headers, MessageEvent, Request, RequestInit, Response, Storage, UrlSearchParams};
+use web_sys::{window, Headers, MessageEvent, Request, RequestInit, Response, Storage, Url, UrlSearchParams};
 
 // --- idp.to public-client config (verified against their live discovery doc) ---
 const CLIENT_ID: &str = "app_HsW5XyYWbr0KQrHZb5iejw";
@@ -101,6 +106,23 @@ const LS_ID_TOKEN: &str = "community_id_token";
 /// The callback path our SPA fallback serves (also a registered redirect_uri).
 const CALLBACK_PATH: &str = "/auth/callback";
 
+/// Where a sign-in inside the mobile shell says it will come back: the app's
+/// own URL scheme, which iOS hands to the sign-in sheet. Nothing navigates
+/// here — the sheet catches the redirect, closes, and gives the whole URL back
+/// — but idp.to matches the value at both legs of the exchange, so it must be
+/// byte-identical to the redirect URI registered on the idp Application.
+///
+/// THAT REGISTRATION IS NOT IN PLACE YET (Daniel's to file). Until it is, the
+/// authorize endpoint refuses the request and the sheet comes back carrying
+/// that refusal, which the sign-in card shows.
+const NATIVE_REDIRECT_URI: &str = "org.ankurah.community:/oauth2/callback";
+
+/// The scheme half of [`NATIVE_REDIRECT_URI`], which is what the sheet
+/// actually watches for. The app's `Info.plist` claims the same spelling; a
+/// scheme the app has not claimed is caught by nothing and the sheet waits
+/// forever.
+const NATIVE_CALLBACK_SCHEME: &str = "org.ankurah.community";
+
 /// Our own server's guest mint (`server/src/guest.rs`).
 const GUEST_MINT_PATH: &str = "/auth/guest";
 
@@ -169,18 +191,20 @@ pub fn is_callback() -> bool {
 /// earlier abandoned attempt cannot spoil this one.
 pub fn start_sign_in() -> Result<(), JsValue> {
     let window = window().ok_or_else(|| JsValue::from_str("no window"))?;
-    let pending = stash_new_pending(&window)?;
+    let pending = stash_new_pending(web_callback_uri(&window)?)?;
     let auth_url = format!("{AUTHORIZE_ENDPOINT}?{}", authorize_query(&pending));
     window.location().assign(&auth_url)
 }
 
-/// A framed sign-in ready to be put on screen: the URL for the frame, and the
+/// A framed sign-in ready to be put on screen: the URL for the frame, the
 /// `state` the parent will hold until a result comes back claiming to be this
-/// attempt's.
+/// attempt's, and the `redirect_uri` this attempt declared — which the token
+/// exchange has to repeat.
 #[derive(Clone)]
 pub struct FramedAttempt {
     pub authorize_url: String,
     pub state: String,
+    pub redirect_uri: String,
 }
 
 /// Begin sign-in in a frame: same one-time material as [`start_sign_in`], same
@@ -196,7 +220,7 @@ pub struct FramedAttempt {
 pub fn begin_framed_sign_in() -> Result<Option<FramedAttempt>, JsValue> {
     let Some(embed_origin) = registered_embed_origin() else { return Ok(None) };
     let window = window().ok_or_else(|| JsValue::from_str("no window"))?;
-    let pending = stash_new_pending(&window)?;
+    let pending = stash_new_pending(web_callback_uri(&window)?)?;
     // Exactly one `embed_origin`: a duplicate or unlisted value is refused the
     // same way a missing one is.
     //
@@ -223,7 +247,7 @@ pub fn begin_framed_sign_in() -> Result<Option<FramedAttempt>, JsValue> {
         embed = enc(embed_origin),
         ret = enc(embed_origin),
     );
-    Ok(Some(FramedAttempt { authorize_url, state: pending.state }))
+    Ok(Some(FramedAttempt { authorize_url, state: pending.state, redirect_uri: pending.redirect_uri }))
 }
 
 /// The `embed_origin` to send from the page we are on, or `None` when idp.to
@@ -239,20 +263,93 @@ fn registered_embed_origin() -> Option<&'static str> {
     EMBED_ORIGINS.into_iter().find(|registered| *registered == origin)
 }
 
+/// How a sign-in through the mobile shell's sheet ended.
+pub enum NativeSignIn {
+    /// The minted ankurah session token, ready to store.
+    Signed(String),
+    /// The member dismissed the sheet without finishing.
+    Cancelled,
+    /// The sentence for the sign-in card.
+    Failed(String),
+}
+
+/// Sign in inside the mobile shell: the whole flow, from stashing the one-time
+/// material to the minted session token.
+///
+/// Why this is a single function while the web has an entry point and a
+/// separate callback: the sheet's result comes back to the caller instead of to
+/// a new document, so there is nothing here for a second context to pick up.
+/// The authorization request is the top-level one — [`AUTHORIZE_ENDPOINT`],
+/// idp.to's issuer — differing from the web's only in where it says it will
+/// come back ([`NATIVE_REDIRECT_URI`]).
+///
+/// The one-time material is cleared on every ending, exactly as the web path
+/// clears it: [`complete_sign_in`] consumes it when a code reaches the
+/// exchange, and every earlier ending calls [`cancel_pending_sign_in`] — safe
+/// here because the caller starts no second attempt while this one is in
+/// flight, so whatever is stashed is this attempt's own.
+pub async fn start_native_sign_in() -> NativeSignIn {
+    let pending = match stash_new_pending(NATIVE_REDIRECT_URI.to_string()) {
+        Ok(pending) => pending,
+        Err(e) => return NativeSignIn::Failed(format!("could not start sign-in: {e:?}")),
+    };
+    let authorize_url = format!("{AUTHORIZE_ENDPOINT}?{}", authorize_query(&pending));
+
+    let callback = match crate::shell::start_auth_session(&authorize_url, NATIVE_CALLBACK_SCHEME).await {
+        crate::shell::SheetOutcome::Returned(callback) => callback,
+        crate::shell::SheetOutcome::Cancelled => {
+            cancel_pending_sign_in();
+            return NativeSignIn::Cancelled;
+        }
+        crate::shell::SheetOutcome::Failed(reason) => {
+            cancel_pending_sign_in();
+            return NativeSignIn::Failed(reason);
+        }
+    };
+
+    // The authorization response rides in the callback URL's query, the same
+    // parameters the top-level flow reads off its landing page.
+    let Ok(parsed) = Url::new(&callback) else {
+        cancel_pending_sign_in();
+        return NativeSignIn::Failed("the sign-in sheet came back with an unreadable callback URL".into());
+    };
+    let params = parsed.search_params();
+
+    if let Some(error) = params.get("error") {
+        cancel_pending_sign_in();
+        return NativeSignIn::Failed(authorize_error_message(&error, &params.get("error_description").unwrap_or_default()));
+    }
+    let (Some(code), Some(returned_state)) = (params.get("code"), params.get("state")) else {
+        cancel_pending_sign_in();
+        return NativeSignIn::Failed("the sign-in sheet came back with neither a code nor an error".into());
+    };
+
+    match complete_sign_in(&code, &returned_state, NATIVE_REDIRECT_URI).await {
+        Ok(minted) => NativeSignIn::Signed(minted.token),
+        Err(e) => NativeSignIn::Failed(e),
+    }
+}
+
 /// Discard whatever one-time material is currently stashed, so a result that
 /// arrives afterwards finds no verifier and is refused rather than quietly
 /// minting a session nobody is waiting for.
 ///
 /// Blunt on purpose, and therefore only safe from a caller that knows no other
-/// attempt can own the stash. Closing the ceremony is such a caller: the
+/// attempt can own the stash. Two callers know that. Closing the ceremony: the
 /// sign-in button does nothing while a ceremony is up, and the card carries no
 /// other control that starts an attempt, so whatever is stashed is the closed
-/// attempt's own. (The card's retired top-level fallback button was the
-/// exception — its [`start_sign_in`] stash sat exposed to a close for the
-/// beat between stashing and its navigation committing. Re-adding any control
-/// to the card that stashes fresh material re-opens that window.) A caller
-/// that resumes after an await is NOT safe — by then its own material is long
-/// consumed and anything present belongs to a later attempt.
+/// attempt's own. And [`start_native_sign_in`], on every ending that never
+/// reached the exchange: the same button is inert while the shell's sheet is
+/// up and the shell offers no other flow, so nothing stashed over that
+/// attempt's material and nothing consumed it — which is why that one is safe
+/// although it resumes after an await. (The card's retired top-level fallback
+/// button was the exception — its [`start_sign_in`] stash sat exposed to a
+/// close for the beat between stashing and its navigation committing.
+/// Re-adding any control to the card that stashes fresh material re-opens that
+/// window.) A caller resuming after an await ITS OWN EXCHANGE has already
+/// passed is NOT safe — by then its material is long consumed and anything
+/// present belongs to a later attempt, which is why the ceremony's abandoned
+/// exchange takes back only its id_token and leaves the stash alone.
 ///
 /// The next attempt generates its own material, so this never blocks a retry.
 pub fn cancel_pending_sign_in() {
@@ -306,11 +403,22 @@ struct PendingAuth {
     challenge: String,
 }
 
+/// The callback the web flows name: this origin's `/auth/callback`, which is a
+/// registered redirect_uri and — for the top-level flow alone — the page the
+/// browser actually lands on.
+fn web_callback_uri(window: &web_sys::Window) -> Result<String, JsValue> {
+    let origin = window.location().origin().map_err(|_| JsValue::from_str("no origin"))?;
+    Ok(format!("{origin}{CALLBACK_PATH}"))
+}
+
 /// Generate PKCE verifier/challenge + `state` + `nonce` and stash the secrets
 /// in `sessionStorage`, where they survive the redirect but not the tab.
-fn stash_new_pending(window: &web_sys::Window) -> Result<PendingAuth, JsValue> {
-    let origin = window.location().origin().map_err(|_| JsValue::from_str("no origin"))?;
-
+///
+/// `redirect_uri` is the caller's because the three flows come back in three
+/// different places, and it is carried on the returned attempt rather than
+/// recomputed later: idp.to compares the authorize request's value against the
+/// token request's, so the two legs must read one string.
+fn stash_new_pending(redirect_uri: String) -> Result<PendingAuth, JsValue> {
     let verifier = random_b64url(32);
     let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
     let state = random_b64url(16);
@@ -321,15 +429,18 @@ fn stash_new_pending(window: &web_sys::Window) -> Result<PendingAuth, JsValue> {
     ss.set_item(SS_STATE, &state)?;
     ss.set_item(SS_NONCE, &nonce)?;
 
-    Ok(PendingAuth { redirect_uri: format!("{origin}{CALLBACK_PATH}"), state, nonce, challenge })
+    Ok(PendingAuth { redirect_uri, state, nonce, challenge })
 }
 
-/// The authorization parameters, identical in both flows. `redirect_uri` is the
-/// live origin's callback (production, or a registered loopback port in dev),
-/// and idp.to matches it against the registered set in both legs — but only the
-/// top-level flow ever lands on it. The framed flow's browser never goes there:
-/// the value rides along as a matching token, required again at the token
-/// endpoint, naming a place nothing navigates to.
+/// The authorization parameters, identical in all three flows. `redirect_uri`
+/// is whichever callback the attempt declared — the live origin's
+/// `/auth/callback` on the web (production, or a registered loopback port in
+/// dev), the app's own scheme inside the shell — and idp.to matches it against
+/// the registered set in both legs. Only the top-level web flow ever lands on
+/// it. The framed flow's browser never goes there, and the shell's sheet
+/// catches the redirect instead of following it: for both, the value rides
+/// along as a matching token, required again at the token endpoint, naming a
+/// place nothing navigates to.
 fn authorize_query(pending: &PendingAuth) -> String {
     format!(
         "response_type=code&client_id={client}&redirect_uri={redirect}\
@@ -358,7 +469,10 @@ pub async fn handle_callback() -> Result<String, String> {
     let code = params.get("code").ok_or("callback missing `code`")?;
     let returned_state = params.get("state").ok_or("callback missing `state`")?;
 
-    complete_sign_in(&code, &returned_state).await.map(|minted| minted.token)
+    // The landing page IS the redirect_uri the request declared, so the token
+    // exchange repeats what this document's own address says.
+    let redirect_uri = web_callback_uri(&window).map_err(|_| "no origin")?;
+    complete_sign_in(&code, &returned_state, &redirect_uri).await.map(|minted| minted.token)
 }
 
 /// TRANSITION SHIM — DELETE once #105 has been live for a release cycle (a
@@ -439,11 +553,13 @@ fn authorize_error_message(error: &str, description: &str) -> String {
 ///
 /// The one code-to-session path in the client. The top-level callback reaches
 /// it with values read from its own URL; the ceremony reaches it with values
-/// idp.to's framed page posted up. Neither gets its own exchange.
-pub async fn complete_sign_in(code: &str, returned_state: &str) -> Result<MintedSession, String> {
-    let window = window().ok_or("no window")?;
-    let origin = window.location().origin().map_err(|_| "no origin")?;
-
+/// idp.to's framed page posted up; the shell reaches it with values read off
+/// the URL its sign-in sheet caught. None of them gets its own exchange.
+///
+/// `redirect_uri` must be the string the authorization request declared —
+/// idp.to compares the two and refuses a mismatch — so it comes from the
+/// caller, which is the only one that knows which flow this code belongs to.
+pub async fn complete_sign_in(code: &str, returned_state: &str, redirect_uri: &str) -> Result<MintedSession, String> {
     let ss = session_storage().ok_or("sessionStorage unavailable")?;
     let saved_state = ss.get_item(SS_STATE).ok().flatten().ok_or("no saved state (stale callback?)")?;
     if returned_state != saved_state {
@@ -461,13 +577,11 @@ pub async fn complete_sign_in(code: &str, returned_state: &str) -> Result<Minted
     let _ = ss.remove_item(SS_STATE);
     let _ = ss.remove_item(SS_NONCE);
 
-    let redirect_uri = format!("{origin}{CALLBACK_PATH}");
-
     // 1) Exchange the authorization code for tokens (public client — no secret).
     let form = format!(
         "grant_type=authorization_code&code={code}&redirect_uri={redirect}&client_id={client}&code_verifier={verifier}",
         code = enc(code),
-        redirect = enc(&redirect_uri),
+        redirect = enc(redirect_uri),
         client = enc(CLIENT_ID),
         verifier = enc(&verifier),
     );
@@ -677,6 +791,15 @@ pub fn stored_token() -> Option<String> {
 /// local-only path (the idp.to session standing at that point is the other
 /// session's, not ours to end). Any discovery trouble degrades the same way
 /// (reload to the sign-in screen, IdP session left standing).
+///
+/// Inside the mobile shell the same end-session URL goes to the system browser
+/// instead of to this document, because that is where the idp.to session the
+/// sign-in sheet established actually lives. It carries no
+/// `post_logout_redirect_uri`: the registered post-logout URIs are web
+/// addresses, and sending idp.to to one of them would land the member on the
+/// website rather than back in the app. So the browser sheet stays open until
+/// the member closes it — which costs them nothing, because the local clear
+/// already happened and the app underneath is already signed out.
 pub fn sign_out() {
     // The session being ended is this tab's in-memory one — deliberately NOT
     // whatever `LS_TOKEN` holds: that slot is shared across tabs and
@@ -694,6 +817,14 @@ pub fn sign_out() {
         let end_session = discovery_end_session_endpoint().await;
         let Some(w) = web_sys::window() else { return };
         let target = match (end_session, id_token) {
+            // In the shell the end-session URL is the browser's business, not
+            // this document's: hand it over, then reload to "/" so the app
+            // drops the session it still holds in memory and comes back as a
+            // guest, exactly where the web's post-logout redirect lands.
+            (Some(endpoint), Some(id_token)) if crate::shell::is_shell() => {
+                crate::shell::open_external(&format!("{endpoint}?id_token_hint={hint}", hint = enc(&id_token)));
+                "/".to_string()
+            }
             (Some(endpoint), Some(id_token)) => {
                 let origin = w.location().origin().unwrap_or_default();
                 format!(

@@ -28,6 +28,12 @@
 //! nothing else; the PKCE verifier and nonce stay in `sessionStorage` where
 //! `auth` put them, the exchange is `auth::complete_sign_in`, and the frame
 //! goes away the moment its code is in hand.
+//!
+//! Inside the mobile shell there is no ceremony at all. [`SignInFlow`] is
+//! still the app's one way in, but what it opens there is the system's
+//! sign-in sheet (`auth::start_native_sign_in`), because the shell's web view
+//! shares no credential store with the browser and a frame in it would offer
+//! no passkey the member already has.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -45,14 +51,20 @@ use crate::auth::{self, FramedAttempt, FramedMessage};
 /// anonymous reader reaching for something only a member can do.
 ///
 /// FOR: those two places must behave identically. Both try the framed
-/// ceremony, both hand the tab to idp.to where a frame would be refused, and
-/// both finish the same way. Written once, they cannot drift — and the
-/// idempotence the chat components require of the reader-facing one is a
-/// property of this type rather than of each call site.
+/// ceremony, both hand the tab to idp.to where a frame would be refused, both
+/// open the system's sheet instead inside the mobile shell, and all of those
+/// finish the same way. Written once, they cannot drift — and the idempotence
+/// the chat components require of the reader-facing one is a property of this
+/// type rather than of each call site.
 #[derive(Clone, Copy)]
 pub struct SignInFlow {
     /// The live framed attempt, while one is on screen.
     attempt: RwSignal<Option<FramedAttempt>>,
+    /// True while the mobile shell's sign-in sheet is up. The sheet is the
+    /// system's window, not ours, so there is nothing to render and nothing to
+    /// hold — but a raise arriving while it is open must still be swallowed,
+    /// and this is what tells [`SignInFlow::begin`] to swallow it.
+    sheet_open: RwSignal<bool>,
     /// Why the last attempt did not get anywhere. The card renders this under
     /// its own banner; see [`SignInFlow::error`].
     error: RwSignal<Option<String>>,
@@ -64,22 +76,26 @@ impl SignInFlow {
     pub fn new() -> Self {
         Self {
             attempt: RwSignal::new(None),
+            sheet_open: RwSignal::new(false),
             error: RwSignal::new(crate::AUTH_ERROR.read().ok().and_then(|guard| guard.clone())),
         }
     }
 
     /// Why the last attempt did not get anywhere.
     ///
-    /// A HOST MUST PUT THIS SOMEWHERE. One of the two writers has no modal on
-    /// screen to speak for it: [`SignInFlow::hand_over_the_tab`], when
-    /// `start_sign_in` cannot stash its one-time material. That leaves a
-    /// visitor pressing a control that does nothing — and for an anonymous
-    /// reader, sign-in is the only way out of read-only, so a silent failure
-    /// there is the whole conversion path failing quietly. The card renders
-    /// this in its own banner; a host without one mounts
-    /// [`SignInFlow::view_with_notice`] rather than [`SignInFlow::view`]. The
-    /// other writer — an exchange that failed inside a live ceremony — speaks
-    /// for itself first, in the modal, before landing here.
+    /// A HOST MUST PUT THIS SOMEWHERE. Two of the three writers have no modal
+    /// on screen to speak for them: [`SignInFlow::hand_over_the_tab`], when
+    /// `start_sign_in` cannot stash its one-time material, and
+    /// [`SignInFlow::open_the_sheet`], every time the shell's sheet ends in
+    /// anything but a session — the sheet is the system's window and it is
+    /// already gone by then. That leaves a visitor pressing a control that
+    /// does nothing — and for an anonymous reader, sign-in is the only way out
+    /// of read-only, so a silent failure there is the whole conversion path
+    /// failing quietly. The card renders this in its own banner; a host
+    /// without one mounts [`SignInFlow::view_with_notice`] rather than
+    /// [`SignInFlow::view`]. The third writer — an exchange that failed inside
+    /// a live ceremony — speaks for itself first, in the modal, before landing
+    /// here.
     pub fn error(&self) -> RwSignal<Option<String>> { self.error }
 
     /// Start a sign-in — and do nothing at all while one is already on screen.
@@ -94,11 +110,20 @@ impl SignInFlow {
     /// progress — so an open ceremony swallows it, and the card's own button
     /// gets the same answer for the same reason.
     pub fn begin(&self) {
-        if self.attempt.get_untracked().is_some() {
+        if self.attempt.get_untracked().is_some() || self.sheet_open.get_untracked() {
             return;
         }
         // A new attempt starts without the last one's failure over it.
         self.error.set(None);
+        // In the mobile shell the frame is the wrong instrument: this web view
+        // shares no credential store with the browser, so idp.to's page inside
+        // it could offer no passkey the member already has. The system's
+        // sign-in sheet is the way in there, and it replaces both branches
+        // below — neither the frame nor handing over this document.
+        if crate::shell::is_shell() {
+            self.open_the_sheet();
+            return;
+        }
         match auth::begin_framed_sign_in() {
             // idp.to frames for this origin: run the ceremony without leaving the page.
             Ok(Some(attempt)) => self.attempt.set(Some(attempt)),
@@ -122,6 +147,37 @@ impl SignInFlow {
             tracing::error!("failed to start sign-in: {:?}", e);
             self.error.set(Some(format!("could not start sign-in: {e:?}")));
         }
+    }
+
+    /// The mobile shell's flow: the system's sign-in sheet, on idp.to's
+    /// authorization page, over the app.
+    ///
+    /// Every ending is spoken for. A sheet that came back with a session boots
+    /// the app as that member, the same reload the ceremony takes. A refusal
+    /// from idp.to — including the one the unregistered native redirect URI
+    /// earns today — and a sheet that could not run both land on the card's
+    /// error text. So does a dismissal, because the alternative is a control
+    /// the member pressed and nothing at all happening afterwards.
+    fn open_the_sheet(&self) {
+        self.sheet_open.set(true);
+        let flow = *self;
+        spawn_local(async move {
+            match auth::start_native_sign_in().await {
+                auth::NativeSignIn::Signed(token) => boot_as_the_member(token),
+                auth::NativeSignIn::Cancelled => {
+                    flow.sheet_open.set(false);
+                    flow.error.set(Some("Sign-in was cancelled.".to_string()));
+                }
+                auth::NativeSignIn::Failed(reason) => {
+                    // On screen rather than in the console, for the reason the
+                    // ceremony's own failures are: these strings can carry a
+                    // response body, and a body can carry a token.
+                    tracing::error!("the app's sign-in did not complete; the reason is shown to the member");
+                    flow.sheet_open.set(false);
+                    flow.error.set(Some(reason));
+                }
+            }
+        });
     }
 
     /// The ceremony modal, while an attempt is live, AND a notice carrying
@@ -165,24 +221,28 @@ impl SignInFlow {
             }
             self.attempt.set(None);
         };
-        // Signing in mid-visit: store the token and let the app boot the way it
-        // boots on every other load with a member session in hand —
-        // `initialize` picks it up from `stored_token`, connects the node, waits
-        // for policy, and mounts as that member. Deliberately NOT a swap under
-        // the mounted tree: there is one path into a signed-in session, and this
-        // is it. A reload rather than a navigation, so a reader who was looking
-        // at `?room=…` comes back to the same room.
-        let signed_in = move |token: String| {
-            auth::store_token(&token);
-            if let Some(w) = window() {
-                let _ = w.location().reload();
-            }
-        };
         move || {
             self.attempt.get().map(|attempt| {
-                view! { <SignInCeremony attempt=attempt on_close=close on_signed_in=signed_in /> }
+                view! { <SignInCeremony attempt=attempt on_close=close on_signed_in=boot_as_the_member /> }
             })
         }
+    }
+}
+
+/// Take a freshly minted session: store the token and let the app boot the way
+/// it boots on every other load with a member session in hand — `initialize`
+/// picks it up from `stored_token`, connects the node, waits for policy, and
+/// mounts as that member. Deliberately NOT a swap under the mounted tree: there
+/// is one path into a signed-in session, and this is it. A reload rather than a
+/// navigation, so a reader who was looking at `?room=…` comes back to the same
+/// room.
+///
+/// Shared by the ceremony and the shell's sheet, so signing in mid-visit means
+/// the same thing whichever of them the member went through.
+fn boot_as_the_member(token: String) {
+    auth::store_token(&token);
+    if let Some(w) = window() {
+        let _ = w.location().reload();
     }
 }
 
@@ -227,6 +287,10 @@ pub fn SignInCeremony(
     // its own.
     let attempt_state = attempt.state.clone();
     let expected_state = StoredValue::new(Some(attempt.state.clone()));
+    // What this attempt told idp.to its callback would be. The token exchange
+    // has to repeat it, and a value recomputed there could differ from the one
+    // the authorization request actually carried.
+    let attempt_redirect_uri = attempt.redirect_uri.clone();
 
     let message_closure = wasm_bindgen::closure::Closure::wrap(Box::new({
         let on_signed_in = on_signed_in.clone();
@@ -258,10 +322,11 @@ pub fn SignInCeremony(
             // the page — and the code becomes a session on the existing path.
             phase.set(Phase::Exchanging);
             let attempt_state = attempt_state.clone();
+            let attempt_redirect_uri = attempt_redirect_uri.clone();
             let on_signed_in = on_signed_in.clone();
             let abandoned = abandoned.clone();
             spawn_local(async move {
-                let outcome = auth::complete_sign_in(&code, &attempt_state).await;
+                let outcome = auth::complete_sign_in(&code, &attempt_state, &attempt_redirect_uri).await;
                 if abandoned.get() {
                     // Closed while this was in flight. The mint already happened
                     // server-side and cannot be taken back, but nothing of it is

@@ -251,31 +251,48 @@ pub fn Header(
                         </button>
                     })}
                     // The QR code stays: it encodes `location.href` and
-                    // nothing else, which never carries a session.
-                    <button
-                        class="qrButton"
-                        on:click=move |_| panels().toggle(Surface::Qr)
-                        title="Show QR Code"
-                        aria-pressed=move || panels().is_open(&Surface::Qr).to_string()
-                    >
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-                            stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                            <rect x="3" y="3" width="7" height="7" rx="1.5" />
-                            <rect x="14" y="3" width="7" height="7" rx="1.5" />
-                            <rect x="3" y="14" width="7" height="7" rx="1.5" />
-                            <path d="M14 14h3v3h-3z" />
-                            <path d="M21 14v.01" />
-                            <path d="M14 21v.01" />
-                            <path d="M21 21v.01" />
-                            <path d="M18.5 18.5v.01" />
-                        </svg>
-                    </button>
+                    // nothing else, which never carries a session. Absent in
+                    // the mobile shell, where what it offers — "open this on
+                    // your phone" — is where the reader already is, and where
+                    // `location.href` names the app bundle rather than
+                    // anything another device could open.
+                    {(!crate::shell::is_shell()).then(|| view! {
+                        <button
+                            class="qrButton"
+                            on:click=move |_| panels().toggle(Surface::Qr)
+                            title="Show QR Code"
+                            aria-pressed=move || panels().is_open(&Surface::Qr).to_string()
+                        >
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                                stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                <rect x="3" y="3" width="7" height="7" rx="1.5" />
+                                <rect x="14" y="3" width="7" height="7" rx="1.5" />
+                                <rect x="3" y="14" width="7" height="7" rx="1.5" />
+                                <path d="M14 14h3v3h-3z" />
+                                <path d="M21 14v.01" />
+                                <path d="M14 21v.01" />
+                                <path d="M21 21v.01" />
+                                <path d="M18.5 18.5v.01" />
+                            </svg>
+                        </button>
+                    })}
                     {viewer.map(|_| view! {
                         <a
                             class="accountSettingsButton"
                             href=crate::auth::ACCOUNT_CENTER_URL
                             title="Account settings"
                             aria-label="Account settings"
+                            // In the mobile shell the account center belongs in
+                            // the system browser, where the member's idp.to
+                            // session already is: following the link here would
+                            // replace the app with idp.to's page, and the app
+                            // has no back button to come home with.
+                            on:click=move |ev| {
+                                if crate::shell::is_shell() {
+                                    ev.prevent_default();
+                                    crate::shell::open_external(crate::auth::ACCOUNT_CENTER_URL);
+                                }
+                            }
                         >
                             // Gear — manage name, passkeys, and recovery at idp.to.
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"

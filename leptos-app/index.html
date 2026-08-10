@@ -35,6 +35,12 @@
 
     <!-- Static assets served at /sounds/... (notification sound) -->
     <link data-trunk rel="copy-dir" href="sounds" />
+
+    <!-- The mobile shell's page glue. A classic script in the head runs before
+         the deferred wasm module, so the global it defines (or, in a browser,
+         does not) is settled by the time the client looks for it. -->
+    <link data-trunk rel="copy-file" href="shell.js" />
+    <script src="/shell.js"></script>
   </head>
   <body></body>
 </html>

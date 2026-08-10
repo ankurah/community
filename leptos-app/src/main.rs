@@ -33,6 +33,7 @@ mod panels;
 mod profile_popover;
 mod qr_code_modal;
 mod room_topic;
+mod shell;
 mod sidebar;
 mod sign_in_ceremony;
 mod user_detail_panel;
@@ -176,6 +177,13 @@ fn main() {
 }
 
 async fn initialize() {
+    // Inside the app, the IndexedDB store is the member's own history rather
+    // than a cache of a site they visited, so ask the browser to stop treating
+    // it as disposable. Best-effort and unawaited — see `shell.rs`.
+    if shell::is_shell() {
+        shell::request_persistent_storage();
+    }
+
     // Resolve the session token: either finish an OIDC callback, or restore one.
     if auth::is_callback() {
         // TRANSITION SHIM (see auth::relay_callback_to_parent): a frame put
