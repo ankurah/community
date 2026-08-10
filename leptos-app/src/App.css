@@ -7,6 +7,9 @@
   height: 100%;
   background-color: var(--bg);
   overflow: hidden;
+  /* Keeps the composer clear of the home indicator when edge-to-edge (the
+     mobile shell); zero in an ordinary browser tab. */
+  padding-bottom: env(safe-area-inset-bottom);
 }
 
 .mainContent {
