@@ -56,6 +56,15 @@ let idpRequests: string[] = [];
 /** The status `POST /auth/guest` answered the boot with. */
 let guestMintStatus: number | undefined;
 
+/**
+ * The rail row for a room, by its exact name. Matching the row's text would
+ * also find a room called `general-2`, and a developer's node carries whatever
+ * rooms their own dev session created — so the name is anchored against the
+ * label, which holds it bare (the `#` is a separate span).
+ */
+const roomRow = (name: string) =>
+  page.locator('.roomItem').filter({ has: page.locator('.roomLabel', { hasText: new RegExp(`^${name}$`) }) });
+
 test.describe.configure({ mode: 'serial' });
 
 test.describe('Guest flows (#79)', () => {
@@ -115,7 +124,7 @@ test.describe('Guest flows (#79)', () => {
     // whatever else the node carries. Membership rather than an exact list:
     // a developer's node has whatever rooms their own dev session created.
     for (const name of ['general', 'support', 'announcements', 'introductions']) {
-      await expect(page.locator('.roomItem', { hasText: `#${name}` })).toHaveCount(1, { timeout: 20_000 });
+      await expect(roomRow(name)).toHaveCount(1, { timeout: 20_000 });
     }
 
     // Nobody picked a room, so the rail picks `general` — and the address bar
@@ -202,8 +211,8 @@ test.describe('Guest flows (#79)', () => {
     await expect(page.locator('.container')).toBeVisible();
     await expect(page.locator('.signIn')).toHaveCount(0);
 
-    // Reading goes on: another room opens, and the address bar follows.
-    const ci = page.locator('.roomItem', { hasText: '#ci' });
+    // Reading goes on: another room opens, and the rail follows.
+    const ci = roomRow('ci');
     await expect(ci).toHaveCount(1);
     await ci.click();
     await expect(page.locator('.roomItem.selected .roomLabel')).toHaveText('ci');
