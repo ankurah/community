@@ -7,10 +7,10 @@
 # should hold a deploy of an unrelated fix hostage. Pull requests get gated
 # by both workflows identically; deploys keep gating on build + e2e alone.
 #
-# These checks red a pull request visibly, but nothing REQUIRES them for
-# merge yet: `main` has no branch protection, so making them (and Build &
-# e2e) required status checks is a repository-settings step that has not
-# been taken. Until it is, the gate is review practice, not machinery.
+# These checks are REQUIRED on `main` (branch protection, enabled
+# 2026-08-10, alongside Build & e2e): a red check holds the merge button.
+# Admin bypass is deliberately left open — a judgment merge remains
+# possible when a gate is red for reasons the change did not cause.
 name: Quality
 
 on:
