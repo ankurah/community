@@ -178,10 +178,9 @@ fn main() {
 async fn initialize() {
     // Resolve the session token: either finish an OIDC callback, or restore one.
     if auth::is_callback() {
-        // Inside a sign-in frame this document is a courier, not the app: hand
-        // the code and state to the page that framed it and stop here. Nothing
-        // mounts and nothing connects — that page holds the PKCE verifier, does
-        // the exchange, and takes the frame down afterwards.
+        // TRANSITION SHIM (see auth::relay_callback_to_parent): a frame put
+        // here by a pre-#105 parent gets its result couriered up, and this
+        // document is not the app. Deletes with the shim.
         if auth::relay_callback_to_parent() {
             return;
         }

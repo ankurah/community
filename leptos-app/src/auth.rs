@@ -4,19 +4,20 @@
 //! Two ways in, one exchange. [`start_sign_in`] hands the whole tab to idp.to
 //! and gets it back at `/auth/callback`; [`begin_framed_sign_in`] puts the same
 //! authorization request in a frame on the page the visitor is already looking
-//! at, and the callback — same-origin, so it can talk to us — hands the code
-//! back with `postMessage`. Both generate one PKCE verifier/challenge +
-//! `state` + `nonce` into `sessionStorage`, and both finish in
-//! [`complete_sign_in`], which exchanges the `code` for an `id_token` at
-//! idp.to's token endpoint and POSTs it to our `/auth/session`, which validates
-//! it and mints an ankurah session token.
+//! at, and idp.to's framed page posts the authorization response straight up to
+//! this window (`web_message` delivery, their #93) — no callback navigation.
+//! Both generate one PKCE verifier/challenge + `state` + `nonce` into
+//! `sessionStorage`, and both finish in [`complete_sign_in`], which exchanges
+//! the `code` for an `id_token` at idp.to's token endpoint and POSTs it to our
+//! `/auth/session`, which validates it and mints an ankurah session token.
 //!
-//! The framed request is the special case in two respects only: it must start
+//! The framed request is the special case in three respects only: it must start
 //! at the property host (see [`FRAMED_AUTHORIZE_ENDPOINT`]) and carry an
-//! `embed_origin` from [`EMBED_ORIGINS`], and it is available on those origins
-//! alone. Everything else — the parameters, the custody of the one-time
-//! material, the exchange, the federate call, token storage — is the flow that
-//! was already here.
+//! `embed_origin` from [`EMBED_ORIGINS`], it is available on those origins
+//! alone, and its result arrives as the frame's message (see
+//! [`read_framed_message`]) rather than on a redirect. Everything else — the
+//! parameters, the custody of the one-time material, the exchange, the
+//! federate call, token storage — is the flow that was already here.
 //!
 //! No client secret and no server-side session: a static SPA does the whole
 //! dance. All crypto here is pure-Rust (sha2) + the browser's CSPRNG (getrandom
@@ -52,8 +53,23 @@ const FRAMED_AUTHORIZE_ENDPOINT: &str = "https://ankurah.login.idp.to/oidc/autho
 /// itself — [`registered_embed_origin`] therefore matches our own origin
 /// against these literals and sends the literal, never the runtime string.
 const EMBED_ORIGINS: [&str; 2] = ["https://community.ankurah.org", "http://127.0.0.1:5173"];
-/// Discriminates the framed callback's `postMessage` from every other message
-/// the page might receive.
+/// Discriminates idp.to's framed authorization result from every other message
+/// the page might receive — the `web_message` envelope's published `type`
+/// (their #93). The OAuth response itself rides in the message's `response`
+/// member, verbatim: `code`/`state` on success, `error`/`error_description`/
+/// `state` on a refusal. Only the single-use code ever travels, never a token.
+const AUTHORIZATION_RESPONSE_TYPE: &str = "authorization_response";
+/// The `type` of idp.to's frame-size report — `{type, height}`, posted by the
+/// framed page whenever its layout changes so the embedder can size the frame
+/// to the form instead of guessing. The literal spelling is their published
+/// contract; listeners key on it exactly.
+const EMBED_SIZE_TYPE: &str = "idp-embed-size";
+/// The origin idp.to's framed messages arrive from: the property host that
+/// serves [`FRAMED_AUTHORIZE_ENDPOINT`]. Two literals, one host — a
+/// property-host rename must swap both together.
+const FRAMED_MESSAGE_ORIGIN: &str = "https://ankurah.login.idp.to";
+/// TRANSITION SHIM (see [`relay_callback_to_parent`]): the pre-#105 envelope
+/// `type` that bundle's ceremonies key on. Deletes with the shim.
 const CALLBACK_MESSAGE_TYPE: &str = "idp-auth-callback";
 /// idp.to's account center for our directory (#36): where users manage their
 /// name, passkeys, and recovery email. `return_to` brings them back to
@@ -177,15 +193,14 @@ pub fn begin_framed_sign_in() -> Result<Option<FramedAttempt>, JsValue> {
     // mode, never the sign-up. We return to the origin we embed from; a
     // deeper return path would need its own allowlist entry.
     //
-    // `response_mode=query`: pin the delivery this flow already handles —
-    // idp.to redirects the frame to our in-frame callback, which relays the
-    // code up to the ceremony — because idp.to's EMBEDDED default is flipping
-    // to `web_message` (the frame posts the code straight to our parent
-    // window, no callback navigation). The parent has no listener for that
-    // shape yet; dropping this parameter IS the adoption switch, once it
-    // does.
+    // No `response_mode`: embedded requests default to `web_message` — the
+    // framed page posts the authorization response to this window, where
+    // [`read_framed_message`] claims it. (`response_mode=query` was the
+    // pre-adoption pin, #103; dropping it was the adoption switch. Parents
+    // still running that bundle are served by [`relay_callback_to_parent`]
+    // until the shim retires.)
     let authorize_url = format!(
-        "{FRAMED_AUTHORIZE_ENDPOINT}?{query}&embed_origin={embed}&signup_launch=redirect&return_url={ret}&response_mode=query",
+        "{FRAMED_AUTHORIZE_ENDPOINT}?{query}&embed_origin={embed}&signup_launch=redirect&return_url={ret}",
         query = authorize_query(&pending),
         embed = enc(embed_origin),
         ret = enc(embed_origin),
@@ -292,9 +307,11 @@ fn stash_new_pending(window: &web_sys::Window) -> Result<PendingAuth, JsValue> {
 }
 
 /// The authorization parameters, identical in both flows. `redirect_uri` is the
-/// live origin's callback (production, or a registered loopback port in dev) —
-/// unlike `embed_origin`, it has to name where the browser actually is, and
-/// idp.to matches it against the registered set.
+/// live origin's callback (production, or a registered loopback port in dev),
+/// and idp.to matches it against the registered set in both legs — but only the
+/// top-level flow ever lands on it. The framed flow's browser never goes there:
+/// the value rides along as a matching token, required again at the token
+/// endpoint, naming a place nothing navigates to.
 fn authorize_query(pending: &PendingAuth) -> String {
     format!(
         "response_type=code&client_id={client}&redirect_uri={redirect}\
@@ -326,30 +343,24 @@ pub async fn handle_callback() -> Result<String, String> {
     complete_sign_in(&code, &returned_state).await.map(|minted| minted.token)
 }
 
+/// TRANSITION SHIM — DELETE once #105 has been live for a release cycle (a
+/// harness task tracks it; the steady-state framed flow never navigates
+/// here). Serves one population: a parent page still running the pre-#105
+/// bundle. That parent's framed attempt pinned `response_mode=query`, which
+/// idp.to honors indefinitely, so its frame redirects to `/auth/callback` and
+/// loads THIS bundle — a fresh document from the current deployment, not the
+/// parent's. Without this branch, `handle_callback` would spend the code
+/// right here and mount a second copy of the app inside the modal while the
+/// parent waits on a message that never comes. Chat tabs stay open for days,
+/// so that population drains slowly, not at deploy time.
+///
 /// Inside a frame, hand this callback's result to the page that framed it and
-/// report that the app must not boot here. `false` at the top level, where the
-/// caller carries on into [`handle_callback`].
-///
-/// Only a real authorization result is carried, and only when it can actually
-/// be delivered. Returning `true` suppresses the app in this document for good,
-/// so both of those refusals fall through to [`handle_callback`] instead — but
-/// they land in different places, and the second is worth naming.
-///
-/// A `/auth/callback` framed with no `code` and no `error` gets the answer that
-/// already existed for a callback carrying nothing. A message the parent
-/// refuses is uglier: `handle_callback` then spends a real code right here,
-/// mounting a second copy of the app inside the frame. What it mints is not
-/// stranded — the frame is same-origin, so the session lands in exactly the
-/// storage the parent reads on its next load — but until something reloads, the
-/// visitor is looking at the app in a modal-sized box. That is still the better
-/// of the two failures: the alternative is a blank frame and a parent waiting
-/// on a message that never arrived. And it is close to unreachable, since a
-/// same-origin post addressed to our own origin does not fail.
-///
-/// Only the short-lived authorization code and the returned `state` travel. The
-/// page that framed this one holds the PKCE verifier and does the exchange, so
-/// no token — idp.to's or ours — is ever put in a message, a URL, or this
-/// frame's history.
+/// report that the app must not boot here. `false` at the top level, where
+/// the caller carries on into [`handle_callback`]. Only the short-lived
+/// authorization code and the returned `state` travel, in the pre-#105
+/// envelope those parents key on; the parent holds the PKCE verifier and does
+/// the exchange, so no token — idp.to's or ours — is ever put in a message, a
+/// URL, or this frame's history.
 pub fn relay_callback_to_parent() -> bool {
     let Some(window) = window() else { return false };
     let Some(parent) = embedding_parent(&window) else { return false };
@@ -381,7 +392,8 @@ pub fn relay_callback_to_parent() -> bool {
 /// The window that framed this document, when there is one this document can
 /// reach. `None` at the top level, and `None` inside a frame whose embedder is
 /// another origin — `frameElement` is null there — which is the same answer for
-/// the purpose at hand: no same-origin parent to hand a result to.
+/// the purpose at hand: no same-origin parent to hand a result to. (Part of
+/// the transition shim above; deletes with it.)
 fn embedding_parent(window: &web_sys::Window) -> Option<web_sys::Window> {
     window.frame_element().ok().flatten()?;
     window.parent().ok().flatten()
@@ -408,8 +420,8 @@ fn authorize_error_message(error: &str, description: &str) -> String {
 /// exchange retained on its way out.
 ///
 /// The one code-to-session path in the client. The top-level callback reaches
-/// it with values read from its own URL; the ceremony reaches it with values a
-/// framed callback sent its parent. Neither gets its own exchange.
+/// it with values read from its own URL; the ceremony reaches it with values
+/// idp.to's framed page posted up. Neither gets its own exchange.
 pub async fn complete_sign_in(code: &str, returned_state: &str) -> Result<MintedSession, String> {
     let window = window().ok_or("no window")?;
     let origin = window.location().origin().map_err(|_| "no origin")?;
@@ -483,51 +495,74 @@ pub enum FramedMessage {
     Accepted { code: String },
     /// This attempt came back as an idp.to error rather than a code.
     Failed(String),
-    /// Not this attempt's result: from another origin, not the callback's
-    /// message at all, carrying a `state` that does not match, or a second copy
-    /// of one already taken.
+    /// Not this attempt's result: from another origin, not the authorization
+    /// response at all, carrying a `state` that does not match, or a second
+    /// copy of one already taken.
     Ignored,
 }
 
 /// Check one message against the attempt the ceremony is waiting on.
 ///
-/// `expected_state` is the attempt's `state`, and it is taken by the first
-/// message that matches it — so a replay, or anything arriving once the
-/// ceremony has settled, finds nothing to match and is ignored. The stashed
-/// `state` in `sessionStorage` is checked again inside [`complete_sign_in`];
-/// this check is what keeps an unexpected message from starting an exchange at
-/// all.
+/// Only the property host is listened to: a `web_message` result is the framed
+/// document speaking, and that document is idp.to's — a message from any other
+/// origin (our own included) is not the frame and is ignored. `expected_state`
+/// is the attempt's `state`, and it is taken by the first message that matches
+/// it — so a replay, or anything arriving once the ceremony has settled, finds
+/// nothing to match and is ignored. The stashed `state` in `sessionStorage` is
+/// checked again inside [`complete_sign_in`]; this check is what keeps an
+/// unexpected message from starting an exchange at all.
 pub fn read_framed_message(event: &MessageEvent, expected_state: &mut Option<String>) -> FramedMessage {
-    let Some(origin) = window().and_then(|w| w.location().origin().ok()) else { return FramedMessage::Ignored };
-    if event.origin() != origin {
+    if event.origin() != FRAMED_MESSAGE_ORIGIN {
         return FramedMessage::Ignored;
     }
 
     let data = event.data();
-    if message_field(&data, "type").as_deref() != Some(CALLBACK_MESSAGE_TYPE) {
+    if message_field(&data, "type").as_deref() != Some(AUTHORIZATION_RESPONSE_TYPE) {
         return FramedMessage::Ignored;
     }
+    let Some(response) = object_field(&data, "response") else { return FramedMessage::Ignored };
     let Some(expected) = expected_state.as_deref() else { return FramedMessage::Ignored };
-    if message_field(&data, "state").as_deref() != Some(expected) {
+    if message_field(&response, "state").as_deref() != Some(expected) {
         return FramedMessage::Ignored;
     }
     *expected_state = None;
 
-    if let Some(error) = message_field(&data, "error") {
-        let description = message_field(&data, "error_description").unwrap_or_default();
+    if let Some(error) = message_field(&response, "error") {
+        let description = message_field(&response, "error_description").unwrap_or_default();
         return FramedMessage::Failed(authorize_error_message(&error, &description));
     }
-    match message_field(&data, "code") {
+    match message_field(&response, "code") {
         Some(code) => FramedMessage::Accepted { code },
         None => FramedMessage::Failed("the sign-in frame came back with neither a code nor an error".into()),
     }
 }
 
+/// Read idp.to's frame-size report off one message: the reported height in CSS
+/// pixels, when this is that report from the property host. The caller applies
+/// its own bounds — the report is a measurement, not an instruction.
+pub fn read_embed_size(event: &MessageEvent) -> Option<f64> {
+    if event.origin() != FRAMED_MESSAGE_ORIGIN {
+        return None;
+    }
+    let data = event.data();
+    if message_field(&data, "type").as_deref() != Some(EMBED_SIZE_TYPE) {
+        return None;
+    }
+    js_sys::Reflect::get(&data, &JsValue::from_str("height")).ok()?.as_f64().filter(|h| h.is_finite() && *h > 0.0)
+}
+
 /// Read one string member of a received message, treating absent and empty
-/// alike — the relay omits a parameter it did not find, and a member that
-/// arrived empty says nothing either.
+/// alike — idp.to omits a member it has nothing for, and a member that arrived
+/// empty says nothing either.
 fn message_field(data: &JsValue, name: &str) -> Option<String> {
     js_sys::Reflect::get(data, &JsValue::from_str(name)).ok()?.as_string().filter(|value| !value.is_empty())
+}
+
+/// Read one object member of a received message — the envelope nests the OAuth
+/// response one level down, and a missing or non-object member means this is
+/// not that envelope.
+fn object_field(data: &JsValue, name: &str) -> Option<JsValue> {
+    js_sys::Reflect::get(data, &JsValue::from_str(name)).ok().filter(|value| value.is_object())
 }
 
 /// Why a guest mint produced no session — and the whole of what leaves
