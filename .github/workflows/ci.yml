@@ -69,6 +69,18 @@ jobs:
         env:
           CI: true
 
+      # A red e2e run leaves its evidence (traces from `on-first-retry`,
+      # screenshots) in test-results/ and the runner then throws the runner
+      # away — upload it, or every CI-only failure is diagnosed blind.
+      - name: Upload e2e evidence
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-test-results
+          path: e2e/test-results/
+          retention-days: 7
+          if-no-files-found: ignore
+
 # The quality gates (clippy, dependency advisories, SPA unit tests) live in
 # quality.yml, deliberately OUTSIDE this workflow: deploy.yml triggers on this
 # workflow's success, and two of those gates can turn red on `main` with no
