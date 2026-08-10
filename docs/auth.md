@@ -332,9 +332,13 @@ generation) and rides its own pin bump.
   code then takes the same `complete_sign_in` path it always has. Only the
   single-use code travels — never a token.
 - **`response_mode=query` is gone from the framed URL.** Dropping it was the
-  adoption switch (#103 pinned it while our listener did not exist), and with
-  it went the in-frame courier: `/auth/callback` relays nothing to a parent
-  any more and serves the top-level flow alone. The framed path never
+  adoption switch (#103 pinned it while our listener did not exist). The
+  in-frame courier survives one release as a transition shim: a parent still
+  running the pre-adoption bundle pinned `query` (which idp.to honors), so its
+  frame lands on `/auth/callback` running the CURRENT bundle, which couriers
+  the result up in the old envelope. For the current bundle's own flow,
+  `/auth/callback` is the top-level landing alone; the shim deletes once the
+  stale-tab population drains. The framed path never
   navigates to our origin now, which also removes the Local Network Access
   refusal that the in-frame callback navigation hit on `http://127.0.0.1:5173`
   dev.

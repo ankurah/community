@@ -178,6 +178,12 @@ fn main() {
 async fn initialize() {
     // Resolve the session token: either finish an OIDC callback, or restore one.
     if auth::is_callback() {
+        // TRANSITION SHIM (see auth::relay_callback_to_parent): a frame put
+        // here by a pre-#105 parent gets its result couriered up, and this
+        // document is not the app. Deletes with the shim.
+        if auth::relay_callback_to_parent() {
+            return;
+        }
         match auth::handle_callback().await {
             Ok(token) => {
                 auth::store_token(&token);

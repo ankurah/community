@@ -68,6 +68,9 @@ const EMBED_SIZE_TYPE: &str = "idp-embed-size";
 /// serves [`FRAMED_AUTHORIZE_ENDPOINT`]. Two literals, one host — a
 /// property-host rename must swap both together.
 const FRAMED_MESSAGE_ORIGIN: &str = "https://ankurah.login.idp.to";
+/// TRANSITION SHIM (see [`relay_callback_to_parent`]): the pre-#105 envelope
+/// `type` that bundle's ceremonies key on. Deletes with the shim.
+const CALLBACK_MESSAGE_TYPE: &str = "idp-auth-callback";
 /// idp.to's account center for our directory (#36): where users manage their
 /// name, passkeys, and recovery email. `return_to` brings them back to
 /// Community — idp.to validates it against the domain's allowed return URLs, so
@@ -193,9 +196,9 @@ pub fn begin_framed_sign_in() -> Result<Option<FramedAttempt>, JsValue> {
     // No `response_mode`: embedded requests default to `web_message` — the
     // framed page posts the authorization response to this window, where
     // [`read_framed_message`] claims it. (`response_mode=query` was the
-    // pre-adoption pin, #103; dropping it was the adoption switch, and query
-    // delivery into a framed callback is a shape this client no longer
-    // handles.)
+    // pre-adoption pin, #103; dropping it was the adoption switch. Parents
+    // still running that bundle are served by [`relay_callback_to_parent`]
+    // until the shim retires.)
     let authorize_url = format!(
         "{FRAMED_AUTHORIZE_ENDPOINT}?{query}&embed_origin={embed}&signup_launch=redirect&return_url={ret}",
         query = authorize_query(&pending),
@@ -338,6 +341,62 @@ pub async fn handle_callback() -> Result<String, String> {
     let returned_state = params.get("state").ok_or("callback missing `state`")?;
 
     complete_sign_in(&code, &returned_state).await.map(|minted| minted.token)
+}
+
+/// TRANSITION SHIM — DELETE once #105 has been live for a release cycle (a
+/// harness task tracks it; the steady-state framed flow never navigates
+/// here). Serves one population: a parent page still running the pre-#105
+/// bundle. That parent's framed attempt pinned `response_mode=query`, which
+/// idp.to honors indefinitely, so its frame redirects to `/auth/callback` and
+/// loads THIS bundle — a fresh document from the current deployment, not the
+/// parent's. Without this branch, `handle_callback` would spend the code
+/// right here and mount a second copy of the app inside the modal while the
+/// parent waits on a message that never comes. Chat tabs stay open for days,
+/// so that population drains slowly, not at deploy time.
+///
+/// Inside a frame, hand this callback's result to the page that framed it and
+/// report that the app must not boot here. `false` at the top level, where
+/// the caller carries on into [`handle_callback`]. Only the short-lived
+/// authorization code and the returned `state` travel, in the pre-#105
+/// envelope those parents key on; the parent holds the PKCE verifier and does
+/// the exchange, so no token — idp.to's or ours — is ever put in a message, a
+/// URL, or this frame's history.
+pub fn relay_callback_to_parent() -> bool {
+    let Some(window) = window() else { return false };
+    let Some(parent) = embedding_parent(&window) else { return false };
+    let Some(params) = window.location().search().ok().and_then(|search| UrlSearchParams::new_with_str(&search).ok())
+    else {
+        return false;
+    };
+    let field = |name: &str| params.get(name).filter(|value| !value.is_empty());
+
+    if field("code").is_none() && field("error").is_none() {
+        return false;
+    }
+
+    let message = js_sys::Object::new();
+    let _ = js_sys::Reflect::set(&message, &JsValue::from_str("type"), &JsValue::from_str(CALLBACK_MESSAGE_TYPE));
+    for name in ["code", "state", "error", "error_description"] {
+        if let Some(value) = field(name) {
+            let _ = js_sys::Reflect::set(&message, &JsValue::from_str(name), &JsValue::from_str(&value));
+        }
+    }
+
+    // Addressed to our own origin, which is also the parent's: the callback and
+    // the page that framed it are both served from here. A parent anywhere else
+    // never receives this, whatever it claims to be.
+    let origin = window.location().origin().unwrap_or_default();
+    parent.post_message(&message, &origin).is_ok()
+}
+
+/// The window that framed this document, when there is one this document can
+/// reach. `None` at the top level, and `None` inside a frame whose embedder is
+/// another origin — `frameElement` is null there — which is the same answer for
+/// the purpose at hand: no same-origin parent to hand a result to. (Part of
+/// the transition shim above; deletes with it.)
+fn embedding_parent(window: &web_sys::Window) -> Option<web_sys::Window> {
+    window.frame_element().ok().flatten()?;
+    window.parent().ok().flatten()
 }
 
 /// idp.to's `error` response, worded for the sign-in card. Shared by both
