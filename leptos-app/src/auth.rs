@@ -104,6 +104,24 @@ const CALLBACK_PATH: &str = "/auth/callback";
 /// Our own server's guest mint (`server/src/guest.rs`).
 const GUEST_MINT_PATH: &str = "/auth/guest";
 
+/// The server's HTTP origin, for our own endpoints (`/auth/guest`,
+/// `/auth/session`).
+///
+/// FOR the mobile shell: there the app is served out of the app bundle, so
+/// the page origin (`capacitor://localhost`) names no server at all. The
+/// same compile-time override that points the websocket at the real server
+/// (`BACKEND_WS_URL` — `ws_url()` in main.rs reads it) is mapped to its HTTP
+/// form here, so one knob moves both transports and they cannot skew. On the
+/// web the override is absent and the page origin is the server, as before.
+fn server_http_base() -> Option<String> {
+    match option_env!("BACKEND_WS_URL") {
+        Some(url) if !url.is_empty() => {
+            Some(url.replacen("wss://", "https://", 1).replacen("ws://", "http://", 1))
+        }
+        _ => window()?.location().origin().ok(),
+    }
+}
+
 #[derive(Deserialize)]
 struct TokenResponse {
     id_token: String,
@@ -462,7 +480,7 @@ pub async fn complete_sign_in(code: &str, returned_state: &str) -> Result<Minted
     let tokens: TokenResponse = serde_json::from_str(&token_body).map_err(|e| format!("could not parse token response: {e}"))?;
 
     // 2) Federate: hand the ID token to our server, which validates + mints.
-    let session_url = format!("{origin}/auth/session");
+    let session_url = format!("{}/auth/session", server_http_base().ok_or("no origin")?);
     let session_req = serde_json::json!({ "id_token": tokens.id_token, "nonce": nonce });
     let session_body =
         http_post(&session_url, &session_req.to_string(), "application/json").await.map_err(|e| e.to_string())?;
@@ -618,9 +636,8 @@ impl GuestMintFailure {
 /// and setting the session pair the handshake reads (`ChatApp`), which is #86.
 /// This function is what #86 calls.
 pub async fn mint_guest_token() -> Result<String, GuestMintFailure> {
-    let window = window().ok_or(GuestMintFailure::Unreachable)?;
-    let origin = window.location().origin().map_err(|_| GuestMintFailure::Unreachable)?;
-    let body = http_post(&format!("{origin}{GUEST_MINT_PATH}"), "", "application/json")
+    let base = server_http_base().ok_or(GuestMintFailure::Unreachable)?;
+    let body = http_post(&format!("{base}{GUEST_MINT_PATH}"), "", "application/json")
         .await
         .map_err(|failure| if failure.answered() { GuestMintFailure::Refused } else { GuestMintFailure::Unreachable })?;
     // Discarded rather than wrapped, and that is the point: serde's error
