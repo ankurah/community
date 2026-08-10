@@ -606,16 +606,13 @@ pub fn ChatApp() -> impl IntoView {
     // — so this only runs for a member, and `current_user` simply stays `None`
     // for everybody else.
     if let Some(me) = viewer {
-        Effect::new({
-            let current_user = current_user.clone();
-            move |_| {
-                spawn_local(async move {
-                    match load_current_user(me).await {
-                        Ok(user) => current_user.set(Some(user)),
-                        Err(e) => tracing::error!("Failed to load current user: {}", e),
-                    }
-                });
-            }
+        Effect::new(move |_| {
+            spawn_local(async move {
+                match load_current_user(me).await {
+                    Ok(user) => current_user.set(Some(user)),
+                    Err(e) => tracing::error!("Failed to load current user: {}", e),
+                }
+            });
         });
     }
 

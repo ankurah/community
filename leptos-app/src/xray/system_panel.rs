@@ -61,10 +61,8 @@ pub fn SystemPanel() -> impl IntoView {
             return;
         }
         // Don't start a drag from the close button.
-        if let Some(t) = ev.target().and_then(|t| t.dyn_into::<web_sys::Element>().ok()) {
-            if t.closest("button").ok().flatten().is_some() {
-                return;
-            }
+        if let Some(t) = ev.target().and_then(|t| t.dyn_into::<web_sys::Element>().ok()) && t.closest("button").ok().flatten().is_some() {
+            return;
         }
         if let Some(rect) = panel_rect() {
             grab.set(Some((ev.client_x() as f64 - rect.left(), ev.client_y() as f64 - rect.top())));

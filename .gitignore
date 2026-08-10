@@ -9,8 +9,13 @@ leptos-app/dist/
 *.wasm
 
 # Local config: ignore only the akdev-managed root patch. Nested .cargo dirs
-# (e.g. leptos-app/.cargo/config.toml, which carries wasm build flags) are kept.
-/.cargo/
+# (e.g. leptos-app/.cargo/config.toml, which carries wasm build flags) are kept,
+# and so is `.cargo/audit.toml` — cargo-audit reads its ignore list from that
+# exact path, so the CI advisory gate needs it committed. The `/*` + negation
+# spelling is required: git cannot re-include a file under an excluded
+# directory, so the directory itself must stay un-excluded.
+/.cargo/*
+!/.cargo/audit.toml
 
 # e2e (Playwright)
 e2e/node_modules/

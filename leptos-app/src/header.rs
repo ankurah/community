@@ -68,10 +68,8 @@ pub fn Header(
             return;
         }
         let Some(anchor) = bell_anchor.get_untracked() else { return };
-        if let Some(node) = ev.target().and_then(|t| t.dyn_into::<web_sys::Node>().ok()) {
-            if !anchor.contains(Some(&node)) {
-                panels().close();
-            }
+        if let Some(node) = ev.target().and_then(|t| t.dyn_into::<web_sys::Node>().ok()) && !anchor.contains(Some(&node)) {
+            panels().close();
         }
     });
     on_cleanup(move || dismiss_handle.remove());

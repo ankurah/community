@@ -1,0 +1,124 @@
+# Quality gates, deliberately a SEPARATE workflow from CI: deploy.yml triggers
+# on the `CI` workflow's success, and two jobs here can turn red on `main`
+# with no commit at all — dtolnay/rust-toolchain@stable floats, so a new
+# stable's added clippy lints become failures under -D warnings, and
+# `cargo audit` reads the RustSec database over the network, so a freshly
+# filed advisory against anything in the lockfile reds the job. Neither
+# should hold a deploy of an unrelated fix hostage. Pull requests get gated
+# by both workflows identically; deploys keep gating on build + e2e alone.
+#
+# These checks are REQUIRED on `main` (branch protection, enabled
+# 2026-08-10, alongside Build & e2e): a red check holds the merge button.
+# Admin bypass is deliberately left open — a judgment merge remains
+# possible when a gate is red for reasons the change did not cause.
+name: Quality
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  # Lint-grade findings used to arrive as review-bot comments on a pull
+  # request, which meant they were advisory and accumulated (33 of them in
+  # the SPA alone when this job was written). Here they red the check
+  # instead.
+  #
+  # Three invocations because no one of them sees the others' code: `main.rs`
+  # picks its storage engine with `cfg`, so the sled arm is invisible to a
+  # postgres build and vice versa, and the SPA compiles only for wasm.
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: clippy
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Clippy server & model (postgres storage)
+        run: cargo clippy -p community-server -p community-model --all-targets --locked -- -D warnings
+
+      - name: Clippy server & model (sled storage)
+        run: cargo clippy -p community-server -p community-model --no-default-features --features sled --all-targets --locked -- -D warnings
+
+      # From the crate directory, not the workspace root: `leptos-app/.cargo/config.toml`
+      # carries the getrandom backend cfg the wasm build needs, and cargo looks
+      # for that file relative to where it was invoked, not relative to the crate.
+      - name: Clippy SPA (wasm)
+        working-directory: leptos-app
+        run: cargo clippy -p leptos-app --target wasm32-unknown-unknown --all-targets --locked -- -D warnings
+
+  # The other class of review-bot comment: an advisory filed against something
+  # in `Cargo.lock`. Failing the check is the point — a dependency with a known
+  # defect should stop a merge, not sit in a comment thread.
+  #
+  # `cargo audit` fails on vulnerabilities and only warns about unmaintained,
+  # unsound and yanked crates. Left that way deliberately: those three are
+  # facts about a crate's upkeep rather than a defect in it, and nine of them
+  # are true of this lockfile today (bincode, fxhash, instant, paste,
+  # proc-macro-error2, smallstr, event-listener, lru, spin), every one of them
+  # transitive. Turning them into failures would gate community's merges on
+  # other people's release schedules.
+  audit:
+    name: Dependency advisories
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+
+      # Reads the ignore list from `.cargo/audit.toml`, which is committed and
+      # carries the reasoning for each entry.
+      - name: Audit the lockfile
+        run: cargo audit
+
+  # The SPA's own unit tests (`leptos-app/src/auth/tests.rs`). They need a real
+  # browser rather than node — they build `MessageEvent`s and call
+  # `encodeURIComponent` — and the `build` job's Playwright suite is no
+  # substitute: it drives a live idp.to ceremony, so it covers the path where a
+  # sign-in succeeds and none of the paths where a message is refused.
+  #
+  # The runner image already ships Chrome and a matching chromedriver on PATH,
+  # so wasm-pack is the only tool to install; it fetches the wasm-bindgen build
+  # matching the version the crate pins.
+  wasm-test:
+    name: SPA unit tests (wasm)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install wasm-pack
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack
+
+      # `wasm-pack test` has no `--locked` pass-through of its own, so the
+      # refusal of a stale lockfile is its own step — every other cargo
+      # invocation across both workflows carries `--locked`.
+      - name: Refuse a stale lockfile
+        run: cargo metadata --locked --format-version 1 > /dev/null
+
+      # From the crate directory for the same reason the clippy step is:
+      # `leptos-app/.cargo/config.toml` carries the getrandom backend cfg, and
+      # cargo resolves that file against the invocation directory.
+      - name: Test SPA (headless Chrome)
+        working-directory: leptos-app
+        run: wasm-pack test --headless --chrome

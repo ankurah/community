@@ -1,0 +1,50 @@
+# cargo-audit's ignore list, read by the `Dependency advisories` CI job.
+#
+# FOR: an advisory with no fixed release would red the gate forever, which
+# trains everyone to stop reading it. An entry here is a claim that we looked at
+# the advisory, traced it to what this app actually does, and decided it does not
+# describe a defect we have. Every entry states that reasoning, and an advisory
+# we have NOT reasoned through does not belong here — it belongs in a bump.
+[advisories]
+ignore = [
+    # RUSTSEC-2023-0071 — `rsa` 0.9.10, the Marvin timing sidechannel.
+    # `patched = []` upstream: there is no version to move to, and the crate
+    # reaches community by two paths (verified with `cargo tree -i rsa`):
+    #
+    #   rsa ── jsonwebtoken 11 ── community-server
+    #      └─ superboring ── jwt-simple ── ankurah-jwt-auth ──┬─ community-server
+    #                                                         └─ leptos-app
+    #
+    # The advisory describes information about an RSA PRIVATE key leaking
+    # through the time a private-key operation takes on inputs the measuring
+    # party chose. Neither path gives anyone that measurement:
+    #
+    #   - jsonwebtoken validates idp.to's OIDC id_token, RS256 against their
+    #     published JWKS. Public-key verification; in production no private
+    #     key exists on this path for a timing signal to be about. (The
+    #     server's own test module does sign, with a keypair generated fresh
+    #     at test run time — a key nothing outlives.)
+    #   - ankurah-jwt-auth does hold a private key — `SigningKeys` is an
+    #     RS256-4096 keypair and it signs our own session tokens with it —
+    #     but the input to that operation is the claim set the server
+    #     assembles from a validated id_token, not bytes a caller feeds the
+    #     operation at will, and the `rsa` crate's signing path applies
+    #     randomized blinding. The SPA's leg of this path verifies and parses
+    #     only; it never signs.
+    #
+    # And nothing here decrypts, which is where the measured oracle lives.
+    # Not because the capability is absent: jwt-simple DOES ship JWE (its
+    # default JWE header is RSA-OAEP) and `jwe` sits in jwt-simple's own
+    # default feature list. What keeps it out of this build is
+    # ankurah-jwt-auth declaring `jwt-simple = { default-features = false,
+    # features = ["pure-rust"] }`, so the resolved features (cargo tree -f
+    # "{p} FEATURES={f}") are `pure-rust,superboring` with no `jwe`, and
+    # superboring's `private_decrypt` never compiles. If ankurah-jwt-auth
+    # ever stops disabling jwt-simple's defaults, RSA decryption compiles
+    # back in and this entry must be re-reasoned before it is kept.
+    #
+    # RETIRE THIS ENTRY when `rsa` ships the constant-time implementation
+    # tracked in RustCrypto/RSA#626, or when the session tokens move off
+    # RS256.
+    "RUSTSEC-2023-0071",
+]

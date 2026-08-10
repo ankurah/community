@@ -892,3 +892,6 @@ struct DiscoveryDoc {
     end_session_endpoint: Option<String>,
 }
 
+#[cfg(test)]
+mod tests;
+

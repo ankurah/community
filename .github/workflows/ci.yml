@@ -62,3 +62,10 @@ jobs:
         run: npm run test:e2e
         env:
           CI: true
+
+# The quality gates (clippy, dependency advisories, SPA unit tests) live in
+# quality.yml, deliberately OUTSIDE this workflow: deploy.yml triggers on this
+# workflow's success, and two of those gates can turn red on `main` with no
+# commit (a new stable's added lints under -D warnings; a freshly filed
+# advisory arriving over the network). Keeping them out of `CI` keeps a
+# production fix deployable while an unrelated gate is red.

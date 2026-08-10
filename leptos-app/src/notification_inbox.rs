@@ -475,14 +475,14 @@ fn mark_seen(rows: Vec<NotificationView>) {
         return;
     }
     wasm_bindgen_futures::spawn_local(async move {
-        match (|| async {
+        match async {
             let trx = ctx().begin();
             for row in &rows {
                 row.edit(&trx)?.seen().set(&true)?;
             }
             trx.commit().await?;
             Ok::<_, Box<dyn std::error::Error>>(())
-        })()
+        }
         .await
         {
             Ok(_) => {}
@@ -642,7 +642,7 @@ fn update_pref(me: EntityId, prefs: LiveQuery<NotificationPrefView>, created_id:
 
 thread_local! {
     static PREF_QUEUE: std::cell::RefCell<std::collections::VecDeque<PrefChange>> =
-        std::cell::RefCell::new(std::collections::VecDeque::new());
+        const { std::cell::RefCell::new(std::collections::VecDeque::new()) };
     static PREF_PUMP_RUNNING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 

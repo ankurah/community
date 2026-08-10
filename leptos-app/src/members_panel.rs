@@ -216,7 +216,7 @@ fn MemberRow(
     let ban_reason = move || banned_users.with(|map| map.get(&user_id_for_reason).cloned().flatten());
 
     let detail_target = user.id();
-    let open_detail = move |_| panels().open(Surface::UserDetail(detail_target.clone()));
+    let open_detail = move |_| panels().open(Surface::UserDetail(detail_target));
 
     view! {
         <button
