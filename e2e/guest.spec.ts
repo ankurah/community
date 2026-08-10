@@ -19,17 +19,19 @@ import { test, expect, type BrowserContext, type Page } from '@playwright/test';
  * sign-in instead of performing one.
  *
  * NO SEEDED CONTENT, and therefore no assertion about what a message row
- * looks like. The server seeds rooms at boot (`ensure_default_rooms`), so the
- * room rail always has real content to render — but nothing seeds a MESSAGE,
- * and nothing in a browser can: a guest holds no `post` privilege and there is
- * no member session to write one with. The one server-side path that writes a
- * message without a member is `POST /hooks/ci`, which needs `CI_HOOK_SECRET`
- * configured for the e2e server and a copy of that secret in the spec — more
- * machinery, and a secret in the tree, than rung 1 is worth. So the timeline
- * is asserted for its shape and its refusals, never for its contents, which
- * also keeps these specs honest on a developer's machine: the sled node opens
- * `~/.community`, so locally it carries whatever a dev session left there
- * while on a CI runner it is empty.
+ * looks like. The server seeds rooms at boot (`ensure_default_rooms`, plus
+ * `ci_hook::seed`'s `#ci` room), so the room rail always has real content to
+ * render — but nothing seeds a MESSAGE, and nothing in a browser can: a guest
+ * holds no `post` privilege and there is no member session to write one with.
+ * The one server-side path that writes a message without a member is
+ * `POST /hooks/ci`, which needs `CI_HOOK_SECRET` configured for the e2e
+ * server and a copy of that secret in the spec — more machinery, and a secret
+ * in the tree, than rung 1 is worth. So the timeline is asserted for its
+ * shape and its refusals, never for its contents. The harness boots the node
+ * on a per-run scratch directory (`COMMUNITY_DATA_DIR`), so the specs run
+ * against an empty store everywhere — except when dev.sh's exported ports
+ * attach them to an already-running dev node, which is why they stay
+ * content-agnostic rather than asserting emptiness.
  *
  * THE MINT BUDGET IS WHY THERE IS ONE PAGE. `POST /auth/guest` admits ten
  * mints per client address per minute (`server/src/guest.rs`), and every load
@@ -53,6 +55,14 @@ let page: Page;
  */
 let idpRequests: string[] = [];
 
+/**
+ * Every request the page addressed to any host that is neither this run's own
+ * localhost nor idp.to. There is no such host in the app today, and the last
+ * test asserts there still isn't — a future asset host would otherwise reach
+ * the network from CI unremarked.
+ */
+let strayRequests: string[] = [];
+
 /** The status `POST /auth/guest` answered the boot with. */
 let guestMintStatus: number | undefined;
 
@@ -60,7 +70,11 @@ let guestMintStatus: number | undefined;
  * The rail row for a room, by its exact name. Matching the row's text would
  * also find a room called `general-2`, and a developer's node carries whatever
  * rooms their own dev session created — so the name is anchored against the
- * label, which holds it bare (the `#` is a separate span).
+ * label, which holds it bare (the `#` is a separate span). For a MEMBER
+ * session this locator would be too loose: DM rows are `.roomItem dmItem`
+ * with the partner's name in the same `.roomLabel`, so a partner named
+ * `general` would collide. Guests have no DM rows (asserted below), so it is
+ * exact here.
  */
 const roomRow = (name: string) =>
   page.locator('.roomItem').filter({ has: page.locator('.roomLabel', { hasText: new RegExp(`^${name}$`) }) });
@@ -70,6 +84,19 @@ test.describe.configure({ mode: 'serial' });
 test.describe('Guest flows (#79)', () => {
   test.beforeAll(async ({ browser }) => {
     context = await browser.newContext();
+
+    // The outer fence: any host that is not this run's own server. Registered
+    // FIRST so the idp.to route below (registered later, matched first) takes
+    // idp traffic out of it; what remains here should be nothing at all, and
+    // the last test asserts exactly that. Fulfilled rather than aborted so an
+    // accidental navigation strands the page in place instead of killing it.
+    await context.route(
+      (url) => url.hostname !== 'localhost' && url.hostname !== '127.0.0.1',
+      async (route) => {
+        strayRequests.push(route.request().url());
+        await route.fulfill({ status: 204, body: '' });
+      },
+    );
 
     // idp.to IS NOT MOCKED ANYWHERE, and this is what keeps it out of the run.
     // Every request to any idp.to host is answered here, by Playwright, with a
@@ -152,11 +179,12 @@ test.describe('Guest flows (#79)', () => {
   });
 
   test('the member surfaces are absent rather than present-and-refusing', async () => {
-    // THE ROSTER IS THE ONE TO READ TWICE. `user` is signed-in-only in
-    // `policy.json`, so a guest's members query would be refused at the
-    // collection gate — and the header answers that by never offering the
-    // button, which is why there is no panel to open and nothing to assert
-    // inside one.
+    // THE ROSTER IS THE ONE TO READ TWICE. LISTING members is signed-in-only
+    // (`user`'s `read` scope in `policy.json`), while resolving one author BY
+    // REF is open to the view tier (`retrieve: view`) — which is why message
+    // rows do carry author names for a guest, and why what these lines assert
+    // is only that no roster surface is offered: the header never renders the
+    // button, so there is no panel to open and nothing to assert inside one.
     await expect(page.locator('.membersButton')).toHaveCount(0);
     await expect(page.locator('.memberRow')).toHaveCount(0);
 
@@ -166,6 +194,10 @@ test.describe('Guest flows (#79)', () => {
     await expect(page.locator('.xrayButton')).toHaveCount(0);
     await expect(page.locator('.accountSettingsButton')).toHaveCount(0);
     await expect(page.locator('.userInfo')).toHaveCount(0);
+    // The heading, not just the rows: `.dmItem` is empty for a guest even if
+    // the section wrongly mounts (a guest has no conversations to list), so
+    // the section header is what proves the surface itself is absent.
+    await expect(page.locator('.dmSectionHeader')).toHaveCount(0);
     await expect(page.locator('.dmItem')).toHaveCount(0);
 
     // What stays is what is about the page rather than about who is reading
@@ -198,8 +230,13 @@ test.describe('Guest flows (#79)', () => {
     expect(authorize.searchParams.get('code_challenge')).toBeTruthy();
     expect(authorize.searchParams.get('redirect_uri')).toBe(`${new URL(page.url()).origin}/auth/callback`);
 
-    // The press wrote nothing: the box still holds no text, and Send is still
-    // refused.
+    // The press wrote nothing — and neither does typing. The click above
+    // already put focus wherever the component leaves it, so keys sent now
+    // are exactly what a visitor mashing the keyboard produces; `readonly` is
+    // what eats them. (Typed here rather than in the caret test above: the
+    // caret test must not click, because a click is the sign-in gesture and
+    // its authorization request belongs to THIS test's count.)
+    await page.keyboard.type('nope');
     await expect(page.locator('.input[placeholder="Type a message..."]')).toHaveValue('');
     await expect(page.locator('.sendButton')).toBeDisabled();
   });
@@ -211,7 +248,10 @@ test.describe('Guest flows (#79)', () => {
     await expect(page.locator('.container')).toBeVisible();
     await expect(page.locator('.signIn')).toHaveCount(0);
 
-    // Reading goes on: another room opens, and the rail follows.
+    // Reading goes on: another room opens, and the rail follows. `ci` is not
+    // one of `ensure_default_rooms`' four — `ci_hook::seed` creates it
+    // unconditionally at boot, secret configured or not, which is why it is
+    // here to click on an otherwise-empty node.
     const ci = roomRow('ci');
     await expect(ci).toHaveCount(1);
     await ci.click();
@@ -222,5 +262,12 @@ test.describe('Guest flows (#79)', () => {
     const composer = page.locator('.input[placeholder="Type a message..."]');
     await expect(composer).toHaveAttribute('readonly', '');
     await expect(page.locator('.sendButton')).toBeDisabled();
+
+    // The whole visit's ledger, closed out: the one authorization request the
+    // sign-in test claimed is still the only one — nothing later raised a
+    // second, or trickled a delayed discovery fetch — and no request ever
+    // addressed a host that is not ours or idp.to's.
+    expect(idpRequests).toHaveLength(1);
+    expect(strayRequests).toEqual([]);
   });
 });

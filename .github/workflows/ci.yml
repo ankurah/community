@@ -20,10 +20,13 @@ jobs:
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
 
+      # Pinned: this job gates production deploys, and the e2e suite now runs
+      # live specs through trunk's proxy table — a floating trunk could change
+      # serving or proxy behavior under the gate with no repository change.
       - name: Install trunk
         uses: taiki-e/install-action@v2
         with:
-          tool: trunk
+          tool: trunk@0.21.14
 
       - name: Build server (release)
         run: cargo build -p community-server --release --locked
@@ -49,9 +52,12 @@ jobs:
         with:
           node-version: '20'
 
+      # `npm ci` against the committed lockfile: the live specs gate deploys,
+      # so a new Playwright (or its bundled Chromium) must arrive by a commit
+      # that bumps the lockfile, never by the gate re-resolving `^1.57.0`.
       - name: Install e2e dependencies
         working-directory: e2e
-        run: npm install
+        run: npm ci
 
       - name: Install Playwright
         working-directory: e2e

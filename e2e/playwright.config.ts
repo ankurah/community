@@ -1,6 +1,7 @@
 import { defineConfig, devices } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -54,8 +55,27 @@ function writeTrunkConfig(): string {
     `[[proxy]]\nbackend = "ws://127.0.0.1:${SERVER_PORT}/ws"\nws = true\n\n` +
     `[[proxy]]\nbackend = "http://127.0.0.1:${SERVER_PORT}/auth/session"\n\n` +
     `[[proxy]]\nbackend = "http://127.0.0.1:${SERVER_PORT}/auth/guest"\n`;
-  writeFileSync(join(leptosApp, 'Trunk.e2e.toml'), committed + proxies);
-  return 'Trunk.e2e.toml';
+  // The port in the name: two concurrent runs randomize ports independently,
+  // and a shared filename would let the later run repoint the earlier run's
+  // trunk at the wrong backend (silently — trunk is not restarted under
+  // `reuseExistingServer`).
+  const name = `Trunk.e2e.${WEB_PORT}.toml`;
+  const path = join(leptosApp, name);
+  const content = committed + proxies;
+  // Write only on change: Playwright imports this config once per worker
+  // process (a retry spawns a fresh one), trunk's watcher covers the crate
+  // directory, and an identical-bytes rewrite still triggers a rebuild whose
+  // autoreload would pull the page out from under a running spec.
+  let existing: string | undefined;
+  try {
+    existing = readFileSync(path, 'utf8');
+  } catch {
+    existing = undefined;
+  }
+  if (existing !== content) {
+    writeFileSync(path, content);
+  }
+  return name;
 }
 
 const TRUNK_CONFIG = writeTrunkConfig();
@@ -81,10 +101,22 @@ export default defineConfig({
     {
       // Hermetic e2e: run the durable node on Sled so no Postgres container is
       // needed, even though the app defaults to Postgres for deployment.
+      //
+      // COMMUNITY_DATA_DIR gives the node a per-run scratch directory instead
+      // of the developer's real `~/.community` — a run must not read rows a
+      // dev session left (stale uncached links make the unfurl worker fetch
+      // external URLs at boot, server-side, where no browser routing can
+      // intercept), must not write into that data, and must be able to run
+      // WHILE dev.sh runs (sled holds an exclusive lock per path). NOT a HOME
+      // override: cargo resolves its toolchain through HOME, and changing it
+      // stops `cargo run` outright. Caveat that is by design: when dev.sh has
+      // exported the ports, `reuseExistingServer` attaches to the already
+      // -running dev node and this env never applies — that mode deliberately
+      // runs the specs against the dev node.
       command: 'cargo run -p community-server --release --no-default-features --features sled',
       cwd: '..',
       port: parseInt(SERVER_PORT),
-      env: { SERVER_PORT },
+      env: { SERVER_PORT, COMMUNITY_DATA_DIR: join(tmpdir(), `community-e2e-${SERVER_PORT}`) },
       reuseExistingServer: !process.env.CI,
       timeout: 180000,
     },
