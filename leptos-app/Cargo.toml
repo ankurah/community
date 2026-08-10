@@ -77,3 +77,15 @@ serde_json = "1.0"
 getrandom = { version = "0.2", features = ["js"] }
 getrandom_03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
 #####
+
+# The wasm unit tests (`src/auth/tests.rs`). Pinned exactly, because the runner
+# and the bindings it generates must be the same generation as the
+# wasm-bindgen pinned above — 0.3.55 requires `=0.2.105`.
+[dev-dependencies]
+wasm-bindgen-test = "=0.3.55"
+# `MessageEventInit` is how those tests hand a reader an event carrying a chosen
+# `origin`; the browser sets that member itself on a real message, so nothing
+# outside the tests needs the binding. Declared here rather than beside the
+# other web-sys features so the shipped bundle does not carry it: the workspace
+# is on resolver 2, which keeps dev-dependency features out of a normal build.
+web-sys = { version = "=0.3.82", features = ["MessageEventInit"] }
