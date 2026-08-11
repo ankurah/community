@@ -31,6 +31,7 @@ mod notification_inbox;
 mod notification_manager;
 mod panels;
 mod profile_popover;
+mod push;
 mod qr_code_modal;
 mod room_topic;
 mod shell;
@@ -246,6 +247,24 @@ async fn initialize() {
         match connect_node().await {
             Ok(()) => SESSION_LIVE.store(true, Ordering::Relaxed),
             Err(reason) => *AUTH_ERROR.write().unwrap() = Some(reason.to_string()),
+        }
+    }
+
+    // The notification legs, both of them the app's alone: `is_shell()` is
+    // false in a browser for the life of the document, so a web visitor runs
+    // neither and nothing below is reachable from a tab.
+    if shell::is_shell() {
+        // Subscribe before the mount that will follow a tap. A tap is often
+        // what LAUNCHED this app, and the native side holds that one until
+        // something listens for it — see `push::install_navigator` for what
+        // happens to a route that arrives before there is a UI to take it.
+        push::watch_taps();
+        // And ask about notifications only now: on a boot that landed a member
+        // session, so the one system prompt iOS ever shows falls after the
+        // person chose to sign in. A guest boot asks nothing and sends
+        // nothing.
+        if SESSION_LIVE.load(Ordering::Relaxed) && viewer().is_some() {
+            spawn_local(push::register_this_device());
         }
     }
 
@@ -579,6 +598,26 @@ pub fn ChatApp() -> impl IntoView {
         .on_auth_demand(move || sign_in.begin())
         .hooks(chat_hooks::chat_hooks(previews_by_url, profile, viewer))
         .provide();
+
+    // Where a tapped push alert lands (the app only — `is_shell()` is false in
+    // a browser, and nothing installed here can be reached without it).
+    //
+    // Both destinations are the ones the inbox row already deep-links to from
+    // the same ids, taken through the same two seams: a room is a selection,
+    // and a direct message is the find-or-create that opening a conversation
+    // has always been. Installed in the component body rather than an effect,
+    // because a route drained at mount has to be in `selected_room` before the
+    // sidebar's default choice looks at it.
+    if shell::is_shell() {
+        let chat = chat.clone();
+        push::install_navigator(move |route| match route {
+            push::Route::Room(room) => {
+                selected_room.set(Some(room));
+                selected_dm.set(None);
+            }
+            push::Route::Conversation(partner) => dm::open_thread_with(&chat, partner, selected_dm),
+        });
+    }
 
     // Notification sounds, which want a per-room message window. The rooms
     // come from the chat handshake, which owns that query for the session — a

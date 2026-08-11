@@ -127,7 +127,7 @@ const NATIVE_CALLBACK_SCHEME: &str = "org.ankurah.community";
 const GUEST_MINT_PATH: &str = "/auth/guest";
 
 /// The server's HTTP origin, for our own endpoints (`/auth/guest`,
-/// `/auth/session`).
+/// `/auth/session`, `/push/register`).
 ///
 /// FOR the mobile shell: there the app is served out of the app bundle, so
 /// the page origin (`capacitor://localhost`) names no server at all. The
@@ -135,7 +135,7 @@ const GUEST_MINT_PATH: &str = "/auth/guest";
 /// (`BACKEND_WS_URL` — `ws_url()` in main.rs reads it) is mapped to its HTTP
 /// form here, so one knob moves both transports and they cannot skew. On the
 /// web the override is absent and the page origin is the server, as before.
-fn server_http_base() -> Option<String> {
+pub fn server_http_base() -> Option<String> {
     match option_env!("BACKEND_WS_URL") {
         Some(url) if !url.is_empty() => {
             Some(url.replacen("wss://", "https://", 1).replacen("ws://", "http://", 1))
