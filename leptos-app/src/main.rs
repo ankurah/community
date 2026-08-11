@@ -608,6 +608,14 @@ pub fn ChatApp() -> impl IntoView {
     // has always been. Installed in the component body rather than an effect,
     // because a route drained at mount has to be in `selected_room` before the
     // sidebar's default choice looks at it.
+    //
+    // WHAT A GUEST'S TAP DOES, since the alert was addressed to a member and
+    // this device may have been signed out since: a room opens read-only, as
+    // any room does for a guest. A conversation cannot open at all — a thread
+    // has two named participants and there is nobody to name — so
+    // `open_thread_with` raises the components' auth demand instead, which is
+    // the sign-in ceremony. Asking somebody who tapped a direct message to
+    // sign in is the honest answer; it is the same demand the composer raises.
     if shell::is_shell() {
         let chat = chat.clone();
         push::install_navigator(move |route| match route {
