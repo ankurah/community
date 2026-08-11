@@ -15,6 +15,14 @@ name: iOS Release
 on:
   workflow_dispatch:
 
+# Nothing here writes to the repository: the job builds, signs and hands the
+# archive to App Store Connect, which it authenticates to with its own API key.
+# Stated rather than inherited, because the default for a workflow that names no
+# permissions is whatever the repository's default is — and a token wider than
+# the job needs is a token every action in the job could use.
+permissions:
+  contents: read
+
 jobs:
   testflight:
     runs-on: macos-26
@@ -61,8 +69,14 @@ jobs:
           security set-keychain-settings -lut 21600 "$KEYCHAIN"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
           echo "$P12_BASE64" | base64 --decode > $RUNNER_TEMP/dist.p12
+          # -A trusts every application on this runner with the key, which
+          # is what a throwaway keychain in a single-job VM can afford. -T
+          # names codesign explicitly alongside it: the partition list set
+          # below is what actually decides, and an entry for the one tool that
+          # must reach the key is what keeps this working if -A is ever
+          # narrowed.
           security import $RUNNER_TEMP/dist.p12 -k "$KEYCHAIN" \
-            -P "$P12_PASSWORD" -A -t cert -f pkcs12
+            -P "$P12_PASSWORD" -A -T /usr/bin/codesign -t cert -f pkcs12
           security set-key-partition-list -S apple-tool:,apple: \
             -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" > /dev/null
           security list-keychains -d user -s "$KEYCHAIN" login.keychain-db

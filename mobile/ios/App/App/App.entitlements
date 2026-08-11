@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- FOR: iOS refuses to hand an app a device token unless the app is signed
+	     with this entitlement. Without it `registerForRemoteNotifications`
+	     fails, the push plugin reports a registration error, and nothing ever
+	     reaches POST /push/register — the whole notification path is dead on a
+	     real device, with only a log line to say so.
+
+	     `production`, not `development`, because the environment here has to
+	     match the one the SERVER sends to, and the server's default endpoint is
+	     Apple's production host (APNS_ENDPOINT / DEFAULT_ENDPOINT in
+	     server/src/push/apns.rs). The two ways this app is built both want it:
+	     a TestFlight build signed with the App Store profile is a production
+	     build, and a development-signed build carrying `production` still gets
+	     a token — iOS resolves the sandbox/production choice from the
+	     provisioning profile at run time, so this value is the ceiling rather
+	     than the switch.
+
+	     A simulator build ignores entitlements entirely (nothing is signed and
+	     no device token exists there), so this file changes nothing about the
+	     local build loop. -->
+	<key>aps-environment</key>
+	<string>production</string>
+</dict>
+</plist>

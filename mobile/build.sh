@@ -19,4 +19,4 @@ cp -R ../leptos-app/dist www
 echo "==> capacitor sync"
 npx cap sync ios
 
-echo "done — open ios/App/App.xcworkspace or run: npx cap run ios"
+echo "done — open ios/App/App.xcodeproj or run: npx cap run ios"
