@@ -17,7 +17,7 @@ community-model = { path = "../model", features = ["wasm"] }
 # Pinned to the same rev as ankurah-chat-model above, and for the same reason:
 # these crates are one tree, and a components rev that disagreed with the model
 # rev would resolve two copies of the collections.
-ankurah-chat-leptos = { git = "https://github.com/ankurah/ankurah-chat", rev = "4ab7713be04b390c54e789a597527898aaecd90b" }
+ankurah-chat-leptos = { git = "https://github.com/ankurah/ankurah-chat", rev = "7abcba2a9c502b2b8a3f8441bb8b930a7b63e6b6" }
 ankurah-storage-indexeddb-wasm = "=0.9.2"
 ankurah-signals = { version = "=0.9.2", features = ["reactive-graph"] }
 # JWT auth on wasm: client only calls parse_claims_unverified + JwtContext::from_claims
