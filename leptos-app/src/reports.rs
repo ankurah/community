@@ -8,10 +8,10 @@
 //!
 //! Two halves, deliberately in one module because they are two ends of one
 //! row. [`report_message`] is the filing seam: it takes a message and files a
-//! `Report` naming the caller, and it is shaped like `chat_hooks`'
-//! `moderator_delete` so the chat crate's actions menu can be handed it in the
-//! integration pass. [`ReportsView`] is the moderator end — the queue, inside
-//! the moderation panel, where the same row is read and closed.
+//! `Report` naming the caller, and the chat crate's actions menu calls it
+//! through the "Report message" entry `chat_hooks` installs. [`ReportsView`] is
+//! the moderator end — the queue, inside the moderation panel, where the same
+//! row is read and closed.
 //!
 //! WHAT A REPORT ROW DISCLOSES, AND TO WHOM. Only moderators read this
 //! collection (`policy.json`'s `report` entry: the read scope is a comparison
@@ -49,13 +49,9 @@ use crate::{ctx, fmt};
 /// blocks the dialog files it with no reason rather than swallowing the
 /// report — the same three-way the moderator delete and the ban prompt take.
 ///
-/// NOTHING CALLS THIS YET, and that is the one thing to know about the report
-/// feature on this branch. A member reaches it through an entry in the message
-/// actions menu, and that menu belongs to the chat crate, which a parallel
-/// branch is reworking — so the entry (and this call) land in that integration
-/// pass. Everything on the other side of it is finished: the row, the policy,
-/// the queue moderators read it in.
-#[allow(dead_code, reason = "the chat crate's actions menu calls this in the integration pass")]
+/// A member reaches this from "Report message" in the chat crate's actions
+/// menu, which `chat_hooks` puts there; that entry is what settles who is
+/// offered it (not on your own message, and a guest meets sign-in first).
 pub fn report_message(message: MessageView, close: Box<dyn Fn()>) {
     crate::terms::demand_terms(move || {
         let reason = match window().map(|w| w.prompt_with_message("Report this message — what is wrong with it? (optional):")) {

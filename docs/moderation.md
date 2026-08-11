@@ -165,6 +165,12 @@ for a moderator (`leptos-app/src/reports.rs`). Open reports first, newest first
 within each half; each row names the room, the reporter, the reason and the
 time, and carries Resolve while it is open.
 
+**Where members file from:** "Report message" in the chat crate's message
+actions menu, which `leptos-app/src/chat_hooks.rs` puts there. It is offered on
+everybody's message but your own — reporting yourself gives a moderator nothing
+to act on — and a guest pressing it meets the sign-in ceremony first, which is
+how that menu already treats everything that writes.
+
 **No link to the reported message**, mirroring the log's own restraint above.
 The row carries the `message` ref for moderator tooling and the queue renders
 none of it. This is the one place the queue is currently thinner than a
@@ -186,9 +192,16 @@ report policy withholds from them.
 
 Blocking is a `localStorage` list of `User` entity ids on the reader's device
 (`leptos-app/src/blocklist.rs`), offered on every member but yourself from the
-member sidebar and the profile card. No collection, no server involvement, no
-policy: blocked members' rows still sync, and hiding is the renderer's job
-through the exported `is_blocked(user_id)`.
+member sidebar, the profile card, and "Block author" in the message actions
+menu. No collection, no server involvement, no policy: blocked members' rows
+still sync, and hiding is the renderer's job through the exported
+`is_blocked(user_id)`.
+
+**A guest pressing "Block author" meets sign-in instead**, and that is the one
+place the menu departs from "a reader with no account at all is still a reader":
+the way back out of a block is the member sidebar and the profile card, and
+community withholds both from a guest, so a guest who blocked from the menu
+would be veiled into a room with no handle to undo it.
 
 **What a blocked member's row looks like.** The chat components ask community
 per row (their `message_veil` hook) and put community's answer where the message
@@ -232,11 +245,9 @@ member who receives an abusive DM reports the message; the report carries the
 message ref, and the moderator acts on what the report contains. There is no
 "open this member's conversations" affordance anywhere in the product, and
 building one would mean changing the policy above, in public, on purpose.
-(The `Report` row, its policy and the moderator queue now exist — see "Reports"
-below. What does not exist yet is the affordance a member presses: the entry
-lives in the message actions menu, which belongs to the chat crate, so it
-arrives with that crate's integration pass. Until then a recipient's route is
-still to tell a moderator directly.)
+(All of it exists now — see "Reports" below: the row, the policy, the entry a
+member presses in the message actions menu, and the queue a moderator reads it
+in.)
 
 The one thing moderators DO see is the public `ModAction` log, including the
 automatic `dm-rate-limit` rows described next — and, now, the report queue
