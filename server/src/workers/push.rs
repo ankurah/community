@@ -357,6 +357,11 @@ const MAX_ANNOUNCED: usize = 8192;
 /// notification — a second server-side table on both storage engines — and the
 /// ruling this generation was scoped by is one alert per event, not a delivery
 /// guarantee across downtime.
+///
+/// AND WHAT THE BOUNDARY RESTS ON: a row stamped in the same millisecond as the
+/// floor is claimed rather than skipped, which is right for one process and
+/// would ring twice for two, since both would claim it — the deployment is a
+/// single replica with a Recreate strategy, so no two of these run at once.
 fn claim(announced: &Announced, floor_ms: i64, id: EntityId, created_at: i64) -> bool {
     if created_at < floor_ms {
         return false;
