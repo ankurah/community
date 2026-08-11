@@ -20,8 +20,14 @@
 //! - [`store`] keeps those tokens in a plain server-side table — NOT an ankurah
 //!   collection, because a device token is a credential and a collection would
 //!   mean a policy entry to get right forever.
-//! - The sender that reads them and rings the phones follows.
+//! - [`apns`] is the far end: a provider token, an HTTP/2 request to Apple, and
+//!   what Apple's answer means for the device it was addressed to.
+//! - `workers::push` is what joins them. It watches the `notification` rows the
+//!   fan-out writes and, for each new one, sends one alert to every device the
+//!   recipient has registered. It lives with the other reactive workers because
+//!   that is what it is — a standing LiveQuery feeding a supervised consumer.
 
+pub mod apns;
 pub mod registry;
 pub mod store;
 

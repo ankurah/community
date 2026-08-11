@@ -41,7 +41,10 @@ yarn-error.log*
 
 # Secrets — never commit private keys. The dev JWT signing key is in-memory
 # only (prod uses ANKURAH_JWT_SIGNING_KEY from Secret Manager), but guard against
-# any local key material regardless.
+# any local key material regardless. `.p8` is the extension Apple issues an APNs
+# signing key under; the server reads that key from APNS_KEY_P8, so a copy in
+# the tree is only ever an accident.
 *.pem
+*.p8
 signing-key*
 leptos-app/Trunk.dev.toml
