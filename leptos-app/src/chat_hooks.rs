@@ -9,7 +9,8 @@
 //! - inside a tombstone, who removed the message;
 //! - in place of a blocked member's message, the veil that says so and offers
 //!   the reader one look;
-//! - in front of the composer's send, the guidelines gate;
+//! - in front of the composer's send and of creating a room, the guidelines
+//!   gate;
 //! - behind the actions menu's moderator Delete, the removal itself, with its
 //!   optional public reason and the log row that records it;
 //! - at the foot of that menu, three entries: Report message, Block author, and
@@ -49,25 +50,32 @@ pub type ProfileAnchor = RwSignal<Option<(EntityId, i32, i32)>>;
 /// withheld from a guest: passing `None` for those hooks makes the crate
 /// render the avatar and `@mention` as inert text rather than a button that
 /// opens an empty surface — a button only where it leads somewhere.
+/// BUILT FROM `Default` AND ASSIGNED INTO, not written as a literal. `ChatHooks`
+/// is `#[non_exhaustive]`, so the crate can add a door without breaking every
+/// embedder that had named all of today's — and Rust admits no struct expression
+/// for such a type from another crate, functional update syntax included. A hook
+/// this app leaves unset is a door it does not open, and the crate renders the
+/// affordance away rather than leaving a control that does nothing.
 pub fn chat_hooks(previews: Memo<HashMap<String, LinkPreviewView>>, profile: ProfileAnchor, viewer: Option<EntityId>) -> ChatHooks {
     let signed_in = viewer.is_some();
-    ChatHooks {
-        message_extras: Some(Box::new(move |message: MessageView| {
-            view! { <LinkPreviewCard message=message previews=previews /> }.into_any()
-        })),
-        tombstone_body: Some(Box::new(|message: MessageView| view! { <TombstoneNotice message=message /> }.into_any())),
-        message_veil: Some(Box::new(blocked_veil)),
-        moderator_delete: Some(Box::new(moderator_delete)),
-        // The guidelines, in front of the composer's send exactly as they stand
-        // in front of every other write leptos-app owns. `demand_terms_boxed`
-        // runs an accepted reader's send inside the same click, which is what
-        // the components ask of a gate.
-        gate_write: Some(Box::new(crate::terms::demand_terms_boxed)),
-        member_preview: signed_in
-            .then(|| Box::new(move |user: EntityId, x: i32, y: i32| profile.set(Some((user, x, y)))) as Box<dyn Fn(EntityId, i32, i32)>),
-        member_detail: signed_in.then(|| Box::new(|user: EntityId| panels().open(Surface::UserDetail(user))) as Box<dyn Fn(EntityId)>),
-        menu_actions: Some(Box::new(menu_entries)),
-    }
+    let mut hooks = ChatHooks::default();
+    hooks.message_extras = Some(Box::new(move |message: MessageView| {
+        view! { <LinkPreviewCard message=message previews=previews /> }.into_any()
+    }));
+    hooks.tombstone_body = Some(Box::new(|message: MessageView| view! { <TombstoneNotice message=message /> }.into_any()));
+    hooks.message_veil = Some(Box::new(blocked_veil));
+    hooks.moderator_delete = Some(Box::new(moderator_delete));
+    // The guidelines, in front of every write the crate gates — the composer's
+    // send and creating a room — exactly as they stand in front of every other
+    // write leptos-app owns. `demand_terms_boxed` runs an accepted reader's
+    // continuation inside the same click, which is what the components ask of a
+    // gate.
+    hooks.gate_write = Some(Box::new(crate::terms::demand_terms_boxed));
+    hooks.member_preview = signed_in
+        .then(|| Box::new(move |user: EntityId, x: i32, y: i32| profile.set(Some((user, x, y)))) as Box<dyn Fn(EntityId, i32, i32)>);
+    hooks.member_detail = signed_in.then(|| Box::new(|user: EntityId| panels().open(Surface::UserDetail(user))) as Box<dyn Fn(EntityId)>);
+    hooks.menu_actions = Some(Box::new(menu_entries));
+    hooks
 }
 
 /// A blocked member's row, veiled.
