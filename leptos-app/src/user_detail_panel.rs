@@ -358,6 +358,14 @@ pub fn UserDetailPanel(
 /// server-side hook belongs next to the ban gate in server/src/main.rs
 /// (`auth_session`), not in this client.
 fn ban_member(user_id: String, user_name: String) {
+    crate::terms::demand_terms(move || ban_member_confirmed(user_id, user_name));
+}
+
+/// The ban itself, once the guidelines gate has let it through. Split out so
+/// the prompt still opens inside the moderator's own click — `demand_terms`
+/// runs its continuation synchronously for a moderator who has already agreed,
+/// and inside the Accept click for one who has not.
+fn ban_member_confirmed(user_id: String, user_name: String) {
     // Prompt doubles as confirm: Cancel aborts the ban entirely.
     let reason = match window().map(|w| w.prompt_with_message(&format!("Ban {} — reason (optional):", user_name))) {
         Some(Ok(None)) => return, // prompt cancelled — no ban
@@ -411,6 +419,11 @@ fn ban_member(user_id: String, user_name: String) {
 /// "kick" means today — ban then unban — since there are no room-scoped
 /// memberships to eject anyone from.
 fn unban_member(user_id: String, rows: Vec<BanView>) {
+    crate::terms::demand_terms(move || unban_member_confirmed(user_id, rows));
+}
+
+/// The unban itself, once the guidelines gate has let it through.
+fn unban_member_confirmed(user_id: String, rows: Vec<BanView>) {
     wasm_bindgen_futures::spawn_local(async move {
         match (|| async {
             let actor = crate::viewer().ok_or("no signed-in moderator to attribute this unban to")?;

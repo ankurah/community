@@ -75,17 +75,21 @@ pub fn RoomTopic(room_id: RwSignal<Option<EntityId>>) -> impl IntoView {
         if new_topic == r.topic().ok().flatten().filter(|t| !t.trim().is_empty()) {
             return; // unchanged — skip the write
         }
-        wasm_bindgen_futures::spawn_local(async move {
-            let result = async {
-                let trx = ctx().begin();
-                r.edit(&trx)?.topic().set(&new_topic)?;
-                trx.commit().await?;
-                Ok::<_, Box<dyn std::error::Error>>(())
-            }
-            .await;
-            if let Err(e) = result {
-                tracing::error!("Failed to update room topic: {}", e);
-            }
+        // A topic captions a room for everyone in it, so it goes through the
+        // guidelines gate like any other contribution.
+        crate::terms::demand_terms(move || {
+            wasm_bindgen_futures::spawn_local(async move {
+                let result = async {
+                    let trx = ctx().begin();
+                    r.edit(&trx)?.topic().set(&new_topic)?;
+                    trx.commit().await?;
+                    Ok::<_, Box<dyn std::error::Error>>(())
+                }
+                .await;
+                if let Err(e) = result {
+                    tracing::error!("Failed to update room topic: {}", e);
+                }
+            });
         });
     };
 

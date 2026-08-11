@@ -143,17 +143,22 @@ pub fn Header(
                                                 value=Signal::derive(move || user_for_value.display_name().unwrap_or_default())
                                                 on_change=move |new_name: String| {
                                                     let user = user_for_change.clone();
-                                                    wasm_bindgen_futures::spawn_local(async move {
-                                                        let result = async {
-                                                            let trx = ctx().begin();
-                                                            let _ = user.edit(&trx)?.display_name().replace(&new_name);
-                                                            trx.commit().await?;
-                                                            Ok::<_, Box<dyn std::error::Error>>(())
-                                                        }
-                                                        .await;
-                                                        if let Err(e) = result {
-                                                            tracing::error!("Failed to update display_name: {}", e);
-                                                        }
+                                                    // A display name is what every other member
+                                                    // reads you as, so it goes through the
+                                                    // guidelines gate like any other contribution.
+                                                    crate::terms::demand_terms(move || {
+                                                        wasm_bindgen_futures::spawn_local(async move {
+                                                            let result = async {
+                                                                let trx = ctx().begin();
+                                                                let _ = user.edit(&trx)?.display_name().replace(&new_name);
+                                                                trx.commit().await?;
+                                                                Ok::<_, Box<dyn std::error::Error>>(())
+                                                            }
+                                                            .await;
+                                                            if let Err(e) = result {
+                                                                tracing::error!("Failed to update display_name: {}", e);
+                                                            }
+                                                        });
                                                     });
                                                 }
                                                 class="userName".to_string()
