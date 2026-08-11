@@ -58,6 +58,15 @@
       "read": "signed_in",
       "write": "moderate"
     },
+    "report": {
+      "read": "moderate",
+      "write": "post",
+      "scope": [
+        { "filter": "created_at < 0", "applies_to": "read", "unless_privilege": "moderate" },
+        { "filter": "reporter = $jwt.sub", "applies_to": "write", "unless_privilege": "moderate" },
+        { "filter": "resolved = false", "applies_to": "write", "unless_privilege": "moderate" }
+      ]
+    },
     "notification": {
       "read": "view",
       "write": "post",
