@@ -7,9 +7,13 @@
 //!
 //! - a member files a report naming themselves, and that write lands;
 //! - a member filing one that names ANOTHER member as the reporter is refused;
+//! - a member filing one dated before the epoch is refused, which is what keeps
+//!   the read shutout's comparison unsatisfiable;
 //! - a member reads zero report rows — empty on fetch, empty on a live query,
 //!   refused by entity id — including the report they filed themselves;
-//! - a member cannot close a report, their own included;
+//! - a member cannot close a report, their own included, and cannot reopen one
+//!   a moderator closed — though they MAY still retarget one that is still
+//!   open, which is pinned here as the residual it is;
 //! - a moderator reads the whole queue and resolves rows they did not file;
 //! - a guest is refused the collection outright.
 //!
@@ -123,6 +127,19 @@ async fn try_file(
     room: EntityId,
     reason: Option<&str>,
 ) -> Result<EntityId, Box<dyn std::error::Error>> {
+    try_file_at(ctx, reporter, message, room, reason, 2).await
+}
+
+/// The same filing with the timestamp chosen by the caller, for the one rule
+/// that reads it.
+async fn try_file_at(
+    ctx: &Context,
+    reporter: EntityId,
+    message: EntityId,
+    room: EntityId,
+    reason: Option<&str>,
+    created_at: i64,
+) -> Result<EntityId, Box<dyn std::error::Error>> {
     let trx = ctx.begin();
     let id = trx
         .create(&Report {
@@ -130,7 +147,7 @@ async fn try_file(
             message: message.into(),
             room: room.into(),
             reason: reason.map(str::to_string),
-            created_at: 2,
+            created_at,
             resolved: false,
             resolved_by: None,
             resolved_at: None,
@@ -271,6 +288,143 @@ async fn only_a_moderator_can_close_a_report() {
     assert_eq!(closed.resolved().unwrap(), true);
     assert_eq!(closed.resolved_by().unwrap().map(|r| r.id()), Some(mod_user), "the closing moderator is stamped on the row");
     assert_eq!(closed.resolved_at().unwrap(), Some(3));
+}
+
+/// THE TIMESTAMP THE READ SHUTOUT RESTS ON, enforced rather than assumed.
+///
+/// The `report` read scope is `created_at < 0` — one comparison no row can
+/// satisfy, because every row is stamped from a clock. A member choosing their
+/// own `created_at` is the one thing that could make that false, and a report
+/// filed at `-1` would then be readable by whoever filed it. The write rule
+/// `created_at >= 0` closes that: a filing dated before the epoch is refused,
+/// and an ordinary one lands.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_report_dated_before_the_epoch_is_refused_and_an_ordinary_one_lands() {
+    let (node, root) = report_node().await;
+    let (_author, room, message) = seed_conversation(&root).await;
+
+    let trx = root.begin();
+    let reporter = trx.create(&User { display_name: "Reporter".to_string(), oidc_sub: None }).await.unwrap().id();
+    trx.commit().await.unwrap();
+    let reporter_ctx = member(&node, reporter);
+
+    assert!(
+        try_file_at(&reporter_ctx, reporter, message, room, Some("dated out of the queue"), -1).await.is_err(),
+        "a report stamped before the epoch would satisfy the read shutout's comparison, so the write rule refuses it"
+    );
+    // The exact boundary, on both sides of it, and then the stamp the rest of
+    // this file uses as the control that the rule refuses a DATE and not a
+    // filing.
+    //
+    // SMALL STAMPS THROUGHOUT, and not because a real one would be refused —
+    // the write rule takes any non-negative number. It is the READ rule that
+    // cannot carry one: sled compares `created_at < 0` by parsing that `0` as
+    // a 32-bit integer, so a row stamped with a real clock reading answers
+    // `TypeMismatch(I32, I64)` instead of comparing. That fails closed on
+    // every path (a member's fetch errors rather than returning rows), so the
+    // shutout holds either way, and no client opens a member-side `report`
+    // query — but it is why the stamps here stay inside 32 bits, and it is
+    // pre-existing rather than anything this rule introduced.
+    assert!(try_file_at(&reporter_ctx, reporter, message, room, None, 0).await.is_ok(), "the epoch itself is a legal stamp");
+    assert!(try_file_at(&reporter_ctx, reporter, message, room, Some("please look"), 2).await.is_ok(), "and so is an ordinary filing");
+
+    let rows = root.fetch::<ReportView>("true").await.unwrap();
+    assert_eq!(rows.len(), 2, "the two legal filings landed and the illegal one did not");
+    assert!(
+        rows.iter().all(|r| r.reason().unwrap().as_deref() != Some("dated out of the queue")),
+        "and the refused one is not among them"
+    );
+
+    // And the shutout still holds for what did land: the member reads none of
+    // it, which is the property the timestamp rule exists to keep true.
+    assert!(reporter_ctx.fetch::<ReportView>("true").await.unwrap().is_empty());
+}
+
+/// WHAT A REPORTER MAY STILL DO TO A REPORT THEY FILED, pinned deliberately.
+///
+/// The write rules are predicates over a row's properties, and jwt-auth
+/// evaluates them against the PRIOR state as well as the after-state whenever
+/// the write is an update (`JwtAgent::check_event`, which runs
+/// `enforce_write_scope` on `entity_before` when its head is non-empty). That
+/// is what refuses a reopen: a resolved row fails `resolved = false` as a
+/// before-state, so the filer cannot flip it back.
+///
+/// It does NOT refuse a retarget. An open row satisfies every write rule both
+/// before and after, so its filer may change which message and which room it
+/// names for as long as it stays open. Nothing in ankurah-jwt-auth 0.9.2 can
+/// express the rule that would close it: a scope filter names only row
+/// properties and `$jwt.*` claims (`variables::resolve_variable`), there is no
+/// variable for the prior state and no way to tell an update from an insert —
+/// and any predicate a create satisfies is satisfied again by that same row as
+/// the before-state of its first update, so no predicate can admit the one and
+/// refuse the other.
+///
+/// SO THE QUEUE READS A REPORT AS THE FILER'S CLAIM about which message is at
+/// issue, not as a fact — which is why the moderator queue renders the room
+/// from the message it resolves rather than from the row (`reports.rs`). This
+/// test exists so that the day the policy language can bind prior state, the
+/// change is made deliberately and this assertion is the one that says so.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reporter_may_retarget_an_open_report_but_never_reopen_a_closed_one() {
+    let (node, root) = report_node().await;
+    let (_author, room, message) = seed_conversation(&root).await;
+    let (_other_author, other_room, other_message) = seed_conversation(&root).await;
+
+    let trx = root.begin();
+    let reporter = trx.create(&User { display_name: "Reporter".to_string(), oidc_sub: None }).await.unwrap().id();
+    let mod_user = trx.create(&User { display_name: "Moderator".to_string(), oidc_sub: None }).await.unwrap().id();
+    trx.commit().await.unwrap();
+
+    let reporter_ctx = member(&node, reporter);
+    let report = try_file(&reporter_ctx, reporter, message, room, Some("please look")).await.expect("the filing lands");
+
+    // The filer cannot read their own row, so the handle is Root's view of it —
+    // the same blind-write shape the resolve test uses.
+    let row = root.get::<ReportView>(report).await.unwrap();
+    let retarget = async {
+        let trx = reporter_ctx.begin();
+        let mutable = row.edit(&trx)?;
+        mutable.message().set(&other_message.into())?;
+        mutable.room().set(&other_room.into())?;
+        trx.commit().await?;
+        Ok::<_, Box<dyn std::error::Error>>(())
+    }
+    .await;
+    assert!(retarget.is_ok(), "PINNED, not endorsed: an open report's target is writable by its filer — see this test's doc");
+    let retargeted = root.get::<ReportView>(report).await.unwrap();
+    assert_eq!(retargeted.message().unwrap().id(), other_message);
+    assert_eq!(retargeted.room().unwrap().id(), other_room);
+
+    // A moderator closes it.
+    let mod_ctx = moderator(&node, mod_user);
+    let row = mod_ctx.get::<ReportView>(report).await.unwrap();
+    let trx = mod_ctx.begin();
+    row.edit(&trx).unwrap().resolved().set(&true).unwrap();
+    trx.commit().await.expect("a moderator may resolve a report");
+
+    // And the filer cannot open it again, nor touch anything else on it: the
+    // before-state fails `resolved = false`, so every write to a closed row is
+    // refused rather than only the one that flips the flag.
+    let row = root.get::<ReportView>(report).await.unwrap();
+    let reopen = async {
+        let trx = reporter_ctx.begin();
+        row.edit(&trx)?.resolved().set(&false)?;
+        trx.commit().await?;
+        Ok::<_, Box<dyn std::error::Error>>(())
+    }
+    .await;
+    assert!(reopen.is_err(), "a resolved report must not be reopened by the member who filed it");
+    let retarget_closed = async {
+        let trx = reporter_ctx.begin();
+        row.edit(&trx)?.reason().set(&Some("second thoughts".to_string()))?;
+        trx.commit().await?;
+        Ok::<_, Box<dyn std::error::Error>>(())
+    }
+    .await;
+    assert!(retarget_closed.is_err(), "and neither may they rewrite what it says");
+    let closed = root.get::<ReportView>(report).await.unwrap();
+    assert_eq!(closed.resolved().unwrap(), true, "the row is still closed");
+    assert_eq!(closed.reason().unwrap().as_deref(), Some("please look"), "and still says what it said");
 }
 
 /// A guest reaches the collection at all only through a read, write or retrieve

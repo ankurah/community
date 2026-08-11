@@ -108,7 +108,8 @@ people in the room.
   "scope": [
     { "filter": "created_at < 0", "applies_to": "read", "unless_privilege": "moderate" },
     { "filter": "reporter = $jwt.sub", "applies_to": "write", "unless_privilege": "moderate" },
-    { "filter": "resolved = false", "applies_to": "write", "unless_privilege": "moderate" }
+    { "filter": "resolved = false", "applies_to": "write", "unless_privilege": "moderate" },
+    { "filter": "created_at >= 0", "applies_to": "write", "unless_privilege": "moderate" }
   ]
 }
 ```
@@ -139,23 +140,56 @@ people in the room.
     report-specific one.
 
   What is left is one comparison a row cannot satisfy. `created_at` is
-  milliseconds since the epoch and every row is stamped from a clock, so
-  nothing is ever negative; the property is required at creation, so the denial
-  is a clean `false` rather than an absent-property error. Pinned by
+  milliseconds since the epoch, so nothing is ever negative; the property is
+  required at creation, so the denial is a clean `false` rather than an
+  absent-property error. Pinned by
   `policy_scope_tests.rs::the_report_read_rule_is_one_unsatisfiable_comparison`;
   it becomes `"false"` the day ankurah implements that arm, and not before.
+- **And the fourth rule is what makes "nothing is ever negative" true.** The
+  client stamps `created_at` from its own clock, so that sentence described the
+  code we ship rather than what the server accepts: a member filing a report
+  dated `-1` would have satisfied the read rule's comparison and could then read
+  that row back. `created_at >= 0` on the write path refuses the filing. It is
+  the exact complement of the read rule and sits on the opposite access path,
+  which is what keeps it clear of the "never constrain one property twice" lesson
+  above — reads compose rule zero, writes compose the other three, and neither
+  composition names `created_at` more than once.
 - **A report can only be filed in your own name.** The `reporter` rule pins the
   row to the caller, the same binding `DmMessage.user` gets from the DM sender
   rule. Moderators bypass it, which is what lets them write to a row they did
   not file.
-- **A report can only be closed by a moderator.** Scope rules AND together, so
-  a non-moderator write must leave `resolved = false` as well as name them as
-  the reporter — otherwise the person who filed a report could close it, and a
-  queue the filer can empty is not a queue a moderator can trust. Resolving IS
-  the moderator bypass of that rule.
+- **A report can only be closed by a moderator, and once closed it is frozen.**
+  Scope rules AND together, so a non-moderator write must leave
+  `resolved = false` as well as name them as the reporter — otherwise the person
+  who filed a report could close it, and a queue the filer can empty is not a
+  queue a moderator can trust. Resolving IS the moderator bypass of that rule.
+  The freeze comes free with it: `JwtAgent::check_event` runs the write scope
+  over the PRIOR state as well as the new one whenever the write is an update, so
+  a resolved row fails `resolved = false` before the edit is even considered —
+  its filer can neither reopen it nor rewrite what it says.
+- **An OPEN report stays writable by the member who filed it, and that is a
+  residual we cannot close today.** Every write rule holds for an open row both
+  before and after, so its filer may change which message and which room it
+  names right up until a moderator closes it. Nothing in ankurah-jwt-auth 0.9.2
+  can express the rule that would stop it: a scope filter names row properties
+  and `$jwt.*` claims (`variables::resolve_variable`) and has no variable for the
+  prior state and no way to tell an update from an insert — and any predicate a
+  filing satisfies is satisfied again by that same row as the before-state of its
+  first edit, so no predicate admits the one and refuses the other.
+
+  **So the queue reads a report as the filer's claim.** `message` is a claim
+  about what is at issue and `room` about where. What bounds the cost is that a
+  moderator judges the MESSAGE, printed from the row the queue resolves rather
+  than described by the report — and the room line is printed off that same
+  resolved message rather than off the report's own copy, so the place named is
+  the place the words are actually in. What is left is that a report can end up
+  pointing at a message its filer did not first complain about.
+  `report_policy_live_tests.rs::a_reporter_may_retarget_an_open_report_but_never_reopen_a_closed_one`
+  pins the behaviour so that the day the policy language can bind prior state,
+  closing this is a deliberate change and that test is what says so.
 - **A guest reaches none of it**: no read, no write, and no `retrieve` tier, so
   the collection gate refuses before any row is considered.
-- Pinned by `server/tests/policy_scope_tests.rs` (the five report tests) and by
+- Pinned by `server/tests/policy_scope_tests.rs` (the six report tests) and by
   `server/tests/report_policy_live_tests.rs`, which runs the same claims through
   a real node — including "a member reads zero rows, their own filing included",
   on fetch, through a live subscription, and by entity id.
@@ -163,7 +197,9 @@ people in the room.
 **Where moderators read it:** the moderation panel's second tab, present only
 for a moderator (`leptos-app/src/reports.rs`). Open reports first, newest first
 within each half; each row names the room, the reporter, the reason and the
-time, and carries Resolve while it is open.
+time, and carries Resolve while it is open. The room is named off the resolved
+message, not off the report row — see the residual above; the report's own copy
+shows only while that read is in flight, and stays only if it never lands.
 
 **Where members file from:** "Report message" in the chat crate's message
 actions menu, which `leptos-app/src/chat_hooks.rs` puts there. It is offered on

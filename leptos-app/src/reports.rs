@@ -34,6 +34,26 @@
 //!
 //! There is still NO DEEP LINK — no jump, no id on screen. What a moderator
 //! needs is the words, and the room to go to is already named.
+//!
+//! A REPORT IS THE FILER'S CLAIM, AND THE QUEUE READS IT AS ONE. The write
+//! scope freezes a resolved report — its filer can neither reopen it nor
+//! rewrite it — but an OPEN one stays writable by the member who filed it, and
+//! nothing in ankurah's policy language can bind that (a scope filter names row
+//! properties and token claims, with no way to see the prior state or to tell
+//! an update from an insert; `community_model::Report`'s doc carries the
+//! argument, and `report_policy_live_tests` pins the residual). So the member
+//! who filed a report may still change which message and which room it names,
+//! up until a moderator closes it.
+//!
+//! What that costs is bounded, and the queue is built so it stays bounded. The
+//! MESSAGE is what a moderator judges, and it is printed from the row it
+//! resolves rather than described by the report — a retarget changes which
+//! message is on screen, not what that message says. The ROOM is printed off
+//! that same resolved message rather than off the report's own copy, so the
+//! place named is the place the words are actually in. What is left is that a
+//! report can end up pointing at a message its filer did not first complain
+//! about, which is a moderator judging the wrong message rather than being told
+//! a falsehood about the right one.
 
 use std::collections::HashMap;
 
@@ -225,21 +245,54 @@ fn ReportRow(
     };
     let reporter_name_for_initials = reporter_name.clone();
 
-    // A room the viewer's rooms query has not (yet) produced renders as "a
-    // room" rather than as an id: an id names nothing to a reader, and the
-    // report is still worth showing without it.
-    let room_id = report.room().ok().map(|r| r.id().to_base64());
-    let room_name = move || match &room_id {
-        None => "a room".to_string(),
-        Some(id) => names_by_room.with(|map| {
-            map.get(id).filter(|n| !n.trim().is_empty()).map(|n| format!("#{n}")).unwrap_or_else(|| "a room".to_string())
-        }),
-    };
-
-    // The message being complained about. `re` is set at filing and never
-    // changes, so the ref is read once here; what it points AT is read live
-    // below, which is how a message removed since the report was filed says so.
+    // THE MESSAGE BEING COMPLAINED ABOUT, resolved once for the whole row: the
+    // body below prints it, and the room line above prints the place it was
+    // actually said. `message` names the target and is read once here as a ref;
+    // what it points AT is read live, which is how a message removed since the
+    // report was filed says so.
     let reported = report.message().ok().map(|r| r.id());
+    let found = RwSignal::new(None::<MessageView>);
+    let unreadable = RwSignal::new(false);
+    if let Some(target) = reported {
+        // Resolved here, in the body: the future's first poll is a microtask,
+        // by which time nothing reactive is reachable.
+        let context = ctx();
+        wasm_bindgen_futures::spawn_local(async move {
+            match context.get::<MessageView>(target).await {
+                // try_set: the panel may have closed before the read landed.
+                Ok(message) => {
+                    let _ = found.try_set(Some(message));
+                }
+                Err(e) => {
+                    tracing::warn!("the reported message {} could not be read: {}", target.to_base64(), e);
+                    let _ = unreadable.try_set(true);
+                }
+            }
+        });
+    }
+
+    // WHERE IT WAS SAID, TAKEN FROM THE MESSAGE AND NOT FROM THE REPORT. The
+    // row's own `room` is the filer's claim, and an open report is writable by
+    // the member who filed it (see `Report`'s doc) — so a queue that named the
+    // place from the row alone would name whatever the filer last put there.
+    // The message is the truth about which room it is in, and this row already
+    // resolves it to print the words.
+    //
+    // The filed value is what shows until that read lands, and what stays if it
+    // never does: a report about a message this session cannot read is still
+    // worth showing, and a claimed room is more than no room at all. A room the
+    // viewer's rooms query has not produced renders as "a room" rather than as
+    // an id, because an id names nothing to a reader.
+    let filed_room = report.room().ok().map(|r| r.id().to_base64());
+    let room_name = move || {
+        let id = found.get().and_then(|message| message.room().ok()).map(|r| r.id().to_base64()).or_else(|| filed_room.clone());
+        match id {
+            None => "a room".to_string(),
+            Some(id) => names_by_room.with(|map| {
+                map.get(&id).filter(|n| !n.trim().is_empty()).map(|n| format!("#{n}")).unwrap_or_else(|| "a room".to_string())
+            }),
+        }
+    };
 
     let ts = report.created_at().unwrap_or(0);
     let when = format!("{} · {}", fmt::day_label(ts), fmt::clock_time(ts));
@@ -274,7 +327,7 @@ fn ReportRow(
                     " "
                     <span class="modLogActor">{room_name}</span>
                 </div>
-                {reported.map(|target| view! { <ReportedMessage target names_by_user /> })}
+                {reported.map(|_| view! { <ReportedMessage found unreadable names_by_user /> })}
                 {reason.map(|r| view! { <div class="modLogReason">{format!("“{}”", r)}</div> })}
                 <div class="modLogWhen" title=when_title>{when}</div>
                 {move || closed_by().map(|who| view! { <div class="reportResolvedBy">{format!("Resolved by {who}")}</div> })}
@@ -307,29 +360,19 @@ fn ReportRow(
 /// did. Unreadable, which is a ref this session's read scope will not resolve
 /// and not a fault. And the words themselves, mentions read as names off the
 /// panel's own roster.
+///
+/// The read itself belongs to the ROW rather than to this component, and is
+/// handed down: the row's other half — the line naming where it was said —
+/// reads the room off the same resolved message, and one report must not be two
+/// reads that could answer differently.
 #[component]
-fn ReportedMessage(target: EntityId, names_by_user: Memo<HashMap<String, String>>) -> impl IntoView {
-    let found = RwSignal::new(None::<MessageView>);
-    let unreadable = RwSignal::new(false);
-    {
-        // Resolved here, in the body: the future's first poll is a microtask,
-        // by which time nothing reactive is reachable.
-        let context = ctx();
-        let target = target.clone();
-        wasm_bindgen_futures::spawn_local(async move {
-            match context.get::<MessageView>(target.clone()).await {
-                // try_set: the panel may have closed before the read landed.
-                Ok(message) => {
-                    let _ = found.try_set(Some(message));
-                }
-                Err(e) => {
-                    tracing::warn!("the reported message {} could not be read: {}", target.to_base64(), e);
-                    let _ = unreadable.try_set(true);
-                }
-            }
-        });
-    }
-
+fn ReportedMessage(
+    /// The reported message once it resolves, or `None` while it has not.
+    found: RwSignal<Option<MessageView>>,
+    /// Raised when the read answered with a refusal instead of a row.
+    unreadable: RwSignal<bool>,
+    names_by_user: Memo<HashMap<String, String>>,
+) -> impl IntoView {
     view! {
         <div class="reportMessage">
             {move || match (found.get(), unreadable.get()) {

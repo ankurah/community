@@ -126,9 +126,30 @@ pub struct ModAction {
 /// looked at it.
 ///
 /// Who writes it: any signed-in member, for themselves. The write scope pins
-/// `reporter` to the caller and pins `resolved` to false, so a report can
-/// neither be filed in someone else's name nor closed by the person who filed
-/// it; moderators bypass both rules, which is what lets them resolve.
+/// `reporter` to the caller, pins `resolved` to false, and pins `created_at` at
+/// or after the epoch — so a report can be filed in nobody else's name, closed
+/// by nobody who filed it, and dated into no corner of the read scope the
+/// shutout leaves unguarded. Moderators bypass all three, which is what lets
+/// them resolve.
+///
+/// WHAT A FILER MAY STILL CHANGE, and why that makes this row a CLAIM. jwt-auth
+/// evaluates the write scope against the prior state as well as the new one on
+/// an update, so a resolved report is frozen: its filer can neither reopen it
+/// nor rewrite what it says. An OPEN one is not. Every write rule holds both
+/// before and after, so until a moderator closes it, the member who filed a
+/// report may change which message and which room it names.
+///
+/// Nothing in the policy language can bind that. A scope filter names row
+/// properties and `$jwt.*` claims and nothing else — there is no prior-state
+/// variable and no way to tell an update from an insert — and any predicate a
+/// filing satisfies is satisfied again by that same row as the before-state of
+/// its first edit, so no predicate admits the one and refuses the other. The
+/// consequence for whoever reads this row: `message` is the filer's claim about
+/// what is at issue, and `room` is a claim about where. The moderator queue
+/// renders the room from the message it resolves rather than from this row for
+/// exactly that reason (`leptos-app/src/reports.rs`), and
+/// `report_policy_live_tests` pins the residual so the day ankurah can express
+/// the rule, closing it is a deliberate act.
 #[derive(Model, Debug, Serialize, Deserialize)]
 pub struct Report {
     /// Who filed it. Pinned to the caller by the write scope, so this is the
@@ -141,11 +162,14 @@ pub struct Report {
     /// absent-property path for a scope or a query to trip over.
     #[active_type(LWW)]
     pub message: Ref<Message>,
-    /// Where it was said, copied off the message at filing time so the queue
-    /// can name a place without resolving every reported message first. It
-    /// duplicates `Message.room` on purpose: a message never moves between
-    /// rooms, so the copy cannot go stale, and the queue renders from report
-    /// rows alone.
+    /// Where it was said, as the FILER named it — a claim, not a fact. It is
+    /// copied off the message at filing time so a queue can name a place
+    /// without resolving every reported message first, and it duplicates
+    /// `Message.room` on purpose: a message never moves between rooms, so a
+    /// truthful copy cannot go stale. What can change is this copy, for as
+    /// long as the report is open (see the struct doc). So the moderator queue
+    /// prints the room off the message it resolves and falls back to this only
+    /// when that message will not read.
     #[active_type(LWW)]
     pub room: Ref<Room>,
     /// The reporter's own words, optional — "no reason given" is a real
@@ -153,7 +177,10 @@ pub struct Report {
     /// absent property as `None` rather than `PropertyError::Missing`, the
     /// `ModAction.reason` idiom.
     pub reason: Option<String>,
-    /// ms since epoch (same unit as `Message.timestamp`).
+    /// ms since epoch (same unit as `Message.timestamp`), and never before it:
+    /// the write scope refuses a negative stamp, because the read scope hides
+    /// every row by comparing this property against zero and a row dated below
+    /// that would be one its filer could read back.
     pub created_at: i64,
     /// The lifecycle, and the thing the queue sorts on. Born `false` on every
     /// row so no report lacks the property — the write scope compares against
