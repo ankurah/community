@@ -33,6 +33,7 @@ mod notification_manager;
 mod panels;
 mod profile_popover;
 mod qr_code_modal;
+mod reports;
 mod room_topic;
 mod shell;
 mod sidebar;

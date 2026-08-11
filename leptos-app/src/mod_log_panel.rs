@@ -12,6 +12,13 @@
 //! with the full id on hover and planned deep-linking; that was retracted
 //! by ruling — the row data still carries the `message` ref for moderator
 //! tooling, but for every other reader it must stay a dead pointer.
+//!
+//! The panel has a second tab for moderators: the report queue (`reports`).
+//! It lives here rather than behind a header button of its own because it is
+//! the other half of one job — the log is what moderation DID, the queue is
+//! what is waiting to be done — and because the two lists name the same
+//! people from the same roster query. The tab strip appears only for a
+//! moderator; the log itself stays lights-on for every signed-in member.
 
 use std::collections::HashMap;
 
@@ -20,7 +27,14 @@ use leptos::prelude::*;
 use ankurah_signals::Get as AnkurahGet;
 use community_model::{ModActionView, UserView};
 
-use crate::{ctx, fmt, panels::PanelUnavailable};
+use crate::{ctx, fmt, panels::PanelUnavailable, reports::ReportsView};
+
+/// Which list the panel is showing.
+#[derive(Clone, Copy, PartialEq)]
+enum Tab {
+    Log,
+    Reports,
+}
 
 #[component]
 pub fn ModLogPanel(on_close: impl Fn() + Clone + 'static) -> impl IntoView {
@@ -64,6 +78,12 @@ pub fn ModLogPanel(on_close: impl Fn() + Clone + 'static) -> impl IntoView {
     let on_close_overlay = on_close.clone();
     let on_close_button = on_close.clone();
 
+    // UI gating only, exactly as the ban controls do it — the `report` read
+    // scope refuses a member every row regardless, so being wrong here costs
+    // an empty list rather than a disclosure.
+    let moderating = crate::can_moderate();
+    let tab = RwSignal::new(Tab::Log);
+
     view! {
         <div class="membersOverlay" on:click=move |_| on_close_overlay()>
             <div class="membersContent modLogContent" on:click=|e| e.stop_propagation()>
@@ -77,36 +97,78 @@ pub fn ModLogPanel(on_close: impl Fn() + Clone + 'static) -> impl IntoView {
                     </button>
                 </div>
 
-                <div class="membersList modLogList">
-                    <Show when=move || !actions_for_loading.loaded()>
-                        <div class="membersState">"Loading moderation log\u{2026}"</div>
-                    </Show>
-                    <Show when={
-                        let actions = actions_for_empty.clone();
-                        move || actions.loaded() && actions.get().is_empty()
-                    }>
-                        <div class="membersState">"No moderation actions — nothing hidden."</div>
-                    </Show>
-                    <For
-                        each={
-                            let actions = actions_for_list.clone();
-                            move || {
-                                let mut items = actions.get();
-                                // Belt and braces: the query orders newest-first, but
-                                // resultset iteration order is not contractual.
-                                items.sort_by_cached_key(|a| std::cmp::Reverse(a.created_at().unwrap_or(0)));
-                                items
-                            }
+                {moderating
+                    .then(|| {
+                        view! {
+                            <div class="modLogTabs" role="tablist">
+                                <button
+                                    class=move || if tab.get() == Tab::Log { "modLogTab modLogTabActive" } else { "modLogTab" }
+                                    role="tab"
+                                    aria-selected=move || (tab.get() == Tab::Log).to_string()
+                                    on:click=move |_| tab.set(Tab::Log)
+                                >
+                                    "Log"
+                                </button>
+                                <button
+                                    class=move || if tab.get() == Tab::Reports { "modLogTab modLogTabActive" } else { "modLogTab" }
+                                    role="tab"
+                                    aria-selected=move || (tab.get() == Tab::Reports).to_string()
+                                    on:click=move |_| tab.set(Tab::Reports)
+                                >
+                                    "Reports"
+                                </button>
+                            </div>
                         }
-                        key=|action: &ModActionView| action.id()
-                        children=move |action: ModActionView| {
-                            view! { <ModLogRow action names_by_user /> }
-                        }
-                    />
-                </div>
+                    })}
+
+                <Show when=move || tab.get() == Tab::Reports fallback=move || {
+                    let actions_for_loading = actions_for_loading.clone();
+                    let actions_for_empty = actions_for_empty.clone();
+                    let actions_for_list = actions_for_list.clone();
+                    view! {
+                        <div class="membersList modLogList">
+                            <Show when={
+                                let actions = actions_for_loading.clone();
+                                move || !actions.loaded()
+                            }>
+                                <div class="membersState">"Loading moderation log\u{2026}"</div>
+                            </Show>
+                            <Show when={
+                                let actions = actions_for_empty.clone();
+                                move || actions.loaded() && actions.get().is_empty()
+                            }>
+                                <div class="membersState">"No moderation actions — nothing hidden."</div>
+                            </Show>
+                            <For
+                                each={
+                                    let actions = actions_for_list.clone();
+                                    move || {
+                                        let mut items = actions.get();
+                                        // Belt and braces: the query orders newest-first, but
+                                        // resultset iteration order is not contractual.
+                                        items.sort_by_cached_key(|a| std::cmp::Reverse(a.created_at().unwrap_or(0)));
+                                        items
+                                    }
+                                }
+                                key=|action: &ModActionView| action.id()
+                                children=move |action: ModActionView| {
+                                    view! { <ModLogRow action names_by_user /> }
+                                }
+                            />
+                        </div>
+                    }
+                }>
+                    <ReportsView names_by_user />
+                </Show>
 
                 <p class="membersNote">
-                    "Deleted messages are hidden, never erased — every action lands here."
+                    {move || {
+                        if tab.get() == Tab::Reports {
+                            "Reports are read by moderators only — nobody else sees that a message was reported."
+                        } else {
+                            "Deleted messages are hidden, never erased — every action lands here."
+                        }
+                    }}
                 </p>
             </div>
         </div>
