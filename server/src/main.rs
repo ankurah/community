@@ -166,10 +166,17 @@ async fn main() -> Result<()> {
     let ci = ci_hook::seed(&system_ctx).await?;
 
     // Server-side reactive workers (mention fan-out → notification rows,
-    // link unfurl → linkpreview rows): a standing message LiveQuery on the
-    // privileged context — the durable-node sibling of the policy watcher
-    // that `JwtAgent` already started via on_node_ready. See workers/mod.rs.
-    workers::start(system_ctx.clone());
+    // link unfurl → linkpreview rows, notification rows → push alerts): a
+    // standing message LiveQuery on the privileged context — the durable-node
+    // sibling of the policy watcher that `JwtAgent` already started via
+    // on_node_ready. See workers/mod.rs.
+    //
+    // The push sender is the one worker a deployment can be without: with no
+    // APNs credentials in the environment it is never started, and the line
+    // saying so is written by `delivery_from_env` here rather than at the first
+    // send. The registry keeps filing device tokens either way.
+    let push_delivery = workers::push::delivery_from_env(device_tokens.clone());
+    workers::start(system_ctx.clone(), push_delivery);
 
     // Where the built SPA lives. In prod the container copies `trunk build`
     // output here; in dev the dir is absent and trunk serves the SPA itself

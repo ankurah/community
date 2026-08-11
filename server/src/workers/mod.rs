@@ -29,9 +29,15 @@
 //! Add. The sweep also heals crash gaps: a message committed just before a
 //! restart still gets its fan-out on the next boot.
 //!
-//! Both consumers are fed from ONE LiveQuery (one reactor registration, one
-//! in-memory resultset) through separate channels, so a slow unfurl (network
-//! I/O) can never delay mention delivery.
+//! The boot sweep rests on that idempotency and goes exactly as far as it
+//! does. [`watch_notifications`] has none, because its consumer sends alerts
+//! to phones and a re-sent alert cannot be taken back; it forwards Adds alone
+//! and refuses anything older than the process. See its own doc for what that
+//! costs.
+//!
+//! Both message consumers are fed from ONE LiveQuery (one reactor
+//! registration, one in-memory resultset) through separate channels, so a slow
+//! unfurl (network I/O) can never delay mention delivery.
 //!
 //! Each consumer runs under a respawn supervisor ([`supervise`]): the
 //! supervisor owns the channel receiver and lends it per attempt, so a panic
@@ -45,17 +51,19 @@ pub mod dm_rate_limit;
 pub mod dm_timestamp;
 pub mod mentions;
 pub mod og;
+pub mod push;
 pub mod ssrf;
 pub mod unfurl;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::panic::AssertUnwindSafe;
+use std::sync::{Arc, Mutex};
 
 use ankurah::changes::{ChangeSet, ItemChange};
 use ankurah::signals::{Peek, Subscribe};
 use ankurah::{Context, EntityId, LiveQuery};
 use anyhow::Result;
-use community_model::{DmMessageView, MessageView};
+use community_model::{DmMessageView, MessageView, NotificationView};
 use futures_util::future::BoxFuture;
 use futures_util::FutureExt;
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -65,8 +73,18 @@ use tracing::{error, info, warn};
 /// context. Fire-and-forget from `main`: failures to start are fatal-logged
 /// (the server keeps serving chat; derived data just goes stale), and the
 /// task never returns otherwise.
-pub fn start(ctx: Context) {
+///
+/// `push` is `None` on a deployment that sends no push notifications, and then
+/// the third watcher is never spawned — see [`push::delivery_from_env`], which
+/// is where that decision is made and logged.
+pub fn start(ctx: Context, push: Option<push::Delivery>) {
     let dm_ctx = ctx.clone();
+    let push_ctx = ctx.clone();
+    // The push sender's history floor, sampled HERE rather than inside the
+    // spawned task: it decides which inbox rows predate this process, and a
+    // number read after the scheduler got around to the task would put rows
+    // minted in between on the wrong side of it.
+    let started_at = now_ms();
     tokio::spawn(async move {
         if let Err(e) = watch_messages(ctx).await {
             error!("message workers failed to start: {e:#}");
@@ -77,6 +95,86 @@ pub fn start(ctx: Context) {
             error!("DM workers failed to start: {e:#}");
         }
     });
+    if let Some(delivery) = push {
+        tokio::spawn(async move {
+            if let Err(e) = watch_notifications(push_ctx, delivery, started_at).await {
+                error!("push sender failed to start: {e:#}");
+            }
+        });
+    }
+}
+
+/// The push half: one standing `notification` LiveQuery feeding the sender.
+///
+/// A THIRD QUERY RATHER THAN A BRANCH IN EITHER OF THE OTHERS, because what it
+/// watches is their OUTPUT. Both fan-outs write `Notification` rows — one from
+/// room messages, one from DMs — and the sender has no interest in which; it
+/// wants the inbox row, which is the one thing they agree on. Watching the rows
+/// also means the sender inherits every suppression the fan-outs applied: a
+/// muted room produces no row, so it produces no alert, with nothing here to
+/// keep in step.
+///
+/// WHAT KEEPS HISTORY QUIET IS THE FLOOR, NOT THE ABSENCE OF A SWEEP. The two
+/// watchers above sweep their backlog because a second identical derived-row
+/// write costs one probe; a second alert cannot be taken back, so a bare sweep
+/// here would ring every phone with the whole history of the inbox on every
+/// restart. But dropping the sweep alone would lose the rows minted in the gap
+/// between this process starting and its LiveQuery activating — the same gap
+/// the other watchers' sweeps cover. So this one sweeps too, and
+/// [`push::claim`] refuses anything created before `floor_ms`, which is the
+/// instant this process started. History is skipped because it is old, not
+/// because nothing looked at it, and a row from the activation gap still rings.
+///
+/// What that still gives up is stated at [`push::claim`]: a notification minted
+/// while the server was down arrives silently.
+async fn watch_notifications(ctx: Context, delivery: push::Delivery, floor_ms: i64) -> Result<()> {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<NotificationView>();
+
+    let live: LiveQuery<NotificationView> = ctx.query("true")?;
+
+    let subscription_guard = {
+        let tx = tx.clone();
+        live.subscribe(move |changeset: ChangeSet<NotificationView>| {
+            for change in &changeset.changes {
+                match change {
+                    // Add alone. An Update is the recipient marking the row
+                    // seen — from the inbox, from "mark all", from another
+                    // device — and announcing that would ring the phone for
+                    // something the member has just read. Initial is covered by
+                    // the sweep below; Remove does not happen, because
+                    // notification rows are never deleted (`seen` is their
+                    // lifecycle).
+                    ItemChange::Add { item, .. } => {
+                        let _ = tx.send(item.clone());
+                    }
+                    ItemChange::Initial { .. } | ItemChange::Update { .. } | ItemChange::Remove { .. } => {}
+                }
+            }
+        })
+    };
+
+    {
+        // The announced-set belongs to the supervisor, not to the consumer
+        // loop, on `dm_rate_limit`'s precedent: a panic must not hand the
+        // respawned loop an empty set and a second banner for everything it was
+        // holding.
+        let announced = Arc::new(Mutex::new(HashSet::new()));
+        supervise("push sender", rx, move |rx| push::run(ctx.clone(), delivery.clone(), floor_ms, announced.clone(), rx).boxed());
+    }
+
+    live.wait_initialized().await;
+    let backlog: Vec<NotificationView> = live.resultset().peek();
+    info!(
+        notifications = backlog.len(),
+        "push sender: standing notification LiveQuery initialized; sweeping, and announcing only what was minted since this process started"
+    );
+    for notification in backlog {
+        let _ = tx.send(notification);
+    }
+
+    std::future::pending::<()>().await;
+    drop((live, subscription_guard)); // unreachable; documents what parking keeps alive
+    Ok(())
 }
 
 /// The DM half of the worker subsystem (#30): one standing `dm_message`
@@ -371,7 +469,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn workers_react_to_committed_messages_end_to_end() {
         let ctx = test_context().await;
-        start(ctx.clone());
+        start(ctx.clone(), None);
 
         // Seed users, a room, and (crucially, BEFORE any message references
         // it) a LinkPreview row — its existence must stop the unfurl worker
@@ -451,7 +549,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_dm_mentioning_a_third_party_notifies_only_the_recipient() {
         let ctx = test_context().await;
-        start(ctx.clone());
+        start(ctx.clone(), None);
 
         let trx = ctx.begin();
         let alice = trx.create(&User { display_name: "Alice".into(), oidc_sub: None }).await.unwrap().id();
@@ -541,7 +639,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn claimed_participants_on_a_dm_notify_the_thread_not_the_claim() {
         let ctx = test_context().await;
-        start(ctx.clone());
+        start(ctx.clone(), None);
 
         let trx = ctx.begin();
         let alice = trx.create(&User { display_name: "Alice".into(), oidc_sub: None }).await.unwrap().id();
@@ -647,7 +745,7 @@ mod tests {
         use super::dm_rate_limit::MAX_INITIATIONS_PER_WINDOW;
 
         let ctx = test_context().await;
-        start(ctx.clone());
+        start(ctx.clone(), None);
 
         let trx = ctx.begin();
         let opener = trx.create(&User { display_name: "Opener".into(), oidc_sub: None }).await.unwrap().id();
@@ -807,7 +905,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_future_dated_dm_is_rewritten_to_the_server_clock_on_the_row() {
         let ctx = test_context().await;
-        start(ctx.clone());
+        start(ctx.clone(), None);
 
         let (alice, bob, thread) = a_thread_between_two_members(&ctx).await;
 
@@ -1042,7 +1140,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_live_future_dated_dm_is_settled_before_it_is_announced() {
         let ctx = test_context().await;
-        start(ctx.clone());
+        start(ctx.clone(), None);
 
         let (alice, bob, thread) = a_thread_between_two_members(&ctx).await;
 
@@ -1066,7 +1164,7 @@ mod tests {
         let trx = ctx.begin();
         notification.edit(&trx).unwrap().seen().set(&true).unwrap();
         trx.commit().await.unwrap();
-        start(ctx.clone());
+        start(ctx.clone(), None);
 
         tokio::time::sleep(Duration::from_millis(700)).await;
         assert_eq!(
@@ -1104,7 +1202,7 @@ mod tests {
 
         // Boot with the row already tombstoned, so the boot sweep is what has
         // to find it.
-        start(ctx.clone());
+        start(ctx.clone(), None);
 
         let mut stored = claimed;
         for _ in 0..200 {
@@ -1187,5 +1285,90 @@ mod tests {
             "a settled row goes to both"
         );
         assert!(matches!(limit_rx.try_recv(), Ok(dm_rate_limit::Traffic::Message(m)) if m.id() == view.id()));
+    }
+
+    /// The push sender on a real node, from a posted message to an alert: the
+    /// mention fan-out writes the inbox row, the standing notification query
+    /// hands it over, and the member's registered phone is rung once with the
+    /// sentence the inbox will show.
+    ///
+    /// And then the half that has no analogue in the other workers. A SECOND
+    /// WORKER SET SENDS NOTHING. Every consumer above is idempotent against
+    /// storage, so a restart re-running their boot sweep is free; this one's
+    /// output is a banner on a phone, and the only thing standing between a
+    /// restart and the entire history of the inbox ringing at once is the
+    /// floor `start` samples. The second set is the repo's stand-in for a
+    /// restart (see `a_live_future_dated_dm_is_settled_before_it_is_announced`
+    /// for why a test cannot take the first set down): it sweeps the whole
+    /// notification collection with an empty announced-set, which is exactly
+    /// the state a restarted process is in.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_mention_rings_the_registered_phone_once_and_a_restart_does_not_ring_it_again() {
+        use crate::push::store::{memory::MemoryDeviceTokens, DeviceTokens, Platform};
+        use push::{stub::RecordingApns, Delivery};
+
+        const PHONE: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+        let ctx = test_context().await;
+
+        let trx = ctx.begin();
+        let author = trx.create(&User { display_name: "Bob".into(), oidc_sub: None }).await.unwrap().id();
+        let recipient = trx.create(&User { display_name: "Alice".into(), oidc_sub: None }).await.unwrap().id();
+        let room = trx.create(&Room { name: "general".into(), created_by: None, topic: None }).await.unwrap().id();
+        trx.commit().await.unwrap();
+
+        // Alice registered her phone, as `POST /push/register` would have.
+        let tokens = MemoryDeviceTokens::new();
+        tokens.register(&recipient.to_base64(), PHONE, Platform::Ios, now_ms()).await.unwrap();
+
+        let apns = RecordingApns::new();
+        start(ctx.clone(), Some(Delivery::new(tokens.clone(), apns.clone())));
+
+        // Bob mentions Alice, with the workers already running.
+        let trx = ctx.begin();
+        trx.create(&Message {
+            user: author.into(),
+            room: room.into(),
+            text: format!("morning <@{}>", recipient.to_base64()),
+            timestamp: now_ms(),
+            deleted: false,
+            edited_at: None,
+            collaborative: None,
+            re: None,
+        })
+        .await
+        .unwrap();
+        trx.commit().await.unwrap();
+
+        let notification = wait_for_first_notification(&ctx).await;
+
+        let mut sent = Vec::new();
+        for _ in 0..200 {
+            sent = apns.sent();
+            if !sent.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert_eq!(sent.len(), 1, "one notification-worthy event, one alert, to the one device Alice registered");
+        assert_eq!(sent[0].0, PHONE);
+        assert_eq!(sent[0].1.title, "#general", "the title is the place");
+        assert_eq!(sent[0].1.body, "Bob mentioned you", "and the body is what the inbox row will say");
+
+        // The deep link the client leg will read: enough to open the room and
+        // mark this very row seen.
+        let target = sent[0].1.payload()[crate::push::apns::TARGET_KEY].clone();
+        assert_eq!(target["kind"], "mention");
+        assert_eq!(target["notification"], notification.id().to_base64());
+        assert_eq!(target["room"], room.to_base64());
+        assert_eq!(target["actor"], author.to_base64());
+
+        // The restart. Generous settle, because "nothing was sent" has to be
+        // given time to be wrong: the second set's own sweep runs first.
+        let after_restart = RecordingApns::new();
+        start(ctx.clone(), Some(Delivery::new(tokens.clone(), after_restart.clone())));
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        assert!(after_restart.sent().is_empty(), "a restart must not re-announce an inbox row this server already sent");
+        assert_eq!(apns.sent().len(), 1, "and the first set has not sent a second time either");
     }
 }
