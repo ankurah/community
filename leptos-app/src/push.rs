@@ -160,9 +160,11 @@ pub fn withdrawal_body(device_token: &str) -> String {
 /// The part of a device token that may be written down.
 fn token_prefix(token: &str) -> String { token.chars().take(TOKEN_PREFIX_CHARS).collect() }
 
+/// What the mounted app does with a route. See [`install_navigator`].
+type Navigate = Rc<dyn Fn(Route)>;
+
 thread_local! {
-    /// What the mounted app does with a route. See [`install_navigator`].
-    static NAVIGATOR: RefCell<Option<Rc<dyn Fn(Route)>>> = const { RefCell::new(None) };
+    static NAVIGATOR: RefCell<Option<Navigate>> = const { RefCell::new(None) };
     /// A route that arrived before there was anything to follow it with. Only
     /// the newest is kept: a member can be in one place, and it is wherever
     /// they tapped last.

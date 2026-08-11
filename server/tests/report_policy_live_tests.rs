@@ -192,7 +192,7 @@ async fn a_member_files_reports_as_themselves_and_never_as_anyone_else() {
     assert_eq!(rows[0].reporter().unwrap().id(), reporter);
     assert_eq!(rows[0].message().unwrap().id(), message);
     assert_eq!(rows[0].room().unwrap().id(), room, "the room is copied onto the row at filing time");
-    assert_eq!(rows[0].resolved().unwrap(), false, "a report is born open");
+    assert!(!rows[0].resolved().unwrap(), "a report is born open");
 }
 
 /// The read shutout, live: a member reads zero report rows — their own filing
@@ -272,7 +272,7 @@ async fn only_a_moderator_can_close_a_report() {
     }
     .await;
     assert!(filer_closes.is_err(), "the member who filed a report must not be able to close it");
-    assert_eq!(root.get::<ReportView>(report).await.unwrap().resolved().unwrap(), false, "and the row is still open");
+    assert!(!root.get::<ReportView>(report).await.unwrap().resolved().unwrap(), "and the row is still open");
 
     // The moderator, closing a report somebody else filed.
     let mod_ctx = moderator(&node, mod_user);
@@ -285,7 +285,7 @@ async fn only_a_moderator_can_close_a_report() {
     trx.commit().await.expect("a moderator may resolve a report");
 
     let closed = root.get::<ReportView>(report).await.unwrap();
-    assert_eq!(closed.resolved().unwrap(), true);
+    assert!(closed.resolved().unwrap());
     assert_eq!(closed.resolved_by().unwrap().map(|r| r.id()), Some(mod_user), "the closing moderator is stamped on the row");
     assert_eq!(closed.resolved_at().unwrap(), Some(3));
 }
@@ -423,7 +423,7 @@ async fn a_reporter_may_retarget_an_open_report_but_never_reopen_a_closed_one() 
     .await;
     assert!(retarget_closed.is_err(), "and neither may they rewrite what it says");
     let closed = root.get::<ReportView>(report).await.unwrap();
-    assert_eq!(closed.resolved().unwrap(), true, "the row is still closed");
+    assert!(closed.resolved().unwrap(), "the row is still closed");
     assert_eq!(closed.reason().unwrap().as_deref(), Some("please look"), "and still says what it said");
 }
 

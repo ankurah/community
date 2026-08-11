@@ -71,10 +71,10 @@ fn update(change: impl FnOnce(&mut BTreeSet<String>)) {
     let list = blocked().list;
     list.update(change);
     let payload = list.with_untracked(|ids| serde_json::to_string(&ids.iter().collect::<Vec<_>>()).unwrap_or_else(|_| "[]".to_string()));
-    if let Some(storage) = local_storage() {
-        if storage.set_item(LS_BLOCKED_USERS, &payload).is_err() {
-            tracing::warn!("could not persist the block list — it will apply for this session only");
-        }
+    if let Some(storage) = local_storage()
+        && storage.set_item(LS_BLOCKED_USERS, &payload).is_err()
+    {
+        tracing::warn!("could not persist the block list — it will apply for this session only");
     }
 }
 

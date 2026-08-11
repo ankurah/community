@@ -182,8 +182,8 @@ pub fn ReportsView(names_by_user: Memo<HashMap<String, String>>) -> impl IntoVie
     // of the same rows.
     let names_by_room = Memo::new(move |_| {
         chat.rooms()
-            .map(|q| q.get().iter().map(|r| (r.id().to_base64(), r.name().unwrap_or_default())).collect())
-            .unwrap_or_else(HashMap::<String, String>::new)
+            .map(|q| q.get().iter().map(|r| (r.id().to_base64(), r.name().unwrap_or_default())).collect::<HashMap<String, String>>())
+            .unwrap_or_default()
     });
 
     let reports_for_loading = reports.clone();
@@ -409,7 +409,7 @@ fn ReportedMessage(
 fn resolve(report: ReportView) {
     crate::terms::demand_terms(move || {
         wasm_bindgen_futures::spawn_local(async move {
-            match (|| async {
+            match async {
                 let actor = crate::viewer().ok_or("no signed-in moderator to attribute this resolution to")?;
                 let trx = ctx().begin();
                 let mutable = report.edit(&trx)?;
@@ -418,7 +418,7 @@ fn resolve(report: ReportView) {
                 mutable.resolved_at().set(&Some(js_sys::Date::now() as i64))?;
                 trx.commit().await?;
                 Ok::<_, Box<dyn std::error::Error>>(())
-            })()
+            }
             .await
             {
                 Ok(_) => tracing::info!("Report resolved"),

@@ -109,10 +109,10 @@ pub fn demand_terms_boxed(then: Box<dyn FnOnce()>) {
 /// not a reason to refuse the reader their action — they did accept — but it
 /// does mean the next visit asks again, which [`terms_accepted`] already says.
 fn accept() {
-    if let Some(storage) = local_storage() {
-        if storage.set_item(LS_TERMS_ACCEPTED, TERMS_VERSION).is_err() {
-            tracing::warn!("could not record terms acceptance — this device will be asked again");
-        }
+    if let Some(storage) = local_storage()
+        && storage.set_item(LS_TERMS_ACCEPTED, TERMS_VERSION).is_err()
+    {
+        tracing::warn!("could not record terms acceptance — this device will be asked again");
     }
     gate().open.set(false);
     if let Some(action) = PENDING.with(|pending| pending.borrow_mut().take()) {

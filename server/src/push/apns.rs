@@ -394,6 +394,11 @@ impl ProviderTokens {
     ///
     /// Anything else Apple says is about the alert or the device, not about the
     /// credential, and leaves the token alone.
+    // Keep the inner `if` rather than a match guard: `current.take()` discards
+    // the token as a side effect, so folding it into a guard would hide that and,
+    // when the token is already absent, fall the match through to later arms — a
+    // semantics change traded for a style lint.
+    #[allow(clippy::collapsible_match)]
     pub(crate) fn note_refusal(&self, reason: &str, now_ms: i64) {
         let mut current = self.current.lock().unwrap_or_else(|e| e.into_inner());
         match reason {
