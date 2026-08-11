@@ -36,6 +36,13 @@
 //! the member is looking at the app shows nothing. It is not dropped: the same
 //! event wrote the inbox row that the notification panel is already announcing,
 //! with a chime, in the place the member is looking.
+//!
+//! AND SIGNING OUT TAKES THE DEVICE OFF. A phone somebody signed out of must
+//! stop ringing for the account that left it — otherwise every mention goes on
+//! arriving on a device nobody is signed into, and the member has no way to say
+//! so. [`withdraw_this_device`] is what `auth::sign_out` calls, and the whole
+//! reason [`LS_DEVICE_TOKEN`] exists: the token came from iOS, was sent once,
+//! and by sign-out time nothing else remembers what it was.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -62,8 +69,27 @@ const DM_KIND: &str = "dm";
 /// today (`server/src/push/store.rs`).
 const PLATFORM: &str = "ios";
 
-/// The registry's door (`server/src/push/registry.rs`).
+/// The registry's door (`server/src/push/registry.rs`). Both directions go
+/// through it: the body says which.
 const REGISTER_PATH: &str = "/push/register";
+
+/// localStorage key for the device token this install last filed with the
+/// server.
+///
+/// FOR: sign-out has to name the row it is withdrawing, and by then the only
+/// party that ever knew the token is this slot. Asking iOS again at sign-out
+/// would mean re-registering for push to un-register from it, which is both
+/// absurd and asynchronous inside a gesture that is about to reload the page.
+///
+/// Written only by a shell boot that registered, so a browser tab never has
+/// one — which is also what makes the slot the shell test: there is no device
+/// on the web to withdraw.
+///
+/// NOT A CREDENTIAL FOR THIS ORIGIN, unlike the two slots `auth` keeps. A
+/// device token addresses a phone through Apple; holding one lets nobody send
+/// to it without this deployment's APNs key. It is still never logged whole —
+/// see [`token_prefix`].
+const LS_DEVICE_TOKEN: &str = "community_push_device_token";
 
 /// How much of a device token is safe to write down. The token is the
 /// credential for waking this phone, so a log line names a device by its first
@@ -119,9 +145,16 @@ fn named_entity(target: &Value, name: &str) -> Option<EntityId> {
     }
 }
 
-/// What this device sends to `POST /push/register`.
+/// What this device sends to `POST /push/register` to be reachable.
 pub fn registration_body(device_token: &str) -> String {
     serde_json::json!({ "token": device_token, "platform": PLATFORM }).to_string()
+}
+
+/// And what it sends to the same door to stop being reachable. The platform
+/// rides along because the route validates the whole body before it looks at
+/// the flag — one shape in, one set of refusals.
+pub fn withdrawal_body(device_token: &str) -> String {
+    serde_json::json!({ "token": device_token, "platform": PLATFORM, "unregister": true }).to_string()
 }
 
 /// The part of a device token that may be written down.
@@ -220,8 +253,16 @@ pub async fn register_this_device() {
     };
 
     let device = token_prefix(&device_token);
-    match post_registration(&format!("{base}{REGISTER_PATH}"), &session, &registration_body(&device_token)).await {
-        Ok(204) => tracing::info!("push: registered this device ({device}…) for notifications"),
+    match post_to_registry(&format!("{base}{REGISTER_PATH}"), &session, &registration_body(&device_token)).await {
+        Ok(204) => {
+            // Remembered only once the server has it, so the slot never names a
+            // row that was never filed — a withdrawal for one would be a
+            // request that changes nothing.
+            if let Some(ls) = local_storage() {
+                let _ = ls.set_item(LS_DEVICE_TOKEN, &device_token);
+            }
+            tracing::info!("push: registered this device ({device}…) for notifications");
+        }
         // The registry answers every refusal with a status and a sentence, and
         // the sentence is for a developer rather than for the log — so the
         // status is what is written down. 401 is a session it would not verify,
@@ -232,13 +273,65 @@ pub async fn register_this_device() {
     }
 }
 
-/// POST the registration, answering with the status the server gave.
+/// Tell the server to stop reaching this phone for the member signing out.
+///
+/// Called from `auth::sign_out` BEFORE it clears anything, because the request
+/// needs the session it is ending: the registry files a device under the
+/// subject of the token presented, and withdraws under the same.
+///
+/// FIRE AND FORGET, on `shell::open_external`'s rule and for the same reason.
+/// Nothing downstream waits: the sign-out reloads the document a moment later
+/// and may well cut this request off mid-flight. That is accepted rather than
+/// hidden — the local sign-out happens either way, and the honest description
+/// of this call is "the usual case stops the alerts, and the rest is what the
+/// APNs feedback path is for" (`server/src/push/registry.rs`).
+///
+/// The slot is cleared FIRST, and not on success: this device is signing out
+/// whatever the server says, and a stale token left behind would be sent again
+/// by the next sign-out under whichever account signs in next — a request
+/// naming a row that member never filed.
+pub fn withdraw_this_device() {
+    // The presence of the slot is the shell test: only a shell boot registers,
+    // so only a shell boot ever wrote one.
+    let Some(ls) = local_storage() else { return };
+    let Some(device_token) = ls.get_item(LS_DEVICE_TOKEN).ok().flatten().filter(|token| !token.is_empty()) else { return };
+    let _ = ls.remove_item(LS_DEVICE_TOKEN);
+
+    let Some(base) = crate::auth::server_http_base() else {
+        tracing::warn!("push: no server address to withdraw this device from");
+        return;
+    };
+    // The session being ended, read from memory rather than from storage: the
+    // caller is about to clear the stored one, and this is the token whose
+    // subject owns the row.
+    let Some(session) = crate::AUTH_TOKEN.read().ok().and_then(|guard| guard.clone()) else {
+        tracing::warn!("push: no session to withdraw this device with; the registration is left for the APNs feedback path");
+        return;
+    };
+
+    let device = token_prefix(&device_token);
+    let url = format!("{base}{REGISTER_PATH}");
+    let body = withdrawal_body(&device_token);
+    wasm_bindgen_futures::spawn_local(async move {
+        match post_to_registry(&url, &session, &body).await {
+            Ok(204) => tracing::info!("push: withdrew this device ({device}…) from notifications"),
+            Ok(status) => tracing::warn!("push: the server refused to withdraw this device ({device}…) with HTTP {status}"),
+            Err(reason) => tracing::warn!("push: could not reach the server to withdraw this device: {reason}"),
+        }
+    });
+}
+
+/// This document's localStorage, when there is one.
+fn local_storage() -> Option<web_sys::Storage> { window()?.local_storage().ok().flatten() }
+
+/// POST to the registry, answering with the status the server gave. Serves both
+/// directions — the body is what says which.
 ///
 /// `Err` is reserved for never having been answered at all — offline, name
 /// resolution, TLS, a blocked request. The response body is deliberately never
 /// read: the caller logs, and a body in a log is what `auth::GuestMintFailure`
 /// exists to keep out of one.
-async fn post_registration(url: &str, session_token: &str, body: &str) -> Result<u16, String> {
+async fn post_to_registry(url: &str, session_token: &str, body: &str) -> Result<u16, String> {
     let describe = |e: JsValue| e.as_string().unwrap_or_else(|| format!("{e:?}"));
     let window = window().ok_or("no window")?;
 
@@ -346,6 +439,19 @@ mod tests {
         let token = "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF";
         let body: Value = serde_json::from_str(&registration_body(token)).unwrap();
         assert_eq!(body, json!({ "token": token, "platform": "ios" }));
+    }
+
+    #[wasm_bindgen_test]
+    fn a_withdrawal_is_the_same_body_with_one_word_added() {
+        // Same token, same service, same shape — the route validates all of it
+        // before it reads the flag, so a withdrawal is refused everywhere a
+        // registration is. The flag is absent from a registration rather than
+        // written false, which is what lets a server that predates it read what
+        // the app sends.
+        let token = "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF";
+        let body: Value = serde_json::from_str(&withdrawal_body(token)).unwrap();
+        assert_eq!(body, json!({ "token": token, "platform": "ios", "unregister": true }));
+        assert!(serde_json::from_str::<Value>(&registration_body(token)).unwrap().get("unregister").is_none());
     }
 
     #[wasm_bindgen_test]

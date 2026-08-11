@@ -25,11 +25,25 @@
 //! notifications name a recipient and a guest is nobody's. So the refusal is
 //! 403 with a sentence saying to sign in, not a silent success.
 //!
-//! WHAT THIS ROUTE DOES NOT HAVE, deliberately: no unregister. A token leaves
-//! the registry when APNs says the app is gone (see `workers::push`), which is
-//! the report that is actually reliable — a sign-out that promises to withdraw
-//! a token cannot keep that promise on a device that is offline, uninstalled,
-//! or wiped.
+//! WITHDRAWING A DEVICE, on the same route. A signed-out phone must stop
+//! ringing for the account that left it: the alerts a member's mentions produce
+//! would otherwise go on arriving on a device nobody is signed into, and the
+//! member has no way to say so. So the body carries an `unregister` flag, and
+//! the row it drops is the one filed under the VERIFIED caller — the same
+//! `sub`, the same (member, token) key. A caller can withdraw nothing but their
+//! own.
+//!
+//! One route rather than two, because everything before the last line is
+//! identical: the same bearer check, the same guest refusal, the same "is this
+//! a device token at all". A DELETE would repeat all of it to change one call.
+//!
+//! WHAT THIS DOES NOT MAKE THE REGISTRY EXACT, and why the other path stays.
+//! A sign-out on a live device withdraws; a device that is offline, uninstalled
+//! or wiped never sends anything, and no promise made here reaches it. Those
+//! rows leave when APNs reports them gone (see `workers::push`), which remains
+//! the only report that arrives without the device's cooperation. The two are
+//! complements: this one is prompt where it applies, that one is the backstop
+//! where nothing else can be.
 
 use std::sync::Arc;
 
@@ -90,6 +104,13 @@ pub struct RegisterRequest {
     /// Which push service reaches this device. `ios` today; Google Play is a
     /// later phase and anything else is refused rather than guessed at.
     platform: String,
+    /// Take this device off the caller's list instead of putting it on.
+    ///
+    /// Absent means false, which is what keeps every registration this server
+    /// has ever received meaning what it meant: an app that predates this field
+    /// sends the same two members and goes on registering.
+    #[serde(default)]
+    unregister: bool,
 }
 
 /// The route handler: recognize the caller, check what they sent, file it.
@@ -137,15 +158,30 @@ pub async fn handle(State(registry): State<PushRegistry>, headers: HeaderMap, bo
     };
 
     let user = user.to_base64();
+    // The ops trail, matching what the mint logs: who, and enough of the token
+    // to tell one of a member's devices from another. NEVER the whole token —
+    // it is the credential for waking that device.
+    let device = token_prefix(&request.token);
+
+    if request.unregister {
+        // The row dropped is the caller's own, because the caller's own subject
+        // is half of its key — there is no parameter here naming whose device
+        // this is. An absent row is not an error: a sign-out on a device that
+        // never got as far as registering arrives here too.
+        if let Err(e) = registry.tokens.forget(&user, &request.token).await {
+            warn!(user = %user, "failed to withdraw a device token: {e:#}");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "could not withdraw this device").into_response();
+        }
+        info!(user = %user, device = %device, "withdrew a device from notifications");
+        return StatusCode::NO_CONTENT.into_response();
+    }
+
     if let Err(e) = registry.tokens.register(&user, &request.token, platform, crate::workers::now_ms()).await {
         warn!(user = %user, "failed to register a device token: {e:#}");
         return (StatusCode::INTERNAL_SERVER_ERROR, "could not register this device").into_response();
     }
 
-    // The ops trail, matching what the mint logs: who, and enough of the token
-    // to tell one of a member's devices from another. NEVER the whole token —
-    // it is the credential for waking that device.
-    info!(user = %user, device = %token_prefix(&request.token), platform = platform.as_str(), "registered a device for notifications");
+    info!(user = %user, device = %device, platform = platform.as_str(), "registered a device for notifications");
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -315,6 +351,65 @@ mod route_tests {
         assert_eq!(rows.len(), 2, "re-registering refreshes rather than adds");
         let refreshed = rows.iter().find(|(key, _)| key.1 == DEVICE).unwrap().1.last_registered_at;
         assert!(refreshed >= first_seen, "and the row records when it was last claimed: {refreshed} vs {first_seen}");
+    }
+
+    /// The withdrawal half: a member takes their own device off, and can take
+    /// nobody else's off. The second claim is the whole of what makes this
+    /// route safe to expose — the row's key is (subject, token), and the
+    /// subject comes from the verified token rather than from the body, so a
+    /// caller naming a device that is not theirs is naming a row that does not
+    /// exist.
+    #[tokio::test]
+    async fn a_member_withdraws_their_own_device_and_reaches_nobody_elses() {
+        let store = MemoryDeviceTokens::new();
+        let app = app(store.clone());
+        let (alice, bob) = (EntityId::new(), EntityId::new());
+        let alices = format!("Bearer {}", member_token(alice));
+        let bobs = format!("Bearer {}", member_token(bob));
+
+        // Both members register the same-shaped device; one phone each.
+        for (authorization, token) in [(&alices, DEVICE), (&bobs, OTHER_DEVICE)] {
+            let body = format!(r#"{{"token":"{token}","platform":"ios"}}"#);
+            assert_eq!(app.clone().oneshot(request(Some(authorization), &body)).await.unwrap().status(), StatusCode::NO_CONTENT);
+        }
+        assert_eq!(store.all().len(), 2);
+
+        // Alice aims at Bob's device. The route answers the same 204 it answers
+        // for a row that was never there — there is nothing to tell her, and
+        // nothing happens.
+        let body = format!(r#"{{"token":"{OTHER_DEVICE}","platform":"ios","unregister":true}}"#);
+        assert_eq!(app.clone().oneshot(request(Some(&alices), &body)).await.unwrap().status(), StatusCode::NO_CONTENT);
+        assert_eq!(store.all().len(), 2, "a withdrawal names the caller's own row or no row at all");
+        assert!(store.all().iter().any(|(key, _)| key.0 == bob.to_base64()), "Bob's device is still Bob's");
+
+        // Her own comes off.
+        let body = format!(r#"{{"token":"{DEVICE}","platform":"ios","unregister":true}}"#);
+        assert_eq!(app.clone().oneshot(request(Some(&alices), &body)).await.unwrap().status(), StatusCode::NO_CONTENT);
+        let rows = store.all();
+        assert_eq!(rows.len(), 1, "the caller's own row is gone");
+        assert_eq!(rows[0].0 .0, bob.to_base64());
+
+        // And a second sign-out on the same device is not an error: the app
+        // sends this best-effort and may send it twice.
+        assert_eq!(app.clone().oneshot(request(Some(&alices), &body)).await.unwrap().status(), StatusCode::NO_CONTENT);
+        assert_eq!(store.all().len(), 1);
+
+        // A withdrawal is refused everywhere a registration is: an unverified
+        // caller cannot name a subject, so there is no row to reach.
+        assert_eq!(app.oneshot(request(None, &body)).await.unwrap().status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(store.all().len(), 1);
+    }
+
+    /// A guest is turned away whichever way the flag is set: the refusal is
+    /// about having no account to file a device under, which is equally true of
+    /// taking one off.
+    #[tokio::test]
+    async fn a_guest_session_may_not_withdraw_a_device_either() {
+        let store = MemoryDeviceTokens::new();
+        let authorization = format!("Bearer {}", guest_token());
+        let body = format!(r#"{{"token":"{DEVICE}","platform":"ios","unregister":true}}"#);
+        let response = app(store.clone()).oneshot(request(Some(&authorization), &body)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]

@@ -779,7 +779,8 @@ pub fn stored_token() -> Option<String> {
     Some(token)
 }
 
-/// Sign out — of Community AND of idp.to (RP-initiated logout).
+/// Sign out — of Community, of this phone's notifications, AND of idp.to
+/// (RP-initiated logout).
 ///
 /// Local state goes first: whatever the IdP side does, this browser is signed
 /// out of Community the moment the user clicks. Then, when idp.to advertises
@@ -801,6 +802,16 @@ pub fn stored_token() -> Option<String> {
 /// the member closes it — which costs them nothing, because the local clear
 /// already happened and the app underneath is already signed out.
 pub fn sign_out() {
+    // FIRST, AND BEFORE ANYTHING IS CLEARED: tell the server to stop ringing
+    // this phone for the account that is leaving it. The request presents the
+    // session being ended, because that subject is what the device is filed
+    // under — so it has to go out while the session is still in hand. Nothing
+    // waits on it and nothing below depends on it: the local sign-out happens
+    // whatever the answer, and a request the reload cuts off leaves a row for
+    // the APNs feedback path to reap (`server/src/push/registry.rs`). Inert on
+    // the web, where no device was ever registered.
+    crate::push::withdraw_this_device();
+
     // The session being ended is this tab's in-memory one — deliberately NOT
     // whatever `LS_TOKEN` holds: that slot is shared across tabs and
     // last-writer-wins, the same clobber the ownership check guards against.
