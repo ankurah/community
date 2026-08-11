@@ -96,11 +96,9 @@ impl NotificationManager {
             }
         }) as Box<dyn FnMut()>);
 
-        if let Some(window) = web_sys::window() {
-            if let Some(document) = window.document() {
-                let _ = document.add_event_listener_with_callback("touchstart", unlock.as_ref().unchecked_ref());
-                let _ = document.add_event_listener_with_callback("click", unlock.as_ref().unchecked_ref());
-            }
+        if let Some(window) = web_sys::window() && let Some(document) = window.document() {
+            let _ = document.add_event_listener_with_callback("touchstart", unlock.as_ref().unchecked_ref());
+            let _ = document.add_event_listener_with_callback("click", unlock.as_ref().unchecked_ref());
         }
 
         unlock.forget(); // Keep the closure alive
@@ -131,7 +129,7 @@ impl NotificationManager {
         let array_buffer: js_sys::ArrayBuffer = array_buffer.dyn_into()?;
         let decode_promise = audio_context.decode_audio_data(&array_buffer)?;
         let buffer = wasm_bindgen_futures::JsFuture::from(decode_promise).await?;
-        Ok(buffer.dyn_into()?)
+        buffer.dyn_into()
     }
 
     fn add_room_query(inner: Arc<Inner>, room: RoomView) {

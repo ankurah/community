@@ -85,8 +85,9 @@ getrandom_03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] 
 # This crate's unit tests run under wasm, because the crate only BUILDS under
 # wasm: `community-model`'s wasm feature carries `ankurah-chat-model` and its
 # wasm_bindgen macros, which exhaust the recursion limit on a host target. So
-# the pure parts that want tests (push route parsing today) are marked with
-# `#[wasm_bindgen_test]` and run FROM THIS DIRECTORY with
+# the pure parts that want tests (push route parsing, and the framed sign-in
+# message readers in `src/auth/tests.rs`) are marked with `#[wasm_bindgen_test]`
+# and run FROM THIS DIRECTORY with
 #
 #     cd leptos-app && cargo test --target wasm32-unknown-unknown
 #
@@ -95,8 +96,14 @@ getrandom_03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] 
 # the directory it was INVOKED in and its ancestors — not from the package's own
 # directory. Run from the workspace root and cargo builds the test module, finds
 # no runner for wasm32-unknown-unknown, and tries to execute the `.wasm` file
-# directly. Pinned to the release paired with
-# the wasm-bindgen above: the two are versioned in lockstep, and the runner
-# refuses a module built against a different schema.
+# directly. Pinned to the release paired with the wasm-bindgen above: the two are
+# versioned in lockstep, and the runner refuses a module built against a
+# different schema.
 [dev-dependencies]
 wasm-bindgen-test = "=0.3.55"
+# `MessageEventInit` is how those tests hand a reader an event carrying a chosen
+# `origin`; the browser sets that member itself on a real message, so nothing
+# outside the tests needs the binding. Declared here rather than beside the
+# other web-sys features so the shipped bundle does not carry it: the workspace
+# is on resolver 2, which keeps dev-dependency features out of a normal build.
+web-sys = { version = "=0.3.82", features = ["MessageEventInit"] }

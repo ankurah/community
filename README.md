@@ -80,13 +80,29 @@ minted verbatim into the session token with a `member` floor. The server keeps
 a read-only `userroles` cache per user so the Members panel can show badges.
 See [`docs/auth.md`](docs/auth.md).
 
-## End-to-end tests
+## Tests
 
 ```bash
+# Server + model. Two runs, because `main.rs` picks its storage engine at
+# compile time and each build compiles code the other never sees.
+cargo test -p community-server -p community-model
+cargo test -p community-server --no-default-features --features sled
+
+# SPA unit tests. A real browser, not node — they build MessageEvents and call
+# encodeURIComponent. Run from the crate directory: its .cargo/config.toml
+# carries the getrandom backend cfg the wasm build needs.
+cd leptos-app && wasm-pack test --headless --chrome
+
+# End to end.
 cd e2e
 npm install
 npm run test:e2e     # picks free ports, runs Playwright (chat + multi-user)
 ```
+
+CI runs all of those, and two gates besides: `cargo clippy ... -- -D warnings`
+over each of the three build configurations, and `cargo audit` over
+`Cargo.lock`. The audit's ignore list lives in `.cargo/audit.toml`, and an entry
+there carries the reasoning that put it there.
 
 ## Deployment
 

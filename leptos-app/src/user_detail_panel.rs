@@ -37,22 +37,19 @@ pub fn UserDetailPanel(
     // The view itself is live afterwards — display-name edits re-render.
     let user = RwSignal::new(None::<UserView>);
     let load_failed = RwSignal::new(false);
-    {
-        let user_id = user_id.clone();
-        wasm_bindgen_futures::spawn_local(async move {
-            match ctx().get::<UserView>(user_id.clone()).await {
-                // try_set: the panel may have been closed (disposed) before
-                // the fetch resolved.
-                Ok(u) => {
-                    let _ = user.try_set(Some(u));
-                }
-                Err(e) => {
-                    tracing::error!("Failed to load user {}: {}", user_id.to_base64(), e);
-                    let _ = load_failed.try_set(true);
-                }
+    wasm_bindgen_futures::spawn_local(async move {
+        match ctx().get::<UserView>(user_id).await {
+            // try_set: the panel may have been closed (disposed) before
+            // the fetch resolved.
+            Ok(u) => {
+                let _ = user.try_set(Some(u));
             }
-        });
-    }
+            Err(e) => {
+                tracing::error!("Failed to load user {}: {}", user_id.to_base64(), e);
+                let _ = load_failed.try_set(true);
+            }
+        }
+    });
 
     // Role badges from the server-written `userroles` cache, scoped to this
     // user (the profile-popover idiom, #17-parameterized).
@@ -98,12 +95,9 @@ pub fn UserDetailPanel(
     // Move focus onto the sidebar so screen readers announce it (Escape is
     // window-level — see panels.rs — so it works wherever focus sits).
     let panel_ref = NodeRef::<leptos::html::Aside>::new();
-    Effect::new({
-        let panel_ref = panel_ref.clone();
-        move |_| {
-            if let Some(el) = panel_ref.get() {
-                let _ = el.focus();
-            }
+    Effect::new(move |_| {
+        if let Some(el) = panel_ref.get() {
+            let _ = el.focus();
         }
     });
 
@@ -137,15 +131,12 @@ pub fn UserDetailPanel(
     // which is the user's first sign-in (users are keyed on their OIDC sub).
     let first_seen = format!("First seen {}", fmt::month_year(user_id.to_ulid().timestamp_ms() as i64));
 
-    let name = {
-        let user = user.clone();
-        move || {
-            let n = user.get().map(|u| u.display_name().unwrap_or_default()).unwrap_or_default();
-            if n.trim().is_empty() { "Unknown".to_string() } else { n }
-        }
+    let name = move || {
+        let n = user.get().map(|u| u.display_name().unwrap_or_default()).unwrap_or_default();
+        if n.trim().is_empty() { "Unknown".to_string() } else { n }
     };
-    let name_for_initials = name.clone();
-    let name_for_ban = name.clone();
+    let name_for_initials = name;
+    let name_for_ban = name;
 
     let banned = {
         let ban_rows = ban_rows.clone();
@@ -189,7 +180,7 @@ pub fn UserDetailPanel(
                     <div class=format!("userDetailAvatar {}", hue) aria-hidden="true">
                         {move || fmt::initials(&name_for_initials())}
                     </div>
-                    <div class="userDetailName">{name.clone()}</div>
+                    <div class="userDetailName">{name}</div>
                     <div class="userDetailFirstSeen">{first_seen.clone()}</div>
                 </div>
 
@@ -295,7 +286,6 @@ pub fn UserDetailPanel(
                         let user_id_b64 = user_id_b64.clone();
                         let ban_rows = ban_rows.clone();
                         let banned = banned.clone();
-                        let name_for_ban = name_for_ban.clone();
                         view! {
                             <div class="userDetailActions">
                                 <h3 class="userDetailActionsTitle">"Moderation"</h3>
@@ -321,7 +311,7 @@ pub fn UserDetailPanel(
                                         }
                                             .into_any()
                                     } else {
-                                        let name = name_for_ban.clone();
+                                        let name = name_for_ban;
                                         view! {
                                             <button
                                                 class="userDetailActionBtn userDetailActionDanger"
@@ -383,7 +373,7 @@ fn ban_member_confirmed(user_id: String, user_name: String) {
     };
 
     wasm_bindgen_futures::spawn_local(async move {
-        match (|| async {
+        match async {
             // As at the message-removal call site: a log row with no actor
             // reads as "Automatic", so a caller with no viewer is refused
             // rather than recorded as the rate limiter.
@@ -410,7 +400,7 @@ fn ban_member_confirmed(user_id: String, user_name: String) {
             .await?;
             trx.commit().await?;
             Ok::<_, Box<dyn std::error::Error>>(())
-        })()
+        }
         .await
         {
             Ok(_) => tracing::info!("Banned {}", user_id),
@@ -431,7 +421,7 @@ fn unban_member(user_id: String, rows: Vec<BanView>) {
 /// The unban itself, once the guidelines gate has let it through.
 fn unban_member_confirmed(user_id: String, rows: Vec<BanView>) {
     wasm_bindgen_futures::spawn_local(async move {
-        match (|| async {
+        match async {
             let actor = crate::viewer().ok_or("no signed-in moderator to attribute this unban to")?;
             let user_eid = EntityId::from_base64(&user_id)?;
             let trx = ctx().begin();
@@ -449,7 +439,7 @@ fn unban_member_confirmed(user_id: String, rows: Vec<BanView>) {
             .await?;
             trx.commit().await?;
             Ok::<_, Box<dyn std::error::Error>>(())
-        })()
+        }
         .await
         {
             Ok(_) => tracing::info!("Unbanned {}", user_id),

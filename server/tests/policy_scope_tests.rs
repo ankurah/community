@@ -409,7 +409,7 @@ fn linkpreview_world_readable_but_no_role_can_write_it() {
     assert!(rules.scope.is_empty(), "no row filtering — the cache is public");
     for role in config.roles.keys() {
         assert!(
-            !config.can_write_collection(&[role.clone()], &"linkpreview".into()),
+            !config.can_write_collection(std::slice::from_ref(role), &"linkpreview".into()),
             "role '{role}' can write linkpreview — 'system' must remain a privilege no role holds"
         );
     }

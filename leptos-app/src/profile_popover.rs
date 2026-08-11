@@ -33,29 +33,23 @@ pub fn ProfilePopover(
     let position = RwSignal::new((x, y));
 
     // Clamp to the viewport once rendered (same approach as the context menu).
-    Effect::new({
-        let pop_ref = pop_ref.clone();
-        move |_| {
-            if let Some(el) = pop_ref.get() {
-                let rect = el.unchecked_ref::<web_sys::Element>().get_bounding_client_rect();
-                let Some(win) = window() else { return };
-                let win_w = win.inner_width().ok().and_then(|v| v.as_f64()).unwrap_or(1024.0) as i32;
-                let win_h = win.inner_height().ok().and_then(|v| v.as_f64()).unwrap_or(768.0) as i32;
-                let adj_x = (x.min(win_w - rect.width() as i32 - 10)).max(10);
-                let adj_y = (y.min(win_h - rect.height() as i32 - 10)).max(10);
-                position.set((adj_x, adj_y));
-            }
+    Effect::new(move |_| {
+        if let Some(el) = pop_ref.get() {
+            let rect = el.unchecked_ref::<web_sys::Element>().get_bounding_client_rect();
+            let Some(win) = window() else { return };
+            let win_w = win.inner_width().ok().and_then(|v| v.as_f64()).unwrap_or(1024.0) as i32;
+            let win_h = win.inner_height().ok().and_then(|v| v.as_f64()).unwrap_or(768.0) as i32;
+            let adj_x = (x.min(win_w - rect.width() as i32 - 10)).max(10);
+            let adj_y = (y.min(win_h - rect.height() as i32 - 10)).max(10);
+            position.set((adj_x, adj_y));
         }
     });
 
     // Move focus into the dialog so Esc works without further tabbing and
     // screen readers announce it.
-    Effect::new({
-        let pop_ref = pop_ref.clone();
-        move |_| {
-            if let Some(el) = pop_ref.get() {
-                let _ = el.focus();
-            }
+    Effect::new(move |_| {
+        if let Some(el) = pop_ref.get() {
+            let _ = el.focus();
         }
     });
 
@@ -63,16 +57,13 @@ pub fn ProfilePopover(
     // closures, these are removed on unmount.
     let click_closure = wasm_bindgen::closure::Closure::wrap(Box::new({
         let on_close = on_close.clone();
-        let pop_ref = pop_ref.clone();
         move |e: MouseEvent| {
-            if let Some(el) = pop_ref.get_untracked() {
-                if let Some(target) = e.target() {
-                    if let Ok(node) = target.dyn_into::<web_sys::Node>() {
-                        if !el.contains(Some(&node)) {
-                            on_close();
-                        }
-                    }
-                }
+            if let Some(el) = pop_ref.get_untracked()
+                && let Some(target) = e.target()
+                && let Ok(node) = target.dyn_into::<web_sys::Node>()
+                && !el.contains(Some(&node))
+            {
+                on_close();
             }
         }
     }) as Box<dyn FnMut(_)>);
@@ -161,7 +152,7 @@ pub fn ProfilePopover(
                             let on_close = on_close.clone();
                             let detail_target = user.id();
                             move |_| {
-                                panels().open(Surface::UserDetail(detail_target.clone()));
+                                panels().open(Surface::UserDetail(detail_target));
                                 on_close();
                             }
                         }
