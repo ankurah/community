@@ -37,6 +37,7 @@ use futures_util::FutureExt;
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use serde::Serialize;
 use serde_json::{json, Map, Value};
+use tracing::{error, warn};
 
 /// Apple's production host. The default because a deployment that has APNs
 /// credentials at all is a deployment shipping to real phones; the sandbox host
@@ -199,16 +200,43 @@ impl Alert {
     }
 }
 
+/// Apple's word for a device whose app is gone.
+pub const UNREGISTERED: &str = "Unregistered";
+/// Apple's word for a device token it will not accept for this environment.
+/// See [`classify`] for why this is NOT a report that the device is gone.
+pub const BAD_DEVICE_TOKEN: &str = "BadDeviceToken";
+/// Apple's word for a token/topic disagreement — the precedent
+/// [`BAD_DEVICE_TOKEN`] follows.
+pub const DEVICE_TOKEN_NOT_FOR_TOPIC: &str = "DeviceTokenNotForTopic";
+/// The provider token we presented is past its hour.
+pub const EXPIRED_PROVIDER_TOKEN: &str = "ExpiredProviderToken";
+/// The provider token we presented is not one Apple will accept at all.
+pub const INVALID_PROVIDER_TOKEN: &str = "InvalidProviderToken";
+/// We minted a replacement provider token inside Apple's per-key floor.
+pub const TOO_MANY_PROVIDER_TOKEN_UPDATES: &str = "TooManyProviderTokenUpdates";
+
 /// What APNs said about one send.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Outcome {
     /// APNs took it. Not a promise it was shown — the phone may be off — but
     /// the last word this server gets.
     Delivered,
-    /// APNs will never accept this device token again, so the registry row for
-    /// it is dead weight and the caller drops it. `reason` is Apple's own word,
-    /// carried for the log line.
-    TokenGone { reason: &'static str },
+    /// APNs reports the app is no longer installed on this device. `reason` is
+    /// Apple's own word, carried for the log line.
+    TokenGone {
+        reason: &'static str,
+        /// When Apple says the token stopped being valid, in ms since epoch,
+        /// as its answer carried it. `None` when the body named no timestamp
+        /// or named one this build could not read.
+        ///
+        /// FOR: the answer describes a moment, not the present. A device that
+        /// deleted the app and reinstalled it has a NEWER registration than the
+        /// invalidation Apple is reporting, and dropping that row would take
+        /// away the registration the reinstall just made. The caller compares
+        /// this against the row's `last_registered_at` and drops only what is
+        /// older.
+        invalidated_at: Option<i64>,
+    },
     /// APNs refused for some other stated reason. The alert is lost; the
     /// registration stands.
     Refused { status: u16, reason: String },
@@ -216,30 +244,45 @@ pub enum Outcome {
 
 /// Read Apple's answer to one send.
 ///
-/// THE TWO REFUSALS THAT MEAN A DEVICE IS GONE, and no others. `410
-/// Unregistered` is Apple reporting that the app is no longer installed on that
-/// device, and `400 BadDeviceToken` that the token is not one APNs issued for
-/// this environment. Both are permanent for that row.
+/// THE ONE REFUSAL THAT MEANS A DEVICE IS GONE. `410 Unregistered` is Apple
+/// reporting that the app is no longer installed on that device — and even that
+/// is qualified, because the answer carries the moment it became true and a
+/// device that re-registered since is not the device Apple is describing.
 ///
-/// `DeviceTokenNotForTopic` reads like a third and must not be treated as one:
-/// it says the token and the configured topic disagree, which a wrong
-/// [`TOPIC_VAR`] produces for EVERY device at once. Pruning on it would empty
-/// the registry on a typo, and the members would have to reinstall to get back
-/// in it.
+/// TWO REFUSALS THAT READ LIKE IT AND ARE NOT, for the same reason. Each says
+/// something about the pairing of a token with THIS deployment's configuration,
+/// and a misconfiguration says it about every device at once — so pruning on
+/// either would empty the registry, and every member would have to reinstall to
+/// get back into it.
+///
+/// `DeviceTokenNotForTopic` says the token and the configured topic disagree,
+/// which a wrong [`TOPIC_VAR`] produces for everybody. `BadDeviceToken` says
+/// the token is not one APNs issued FOR THIS ENVIRONMENT — and which
+/// environment we are talking to is [`ENDPOINT_VAR`], a single variable, so a
+/// deployment pointed at the sandbox host while its app was built for
+/// production hears this about every device it has. It follows the topic rule
+/// rather than the Unregistered one, and the sender says so loudly instead of
+/// dropping anything.
 pub(crate) fn classify(status: u16, body: &str) -> Outcome {
     if status == 200 {
         return Outcome::Delivered;
     }
-    // Apple's error body is `{"reason": "..."}`; anything else (a proxy's HTML
-    // error page, an empty body) leaves the reason blank rather than failing,
-    // because the status alone is still worth logging.
-    let reason = serde_json::from_str::<Value>(body)
-        .ok()
-        .and_then(|body| body.get("reason").and_then(Value::as_str).map(str::to_string))
-        .unwrap_or_default();
+    // Apple's error body is `{"reason": "...", "timestamp": <ms>}`; anything
+    // else (a proxy's HTML error page, an empty body) leaves the reason blank
+    // rather than failing, because the status alone is still worth logging.
+    let body = serde_json::from_str::<Value>(body).ok();
+    let reason =
+        body.as_ref().and_then(|body| body.get("reason").and_then(Value::as_str).map(str::to_string)).unwrap_or_default();
     match (status, reason.as_str()) {
-        (410, "Unregistered") => Outcome::TokenGone { reason: "Unregistered" },
-        (400, "BadDeviceToken") => Outcome::TokenGone { reason: "BadDeviceToken" },
+        (410, UNREGISTERED) => Outcome::TokenGone {
+            reason: UNREGISTERED,
+            // Apple writes it as a JSON number of milliseconds. Anything else —
+            // absent, a string, fractional, wider than i64 — is no timestamp,
+            // and the caller then falls back to dropping the row unconditionally
+            // (which is what this code did before the timestamp was read at
+            // all).
+            invalidated_at: body.as_ref().and_then(|body| body.get("timestamp")).and_then(Value::as_i64),
+        },
         _ => Outcome::Refused { status, reason },
     }
 }
@@ -263,6 +306,14 @@ pub trait Transport: Send + Sync + 'static {
 /// that a request already in flight cannot age out of validity, and far enough
 /// above twenty minutes that no burst of sends can mint two.
 const PROVIDER_TOKEN_REUSE_MS: i64 = 50 * 60 * 1000;
+
+/// Apple's own floor on replacing a provider token for one key: mint a second
+/// inside this window and it answers [`TOO_MANY_PROVIDER_TOKEN_UPDATES`] and
+/// the send is lost. It is the lower end of the window
+/// [`PROVIDER_TOKEN_REUSE_MS`] sits inside, and it is what
+/// [`ProviderTokens::note_refusal`] consults before discarding a token Apple
+/// has just complained about.
+const PROVIDER_TOKEN_MINT_FLOOR_MS: i64 = 20 * 60 * 1000;
 
 /// What the provider token claims. Apple asks for exactly these two.
 #[derive(Serialize)]
@@ -316,6 +367,61 @@ impl ProviderTokens {
         *current = Some((token.clone(), now_ms));
         Ok(token)
     }
+
+    /// Take Apple's refusal as a statement about the token in hand.
+    ///
+    /// FOR: [`PROVIDER_TOKEN_REUSE_MS`] is a guess at when the token goes stale,
+    /// made from Apple's published hour. Apple's refusal is not a guess. Without
+    /// this, a token Apple has stopped accepting is held for the rest of its
+    /// fifty minutes and EVERY send in that window is lost — the worst shape a
+    /// failure can take here, because nothing retries and the alerts are simply
+    /// gone.
+    ///
+    /// Three refusals say something, and they do not say the same thing.
+    /// [`EXPIRED_PROVIDER_TOKEN`] and [`INVALID_PROVIDER_TOKEN`] are Apple
+    /// refusing the token itself, so it is discarded and the next send signs a
+    /// fresh one.
+    ///
+    /// [`TOO_MANY_PROVIDER_TOKEN_UPDATES`] is the opposite complaint — we minted
+    /// too recently — and discarding on it is how a server talks itself into a
+    /// loop: every send mints, every mint is refused for minting, and none of
+    /// them is ever delivered. So the token is kept unless it has already
+    /// outlived [`PROVIDER_TOKEN_MINT_FLOOR_MS`], which is the earliest moment a
+    /// replacement could be accepted. Hearing it about a token younger than that
+    /// means something outside this process is minting against the same key —
+    /// another replica, another deployment — which no code here can fix, so it
+    /// is said at error level and nothing is thrown away.
+    ///
+    /// Anything else Apple says is about the alert or the device, not about the
+    /// credential, and leaves the token alone.
+    pub(crate) fn note_refusal(&self, reason: &str, now_ms: i64) {
+        let mut current = self.current.lock().unwrap_or_else(|e| e.into_inner());
+        match reason {
+            EXPIRED_PROVIDER_TOKEN | INVALID_PROVIDER_TOKEN => {
+                if current.take().is_some() {
+                    warn!(reason, "push: APNs refused our provider token; discarding it so the next send signs a fresh one");
+                }
+            }
+            TOO_MANY_PROVIDER_TOKEN_UPDATES => match current.as_ref() {
+                Some((_, minted_at)) if now_ms.saturating_sub(*minted_at) >= PROVIDER_TOKEN_MINT_FLOOR_MS => {
+                    *current = None;
+                    warn!(reason, "push: APNs refused our provider token as too new, but ours is past Apple's floor; discarding it");
+                }
+                Some(_) => error!(
+                    reason,
+                    "push: APNs says our provider token was minted too recently, and ours is younger than Apple's floor — \
+                     something outside this process is signing with the same key. Keeping the token; sends will keep failing \
+                     until that stops."
+                ),
+                None => error!(
+                    reason,
+                    "push: APNs says our provider token was minted too recently, and this process holds none — \
+                     something outside it is signing with the same key."
+                ),
+            },
+            _ => {}
+        }
+    }
 }
 
 /// How long one send may take before it is abandoned. APNs answers in
@@ -348,7 +454,8 @@ impl ApnsClient {
 impl Transport for ApnsClient {
     fn send<'a>(&'a self, device_token: &'a str, alert: &'a Alert) -> BoxFuture<'a, Result<Outcome>> {
         async move {
-            let provider_token = self.tokens.at(crate::workers::now_ms())?;
+            let now_ms = crate::workers::now_ms();
+            let provider_token = self.tokens.at(now_ms)?;
             let response = self
                 .http
                 .post(format!("{}/3/device/{device_token}", self.endpoint))
@@ -376,7 +483,15 @@ impl Transport for ApnsClient {
             // A body we cannot read is an empty reason, not a failed send: the
             // status is what decides the outcome.
             let body = response.text().await.unwrap_or_default();
-            Ok(classify(status, &body))
+            let outcome = classify(status, &body);
+            // Some refusals are about the credential rather than about this
+            // alert, and the credential is this struct's to keep or throw away.
+            // Read at the instant the send began, so a slow response cannot
+            // make the held token look older than it is.
+            if let Outcome::Refused { reason, .. } = &outcome {
+                self.tokens.note_refusal(reason, now_ms);
+            }
+            Ok(outcome)
         }
         .boxed()
     }
@@ -520,28 +635,97 @@ mod tests {
     fn apples_answer_decides_whether_a_device_token_survives() {
         assert_eq!(classify(200, ""), Outcome::Delivered);
 
-        // The app is gone from that device, or the token was never one APNs
-        // issued: both are permanent, and the caller drops the row.
-        assert_eq!(classify(410, r#"{"reason":"Unregistered"}"#), Outcome::TokenGone { reason: "Unregistered" });
-        assert_eq!(classify(400, r#"{"reason":"BadDeviceToken"}"#), Outcome::TokenGone { reason: "BadDeviceToken" });
+        // The app is gone from that device — the one answer that reports on the
+        // device itself — and it comes with the moment it became true.
+        assert_eq!(classify(410, r#"{"reason":"Unregistered","timestamp":1454948015990}"#), Outcome::TokenGone {
+            reason: UNREGISTERED,
+            invalidated_at: Some(1454948015990)
+        });
+        // No timestamp, or one that is not a whole number of milliseconds,
+        // leaves the caller with the older behaviour: drop the row.
+        assert_eq!(classify(410, r#"{"reason":"Unregistered"}"#), Outcome::TokenGone { reason: UNREGISTERED, invalidated_at: None });
+        for body in [
+            r#"{"reason":"Unregistered","timestamp":"1454948015990"}"#,
+            r#"{"reason":"Unregistered","timestamp":null}"#,
+            r#"{"reason":"Unregistered","timestamp":1454948015990.5}"#,
+        ] {
+            assert_eq!(classify(410, body), Outcome::TokenGone { reason: UNREGISTERED, invalidated_at: None }, "not a timestamp: {body}");
+        }
 
-        // A topic that disagrees with the token looks like a dead device and is
-        // not one — a wrong APNS_TOPIC says this about every device at once, so
-        // pruning on it would empty the registry on a typo.
-        assert_eq!(
-            classify(400, r#"{"reason":"DeviceTokenNotForTopic"}"#),
-            Outcome::Refused { status: 400, reason: "DeviceTokenNotForTopic".to_string() }
-        );
+        // THE TWO THAT READ LIKE A DEAD DEVICE AND ARE NOT. Each is a statement
+        // about this deployment's configuration, so each is true of EVERY device
+        // at once and pruning on it would empty the registry: the topic is one
+        // variable, and so is the environment `BadDeviceToken` is judged against.
+        assert_eq!(classify(400, &format!(r#"{{"reason":"{DEVICE_TOKEN_NOT_FOR_TOPIC}"}}"#)), Outcome::Refused {
+            status: 400,
+            reason: DEVICE_TOKEN_NOT_FOR_TOPIC.to_string()
+        });
+        assert_eq!(classify(400, &format!(r#"{{"reason":"{BAD_DEVICE_TOKEN}"}}"#)), Outcome::Refused {
+            status: 400,
+            reason: BAD_DEVICE_TOKEN.to_string()
+        });
+
         assert_eq!(classify(403, r#"{"reason":"ExpiredProviderToken"}"#), Outcome::Refused {
             status: 403,
-            reason: "ExpiredProviderToken".to_string()
+            reason: EXPIRED_PROVIDER_TOKEN.to_string()
         });
         // The same words under the wrong status are not the refusal they name.
-        assert_eq!(classify(400, r#"{"reason":"Unregistered"}"#), Outcome::Refused { status: 400, reason: "Unregistered".to_string() });
+        assert_eq!(classify(400, r#"{"reason":"Unregistered"}"#), Outcome::Refused { status: 400, reason: UNREGISTERED.to_string() });
 
         // A body that is not Apple's JSON leaves the reason blank rather than
         // losing the status.
         assert_eq!(classify(503, "<html>gateway</html>"), Outcome::Refused { status: 503, reason: String::new() });
         assert_eq!(classify(500, ""), Outcome::Refused { status: 500, reason: String::new() });
+    }
+
+    /// What Apple's three credential refusals do to the token in hand.
+    ///
+    /// Read through `at()` rather than through the private slot: what matters
+    /// is whether the NEXT send presents the same token or a fresh one, which
+    /// is the only thing any caller can observe.
+    #[test]
+    fn apples_refusal_decides_whether_the_provider_token_survives() {
+        let (private, _) = throwaway_key();
+        let tokens = ProviderTokens::new(&config_with(private)).unwrap();
+        let start = 1_700_000_000_000;
+
+        // Apple refusing the token itself: discarded on the spot, well inside
+        // the reuse window that would otherwise hold it for fifty minutes.
+        let first = tokens.at(start).unwrap();
+        tokens.note_refusal(EXPIRED_PROVIDER_TOKEN, start + 1_000);
+        let second = tokens.at(start + 1_000).unwrap();
+        assert_ne!(second, first, "a token Apple has expired must not be presented again");
+
+        tokens.note_refusal(INVALID_PROVIDER_TOKEN, start + 2_000);
+        let third = tokens.at(start + 2_000).unwrap();
+        assert_ne!(third, second, "nor one Apple calls invalid");
+
+        // A refusal about the alert or the device says nothing about the
+        // credential and leaves it alone.
+        for reason in [BAD_DEVICE_TOKEN, DEVICE_TOKEN_NOT_FOR_TOPIC, UNREGISTERED, ""] {
+            tokens.note_refusal(reason, start + 3_000);
+            assert_eq!(tokens.at(start + 3_000).unwrap(), third, "'{reason}' is not about the provider token");
+        }
+
+        // "Minted too recently", heard about a token that IS recent: keeping it
+        // is the whole point — discarding would mint another, be refused for
+        // minting, and loop.
+        tokens.note_refusal(TOO_MANY_PROVIDER_TOKEN_UPDATES, start + PROVIDER_TOKEN_MINT_FLOOR_MS - 1);
+        assert_eq!(
+            tokens.at(start + PROVIDER_TOKEN_MINT_FLOOR_MS - 1).unwrap(),
+            third,
+            "a token younger than Apple's floor is held, however loudly Apple complains"
+        );
+
+        // The same complaint about a token past Apple's floor: a replacement
+        // would now be accepted, so the held one goes.
+        tokens.note_refusal(TOO_MANY_PROVIDER_TOKEN_UPDATES, start + 2_000 + PROVIDER_TOKEN_MINT_FLOOR_MS);
+        let fourth = tokens.at(start + 2_000 + PROVIDER_TOKEN_MINT_FLOOR_MS).unwrap();
+        assert_ne!(fourth, third, "past the floor a replacement is mintable, so the refused token is dropped");
+
+        // And the floor is measured from when OUR token was minted, not from
+        // the last refusal: this one is minted now and held again.
+        tokens.note_refusal(TOO_MANY_PROVIDER_TOKEN_UPDATES, start + 2_000 + PROVIDER_TOKEN_MINT_FLOOR_MS + 1);
+        assert_eq!(tokens.at(start + 2_000 + PROVIDER_TOKEN_MINT_FLOOR_MS + 1).unwrap(), fourth);
     }
 }

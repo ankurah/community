@@ -261,14 +261,52 @@ pub async fn deliver(delivery: &Delivery, announcement: &Announcement) -> Result
             Ok(Outcome::Delivered) => {
                 info!(recipient = %announcement.recipient, device = %device_name, kind = %announcement.kind, "push alert sent");
             }
-            Ok(Outcome::TokenGone { reason }) => {
-                // Apple's report is the one trustworthy word that a device is
-                // gone — which is why `POST /push/register` has no unregister
-                // beside it (see `push::registry`).
-                info!(recipient = %announcement.recipient, device = %device_name, reason, "push: APNs says this device is gone; dropping its registration");
-                if let Err(e) = delivery.tokens.forget(&announcement.recipient, &device.token).await {
-                    warn!(recipient = %announcement.recipient, device = %device_name, "push: could not drop a device APNs rejected: {e:#}");
+            Ok(Outcome::TokenGone { reason, invalidated_at }) => {
+                // Apple's report is the one word about a device that arrives
+                // without the device's cooperation — the backstop behind the
+                // withdrawal a sign-out sends (see `push::registry`).
+                //
+                // BUT IT DESCRIBES A MOMENT, NOT THE PRESENT. Apple says when
+                // the token stopped being valid, and a phone that deleted the
+                // app and reinstalled it has re-registered SINCE: dropping that
+                // row would undo the registration the reinstall just made, and
+                // the member would stop being reachable with the app installed
+                // and nothing to tell them. So a row claimed after the moment
+                // Apple names is kept. A missing or unreadable timestamp leaves
+                // the older behaviour — drop it — because then there is nothing
+                // to compare and Apple's report is all there is.
+                let re_registered_since = invalidated_at.is_some_and(|at| device.last_registered_at >= at);
+                if re_registered_since {
+                    info!(
+                        recipient = %announcement.recipient,
+                        device = %device_name,
+                        reason,
+                        "push: APNs reported this device gone before it registered again; keeping the newer registration"
+                    );
+                } else {
+                    info!(recipient = %announcement.recipient, device = %device_name, reason, "push: APNs says this device is gone; dropping its registration");
+                    if let Err(e) = delivery.tokens.forget(&announcement.recipient, &device.token).await {
+                        warn!(recipient = %announcement.recipient, device = %device_name, "push: could not drop a device APNs rejected: {e:#}");
+                    }
                 }
+            }
+            // A refusal that names the CONFIGURATION rather than the device.
+            // Both of these are true of every device at once when they are true
+            // at all — the topic is one variable and so is the endpoint — so
+            // neither prunes, and an operator gets a line that names what to go
+            // and look at rather than a warning about one phone.
+            Ok(Outcome::Refused { status, reason }) if reason == apns::BAD_DEVICE_TOKEN || reason == apns::DEVICE_TOKEN_NOT_FOR_TOPIC => {
+                error!(
+                    recipient = %announcement.recipient,
+                    device = %device_name,
+                    status,
+                    reason = %reason,
+                    "push: APNs will not accept this device token for this deployment's configuration. \
+                     Nothing is pruned: this answer is what a wrong {topic} or {endpoint} produces for EVERY device, \
+                     and pruning on it would empty the registry and cost every member a reinstall.",
+                    topic = apns::TOPIC_VAR,
+                    endpoint = apns::ENDPOINT_VAR
+                );
             }
             Ok(Outcome::Refused { status, reason }) => {
                 warn!(recipient = %announcement.recipient, device = %device_name, status, reason = %reason, "push: APNs refused this alert");
@@ -617,8 +655,10 @@ mod tests {
         tokens.register(ALICE, TABLET, Platform::Ios, 2).await.unwrap();
 
         let apns = RecordingApns::new();
-        // The app was deleted from the phone; the tablet still has it.
-        apns.answers_for(PHONE, Outcome::TokenGone { reason: "Unregistered" });
+        // The app was deleted from the phone; the tablet still has it. No
+        // timestamp in Apple's answer, so there is nothing to weigh the
+        // registration against and the report stands on its own.
+        apns.answers_for(PHONE, Outcome::TokenGone { reason: apns::UNREGISTERED, invalidated_at: None });
         deliver(&Delivery::new(tokens.clone(), apns.clone()), &a_mention()).await.unwrap();
 
         let remaining = tokens.for_user(ALICE).await.unwrap();
@@ -629,17 +669,56 @@ mod tests {
         // standing: a wrong APNS_TOPIC answers this way about every device at
         // once, and would otherwise empty the registry.
         let apns = RecordingApns::new();
-        apns.answers_for(TABLET, Outcome::Refused { status: 400, reason: "DeviceTokenNotForTopic".to_string() });
+        apns.answers_for(TABLET, Outcome::Refused { status: 400, reason: apns::DEVICE_TOKEN_NOT_FOR_TOPIC.to_string() });
         deliver(&Delivery::new(tokens.clone(), apns.clone()), &a_mention()).await.unwrap();
         assert_eq!(tokens.for_user(ALICE).await.unwrap().len(), 1, "a refusal about the send is not a report about the device");
+
+        // Nor does `BadDeviceToken`, for the same reason: it judges the token
+        // against ONE environment variable, so a deployment pointed at the
+        // wrong APNs host hears it about every device it has.
+        let apns = RecordingApns::new();
+        apns.answers_for(TABLET, Outcome::Refused { status: 400, reason: apns::BAD_DEVICE_TOKEN.to_string() });
+        deliver(&Delivery::new(tokens.clone(), apns.clone()), &a_mention()).await.unwrap();
+        assert_eq!(tokens.for_user(ALICE).await.unwrap().len(), 1, "an environment mismatch must not empty the registry");
 
         // And a second send to a token already dropped is not an error: the
         // registry's `forget` accepts a row that is already gone.
         let apns = RecordingApns::new();
-        apns.answers_for(TABLET, Outcome::TokenGone { reason: "BadDeviceToken" });
+        apns.answers_for(TABLET, Outcome::TokenGone { reason: apns::UNREGISTERED, invalidated_at: None });
         deliver(&Delivery::new(tokens.clone(), apns.clone()), &a_mention()).await.unwrap();
         deliver(&Delivery::new(tokens.clone(), apns.clone()), &a_mention()).await.unwrap();
         assert!(tokens.for_user(ALICE).await.unwrap().is_empty());
+    }
+
+    /// A device that deleted the app and reinstalled it: Apple goes on
+    /// reporting the OLD token gone for a while, and the report names the
+    /// moment that became true. A row claimed since is the reinstall's, and
+    /// dropping it would take away the registration that just arrived.
+    #[tokio::test]
+    async fn a_device_that_registered_after_apns_invalidated_it_keeps_its_row() {
+        let invalidated_at = 1_700_000_000_000;
+        let tokens = MemoryDeviceTokens::new();
+        // The phone re-registered a second after Apple's invalidation; the
+        // tablet has not been claimed since a second before it.
+        tokens.register(ALICE, PHONE, Platform::Ios, invalidated_at + 1_000).await.unwrap();
+        tokens.register(ALICE, TABLET, Platform::Ios, invalidated_at - 1_000).await.unwrap();
+
+        let apns = RecordingApns::new();
+        for device in [PHONE, TABLET] {
+            apns.answers_for(device, Outcome::TokenGone { reason: apns::UNREGISTERED, invalidated_at: Some(invalidated_at) });
+        }
+        deliver(&Delivery::new(tokens.clone(), apns.clone()), &a_mention()).await.unwrap();
+
+        let remaining = tokens.for_user(ALICE).await.unwrap();
+        assert_eq!(remaining.len(), 1, "only the row older than the invalidation is dropped");
+        assert_eq!(remaining[0].token, PHONE, "the reinstall's registration survives the report it predates");
+
+        // The exact boundary is kept, not dropped: a row claimed in the same
+        // millisecond Apple names is not older than the report.
+        let tokens = MemoryDeviceTokens::new();
+        tokens.register(ALICE, PHONE, Platform::Ios, invalidated_at).await.unwrap();
+        deliver(&Delivery::new(tokens.clone(), apns.clone()), &a_mention()).await.unwrap();
+        assert_eq!(tokens.for_user(ALICE).await.unwrap().len(), 1, "same instant is not older");
     }
 
     #[test]
