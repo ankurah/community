@@ -171,13 +171,16 @@ everybody's message but your own — reporting yourself gives a moderator nothin
 to act on — and a guest pressing it meets the sign-in ceremony first, which is
 how that menu already treats everything that writes.
 
-**No link to the reported message**, mirroring the log's own restraint above.
-The row carries the `message` ref for moderator tooling and the queue renders
-none of it. This is the one place the queue is currently thinner than a
-moderator wants: acting on a report means going to the named room and looking.
-Rendering the reported text inline in the moderator-only view would fix that
-without widening anything a member can read (the message read scope already
-decides that on its own), and is the obvious follow-up.
+**The reported message is printed in the row.** This retracts the queue's
+earlier restraint, which was borrowed from the log above; the log keeps its own,
+and for a reason that does not carry over — **readership**. Every signed-in
+member reads the log, so a message named there is named to the whole community,
+while `report`'s read scope is a comparison no row satisfies for anybody but a
+moderator. Nothing about the message read scope changes: a ref the moderator's
+own session will not resolve renders as unreadable rather than as content, and a
+message removed between the filing and the reading says so rather than showing
+an empty line. There is still no deep link and no id on screen — what a moderator
+needs is the words, and the room to go to is already named on the row.
 
 **Resolving writes no `ModAction` row**, deliberately and against the
 surrounding idiom — ban, unban and message removal each write one. Two reasons.

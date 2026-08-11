@@ -31,3 +31,27 @@
   font-size: var(--fs-xs);
   color: var(--ok);
 }
+
+/* The reported message, printed under the line that says who reported it.
+   Quoted rather than styled as a bubble: the moderator is reading a record of
+   what was said, not the room. Sits above the reporter's own words so the two
+   read in the order they happened. */
+
+.reportMessage {
+  padding: var(--sp-1) 0 var(--sp-1) var(--sp-3);
+  margin: var(--sp-1) 0;
+  border-left: 2px solid var(--border-strong);
+}
+
+.reportMessageText {
+  font-size: var(--fs-md);
+  color: var(--text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.reportMessageGone {
+  font-size: var(--fs-md);
+  font-style: italic;
+  color: var(--text-3);
+}

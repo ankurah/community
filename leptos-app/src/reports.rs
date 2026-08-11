@@ -21,11 +21,19 @@
 //! moderator gate, and nothing in it widens the message read scope, which goes
 //! on being the only thing deciding whose messages a member may read.
 //!
-//! NO DEEP LINK TO THE REPORTED MESSAGE, mirroring the moderation log's own
-//! restraint (`mod_log_panel`, module doc): an earlier revision of that panel
-//! rendered a message id and planned deep-linking, and the ruling retracted it.
-//! A report row carries the message ref for moderator tooling, exactly as a
-//! `ModAction` row does, and this queue renders none of it.
+//! THE REPORTED MESSAGE IS PRINTED IN THE ROW, and this queue is the only place
+//! it is. A moderator has to read the thing being complained about, and a queue
+//! that names a room and leaves them to go find it by hand is a queue that goes
+//! unread. This RETRACTS the restraint the queue first borrowed from the
+//! moderation log; the log keeps its own, and for a reason that does not carry
+//! over — READERSHIP. Every signed-in member reads the log, so a message named
+//! there is named to the whole community, while `report`'s read scope is a
+//! comparison no row satisfies for anybody but a moderator. Nothing here widens
+//! the `message` read scope either: a ref this moderator's session cannot
+//! resolve renders as unreadable rather than as content.
+//!
+//! There is still NO DEEP LINK — no jump, no id on screen. What a moderator
+//! needs is the words, and the room to go to is already named.
 
 use std::collections::HashMap;
 
@@ -34,6 +42,7 @@ use web_sys::window;
 
 use ankurah::EntityId;
 use ankurah_signals::Get as AnkurahGet;
+use community_model::mention_display::MemberDirectory;
 use community_model::{MessageView, Report, ReportView};
 
 use crate::{ctx, fmt};
@@ -198,11 +207,8 @@ pub fn ReportsView(names_by_user: Memo<HashMap<String, String>>) -> impl IntoVie
     .into_any()
 }
 
-/// One queue row: where it happened, who raised it, what they said, when — and
-/// Resolve while it is still open.
-///
-/// The reported message is named by the row's `message` ref and rendered
-/// nowhere, mirroring the moderation log (see the module doc).
+/// One queue row: where it happened, who raised it, the message itself, what
+/// the reporter said about it, when — and Resolve while it is still open.
 #[component]
 fn ReportRow(
     report: ReportView,
@@ -229,6 +235,11 @@ fn ReportRow(
             map.get(id).filter(|n| !n.trim().is_empty()).map(|n| format!("#{n}")).unwrap_or_else(|| "a room".to_string())
         }),
     };
+
+    // The message being complained about. `re` is set at filing and never
+    // changes, so the ref is read once here; what it points AT is read live
+    // below, which is how a message removed since the report was filed says so.
+    let reported = report.message().ok().map(|r| r.id());
 
     let ts = report.created_at().unwrap_or(0);
     let when = format!("{} · {}", fmt::day_label(ts), fmt::clock_time(ts));
@@ -263,6 +274,7 @@ fn ReportRow(
                     " "
                     <span class="modLogActor">{room_name}</span>
                 </div>
+                {reported.map(|target| view! { <ReportedMessage target names_by_user /> })}
                 {reason.map(|r| view! { <div class="modLogReason">{format!("“{}”", r)}</div> })}
                 <div class="modLogWhen" title=when_title>{when}</div>
                 {move || closed_by().map(|who| view! { <div class="reportResolvedBy">{format!("Resolved by {who}")}</div> })}
@@ -277,6 +289,65 @@ fn ReportRow(
                     }
                 }
             </Show>
+        </div>
+    }
+}
+
+/// The reported message, in the moderator's own queue row.
+///
+/// FOR: acting on a report means judging what was said, and a moderator who has
+/// to go to the named room and hunt for it will mostly not. Moderator-only, like
+/// every other part of this tab — the `report` read scope is what keeps the
+/// queue off everybody else's screen, and printing the text here widens nothing:
+/// the `message` read scope decides on its own what this session may resolve.
+///
+/// FOUR STATES, each saying only what it knows. Resolving, which is usually one
+/// local read. REMOVED SINCE — said plainly rather than shown as an empty line,
+/// because a moderator about to remove a message needs to know somebody already
+/// did. Unreadable, which is a ref this session's read scope will not resolve
+/// and not a fault. And the words themselves, mentions read as names off the
+/// panel's own roster.
+#[component]
+fn ReportedMessage(target: EntityId, names_by_user: Memo<HashMap<String, String>>) -> impl IntoView {
+    let found = RwSignal::new(None::<MessageView>);
+    let unreadable = RwSignal::new(false);
+    {
+        // Resolved here, in the body: the future's first poll is a microtask,
+        // by which time nothing reactive is reachable.
+        let context = ctx();
+        let target = target.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            match context.get::<MessageView>(target.clone()).await {
+                // try_set: the panel may have closed before the read landed.
+                Ok(message) => {
+                    let _ = found.try_set(Some(message));
+                }
+                Err(e) => {
+                    tracing::warn!("the reported message {} could not be read: {}", target.to_base64(), e);
+                    let _ = unreadable.try_set(true);
+                }
+            }
+        });
+    }
+
+    view! {
+        <div class="reportMessage">
+            {move || match (found.get(), unreadable.get()) {
+                (Some(message), _) if message.deleted().unwrap_or(false) => {
+                    view! { <span class="reportMessageGone">"Removed since it was reported."</span> }.into_any()
+                }
+                (Some(message), _) => {
+                    let text = names_by_user.with(|names| {
+                        MemberDirectory::new(names.iter().map(|(id, name)| (id.clone(), name.clone())))
+                            .decode(&message.text().unwrap_or_default())
+                    });
+                    view! { <span class="reportMessageText">{text}</span> }.into_any()
+                }
+                (None, true) => {
+                    view! { <span class="reportMessageGone">"This message cannot be read from here."</span> }.into_any()
+                }
+                (None, false) => view! { <span class="reportMessageGone">"\u{2026}"</span> }.into_any(),
+            }}
         </div>
     }
 }
