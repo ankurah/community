@@ -12,7 +12,8 @@
   "type": "commonjs",
   "dependencies": {
     "@capacitor/core": "^8.5.0",
-    "@capacitor/ios": "^8.5.0"
+    "@capacitor/ios": "^8.5.0",
+    "@capacitor/push-notifications": "^8.1.2"
   },
   "devDependencies": {
     "@capacitor/cli": "^8.5.0",

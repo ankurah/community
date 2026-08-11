@@ -33,6 +33,25 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         // Called when the application is about to terminate. Save data if appropriate. See also applicationDidEnterBackground:.
     }
 
+    /// APNs minted a device token for this install.
+    ///
+    /// FOR: iOS delivers this to the app delegate and nowhere else, while the
+    /// thing that needs it — `PushNotificationsPlugin`, which turns it into the
+    /// page's `registration` event — is a plugin with no delegate of its own.
+    /// It listens on `NotificationCenter` for exactly this name, so these two
+    /// methods are the hand-off, and without them the page's `register()` call
+    /// resolves and then nothing ever arrives.
+    func application(_ application: UIApplication, didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
+        NotificationCenter.default.post(name: .capacitorDidRegisterForRemoteNotifications, object: deviceToken)
+    }
+
+    /// And the refusal, on the same route: no entitlement, no network, or APNs
+    /// declining. The page hears it as `registrationError` and stops there —
+    /// there is no token to file and nothing to retry until the next launch.
+    func application(_ application: UIApplication, didFailToRegisterForRemoteNotificationsWithError error: Error) {
+        NotificationCenter.default.post(name: .capacitorDidFailToRegisterForRemoteNotifications, object: error)
+    }
+
     func application(_ application: UIApplication,
                      configurationForConnecting connectingSceneSession: UISceneSession,
                      options: UIScene.ConnectionOptions) -> UISceneConfiguration {
