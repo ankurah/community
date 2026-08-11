@@ -7,3 +7,11 @@
 # selects the backend from the feature alone.
 [build]
 rustflags = ["--cfg", "getrandom_backend=\"wasm_js\""]
+
+# What runs this crate's test binary. It is a wasm module, so nothing on the
+# host can execute it directly: wasm-bindgen-test-runner loads it into node and
+# reports back. Installed with `cargo install wasm-bindgen-cli --version 0.2.105`
+# — it refuses a module built against any other wasm-bindgen schema, and
+# Cargo.toml pins that version for exactly this reason.
+[target.wasm32-unknown-unknown]
+runner = "wasm-bindgen-test-runner"

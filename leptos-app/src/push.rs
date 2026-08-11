@@ -255,3 +255,104 @@ async fn post_registration(url: &str, session_token: &str, body: &str) -> Result
     let response: Response = answer.dyn_into().map_err(|_| "fetch did not return a Response".to_string())?;
     Ok(response.status())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use wasm_bindgen_test::wasm_bindgen_test;
+
+    const GENERAL: &str = "RZk3jW0RvkW8pTGnQxYzRQ";
+    const BOB: &str = "BZk3jW0RvkW8pTGnQxYzRQ";
+    const NOTIFICATION: &str = "NZk3jW0RvkW8pTGnQxYzRQ";
+    const MESSAGE: &str = "MZk3jW0RvkW8pTGnQxYzRQ";
+
+    /// One tapped alert, as the plugin hands it over: the whole APNs document
+    /// under `notification.data`, with the app's own facts beside Apple's
+    /// `aps`.
+    fn tap(target: Value) -> Value {
+        json!({
+            "actionId": "tap",
+            "notification": {
+                "id": "1",
+                "title": "#general",
+                "body": "Bob mentioned you",
+                "data": { "aps": { "alert": { "title": "#general", "body": "Bob mentioned you" } }, TARGET_KEY: target },
+            },
+        })
+    }
+
+    #[wasm_bindgen_test]
+    fn a_mention_leads_to_the_room_it_names() {
+        let event = tap(json!({ "kind": "mention", "notification": NOTIFICATION, "room": GENERAL, "message": MESSAGE, "actor": BOB }));
+        assert_eq!(route_for_tap(&event), Some(Route::Room(EntityId::from_base64(GENERAL).unwrap())));
+
+        // A kind this client predates still leads somewhere: what makes a room
+        // route is the room, not the word for what happened in it.
+        let later = tap(json!({ "kind": "reaction", "notification": NOTIFICATION, "room": GENERAL }));
+        assert_eq!(route_for_tap(&later), Some(Route::Room(EntityId::from_base64(GENERAL).unwrap())));
+    }
+
+    #[wasm_bindgen_test]
+    fn a_direct_message_leads_to_whoever_sent_it() {
+        // A DM happens in no room, so the server sends neither `room` nor
+        // `message` — the sender in `actor` is the whole of the target.
+        let event = tap(json!({ "kind": DM_KIND, "notification": NOTIFICATION, "actor": BOB }));
+        assert_eq!(route_for_tap(&event), Some(Route::Conversation(EntityId::from_base64(BOB).unwrap())));
+
+        // And the kind decides, not the shape: a `dm` that somehow carried a
+        // room still opens the conversation, which is what the inbox row does
+        // with the same row.
+        let odd = tap(json!({ "kind": DM_KIND, "notification": NOTIFICATION, "room": GENERAL, "actor": BOB }));
+        assert_eq!(route_for_tap(&odd), Some(Route::Conversation(EntityId::from_base64(BOB).unwrap())));
+    }
+
+    #[wasm_bindgen_test]
+    fn an_alert_naming_nowhere_leads_nowhere() {
+        for event in [
+            // A kind that named neither a room nor anyone.
+            tap(json!({ "kind": "reaction", "notification": NOTIFICATION })),
+            // A DM with no sender on it.
+            tap(json!({ "kind": DM_KIND, "notification": NOTIFICATION })),
+            // Ids that are not ids, of either sort.
+            tap(json!({ "kind": "mention", "room": "not an entity id" })),
+            tap(json!({ "kind": DM_KIND, "actor": "" })),
+            // Right names, wrong types.
+            tap(json!({ "kind": "mention", "room": 7 })),
+            // The app's own member missing, empty, or not an object.
+            tap(json!({})),
+            json!({ "actionId": "tap", "notification": { "data": {} } }),
+            json!({ "actionId": "tap", "notification": {} }),
+            json!({ "actionId": "tap" }),
+            json!({}),
+            json!("not an event at all"),
+        ] {
+            assert_eq!(route_for_tap(&event), None, "led somewhere: {event}");
+        }
+
+        // `kind` is read but never required — it is consulted for one word and
+        // one word only. An alert with no kind at all, or one whose kind is not
+        // even a word, is still a room when it names a room.
+        let general = Some(Route::Room(EntityId::from_base64(GENERAL).unwrap()));
+        assert_eq!(route_for_tap(&tap(json!({ "room": GENERAL }))), general);
+        assert_eq!(route_for_tap(&tap(json!({ "kind": 7, "room": GENERAL, "actor": BOB }))), general);
+    }
+
+    #[wasm_bindgen_test]
+    fn a_registration_says_the_token_and_the_service_and_nothing_else() {
+        // The token goes over verbatim: iOS writes it in upper-case hex, and
+        // the registry checks the alphabet case-insensitively — so re-casing it
+        // here would only risk filing one phone under two rows.
+        let token = "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF";
+        let body: Value = serde_json::from_str(&registration_body(token)).unwrap();
+        assert_eq!(body, json!({ "token": token, "platform": "ios" }));
+    }
+
+    #[wasm_bindgen_test]
+    fn a_device_is_named_in_a_log_by_its_first_characters_only() {
+        let token = "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF";
+        let named = token_prefix(token);
+        assert_eq!(named, "01234567");
+        assert!(token.starts_with(&named) && named.len() < token.len(), "a log line must never carry the whole token");
+    }
+}
