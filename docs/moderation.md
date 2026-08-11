@@ -190,6 +190,15 @@ member sidebar and the profile card. No collection, no server involvement, no
 policy: blocked members' rows still sync, and hiding is the renderer's job
 through the exported `is_blocked(user_id)`.
 
+**What a blocked member's row looks like.** The chat components ask community
+per row (their `message_veil` hook) and put community's answer where the message
+body would have gone: "Blocked member", and a Show that prints the stored text
+once — mentions read as names, no markdown, and none of the chrome. A veiled row
+has no actions menu at all, by not being built with one: no press-and-hold, no
+"⋯", no right-click, and no reaction chips under it. Unblocking lives on the
+member panels, where the copy can say what it means, and it brings every veiled
+row back the moment it happens.
+
 Per device is the v1 ruling, not an oversight — a synced list would be a
 collection naming who avoids whom, and however its policy were written it would
 be one rule away from being readable by the person blocked. The control says so

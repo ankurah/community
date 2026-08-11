@@ -19,15 +19,18 @@
 //! WHAT IT HIDES, AND WHERE. Nothing here touches a query or a policy: blocked
 //! members' rows still sync, and the server neither knows nor cares. Hiding is
 //! the renderer's job, through [`is_blocked`] — which the community surfaces
-//! read directly and which the chat components will read through their hooks in
-//! the integration pass. Reading it inside a reactive context re-renders when
-//! the list changes, so blocking somebody clears them from the screen without a
-//! reload.
+//! read directly and which the chat components read through `chat_hooks`'
+//! message veil. Reading it inside a reactive context re-renders when the list
+//! changes, so blocking somebody clears them from the screen without a reload,
+//! and unblocking brings them back the same way.
 
 use std::collections::BTreeSet;
 use std::sync::OnceLock;
 
 use ankurah::EntityId;
+use ankurah_signals::Get as AnkurahGet;
+use community_model::mention_display::MemberDirectory;
+use community_model::MessageView;
 use leptos::prelude::*;
 use web_sys::window;
 
@@ -39,9 +42,9 @@ const LS_BLOCKED_USERS: &str = "community_blocked_users";
 /// Whether this device has blocked `user`, reactively: a caller inside a
 /// reactive context re-runs when the list changes.
 ///
-/// This is the seam the chat components consume in the integration pass — a
-/// message row hides a blocked author's bubble by asking this, and the row
-/// re-renders on unblock because it asked reactively.
+/// This is the seam the chat components consume — a message row asks this
+/// through the veil hook `chat_hooks` installs, and the row re-renders on
+/// unblock because it asked reactively.
 pub fn is_blocked(user: EntityId) -> bool { blocked().list.with(|ids| ids.contains(&user.to_base64())) }
 
 /// Block `user` on this device (no-op if already blocked).
@@ -106,6 +109,53 @@ fn load() -> BTreeSet<String> {
 }
 
 fn local_storage() -> Option<web_sys::Storage> { window()?.local_storage().ok().flatten() }
+
+/// What a blocked member's message row shows instead of what they said.
+///
+/// FOR: blocking is a decision about a person, and a reader who has made it
+/// still runs into the occasional line they need — the one somebody else is
+/// answering, the one that names them. Unblocking to read it would let the
+/// whole room back in, so this offers the one row and leaves the block exactly
+/// where it is. Nothing here undoes a block: that lives on the member panels,
+/// where the copy can say what it means.
+///
+/// THE LOOK IS THIS ROW'S AND THIS VISIT'S — an ordinary signal, written
+/// nowhere and gone when the row is rebuilt, which is what blocking or
+/// unblocking anybody does to every row that asked [`is_blocked`]. And it is a
+/// LOOK rather than the message handed back: the stored text with mentions read
+/// as names, without markdown, without the reply preview, and without the
+/// reaction chips and actions menu the chat components hold back from a veiled
+/// row.
+#[component]
+pub fn BlockedVeil(message: MessageView) -> impl IntoView {
+    let revealed = RwSignal::new(false);
+    // Names rather than tokens, for the reason a bubble resolves them too: a
+    // `<@id>` names nobody to a reader. The directory is the chat handshake's
+    // members query — the roster every other surface names people from — and a
+    // session that cannot list it leaves the tokens as they stand.
+    let chat = ankurah_chat_leptos::chat();
+    let text = move || {
+        let stored = message.text().unwrap_or_default();
+        match chat.members() {
+            Some(members) => {
+                MemberDirectory::new(members.get().iter().map(|u| (u.id().to_base64(), u.display_name().unwrap_or_default())))
+                    .decode(&stored)
+            }
+            None => stored,
+        }
+    };
+    view! {
+        <div class="blockedVeil">
+            <div class="blockedVeilLine">
+                <span class="blockedVeilLabel">"Blocked member"</span>
+                <button class="blockedVeilToggle" on:click=move |_| revealed.update(|open| *open = !*open)>
+                    {move || if revealed.get() { "Hide" } else { "Show" }}
+                </button>
+            </div>
+            {move || revealed.get().then(|| view! { <div class="blockedVeilText">{text()}</div> })}
+        </div>
+    }
+}
 
 /// Block / unblock for one member, with the copy that says what it does.
 ///

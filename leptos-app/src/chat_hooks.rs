@@ -7,6 +7,8 @@
 //!
 //! - under a bubble, the unfurl card for the first link that unfurled;
 //! - inside a tombstone, who removed the message;
+//! - in place of a blocked member's message, the veil that says so and offers
+//!   the reader one look;
 //! - in front of the composer's send, the guidelines gate;
 //! - behind the actions menu's moderator Delete, the removal itself, with its
 //!   optional public reason and the log row that records it;
@@ -29,6 +31,7 @@ use ankurah_chat_leptos::ChatHooks;
 use ankurah_signals::Get as AnkurahGet;
 use community_model::{LinkPreviewView, MessageView, ModAction, ModActionView};
 
+use crate::blocklist::BlockedVeil;
 use crate::link_preview::LinkPreviewCard;
 use crate::panels::{panels, Surface};
 
@@ -52,9 +55,7 @@ pub fn chat_hooks(previews: Memo<HashMap<String, LinkPreviewView>>, profile: Pro
             view! { <LinkPreviewCard message=message previews=previews /> }.into_any()
         })),
         tombstone_body: Some(Box::new(|message: MessageView| view! { <TombstoneNotice message=message /> }.into_any())),
-        // The components ask about every row and community has nothing to say
-        // about most of them yet; the block list answers this next.
-        message_veil: None,
+        message_veil: Some(Box::new(blocked_veil)),
         moderator_delete: Some(Box::new(moderator_delete)),
         // The guidelines, in front of the composer's send exactly as they stand
         // in front of every other write leptos-app owns. `demand_terms_boxed`
@@ -66,6 +67,18 @@ pub fn chat_hooks(previews: Memo<HashMap<String, LinkPreviewView>>, profile: Pro
         member_detail: signed_in.then(|| Box::new(|user: EntityId| panels().open(Surface::UserDetail(user))) as Box<dyn Fn(EntityId)>),
         menu_actions: Some(Box::new(inspect_entry)),
     }
+}
+
+/// A blocked member's row, veiled.
+///
+/// Reads [`crate::blocklist::is_blocked`] and nothing else, which is what makes
+/// the row follow the list: the components ask this inside a reactive pass, so
+/// blocking somebody veils their rows and unblocking brings them straight back.
+/// A message whose author cannot be resolved is left alone — a row nobody can
+/// name is a row no block list can match.
+fn blocked_veil(message: MessageView) -> Option<AnyView> {
+    let author = message.user().ok()?.id();
+    crate::blocklist::is_blocked(author).then(|| view! { <BlockedVeil message=message /> }.into_any())
 }
 
 /// X-ray's "Inspect" entry, offered only while the mode is on.
