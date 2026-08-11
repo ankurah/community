@@ -21,6 +21,7 @@ use web_sys::window;
 
 mod auth;
 mod ban_lock;
+mod blocklist;
 mod chat_hooks;
 mod editable_text_field;
 mod header;
@@ -33,10 +34,12 @@ mod panels;
 mod profile_popover;
 mod push;
 mod qr_code_modal;
+mod reports;
 mod room_topic;
 mod shell;
 mod sidebar;
 mod sign_in_ceremony;
+mod terms;
 mod user_detail_panel;
 mod xray;
 
@@ -503,6 +506,14 @@ pub fn SignIn() -> impl IntoView {
                     </svg>
                 </button>
                 <p class="signInFootnote">"Authentication by idp.to — local-first chat, built in Rust + wasm."</p>
+                // Where to reach a human. This card is the app's only surface
+                // that is not a chat surface, so it is where the contact line
+                // lives until there is an about page to put it on; the terms
+                // modal renders the same address from the same constant.
+                <p class="signInFootnote">
+                    "Questions or problems: "
+                    <a href=format!("mailto:{}", crate::terms::SUPPORT_CONTACT)>{crate::terms::SUPPORT_CONTACT}</a>
+                </p>
             </div>
             {flow.view()}
         </div>
@@ -758,6 +769,11 @@ pub fn ChatApp() -> impl IntoView {
                 }
             }
         </div>
+        // The guidelines gate, mounted once and last: every community-owned
+        // write entry point raises it through `terms::demand_terms`, and it has
+        // to be able to cover an open panel, since two of those entry points
+        // (report, ban) are inside one.
+        <terms::TermsGate />
     }
 }
 

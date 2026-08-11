@@ -132,6 +132,13 @@ fn TombstoneNotice(message: MessageView) -> impl IntoView {
 /// public `ModAction` is what makes the tombstone read "by a moderator", so a
 /// removal that landed without one would attribute itself to the author.
 fn moderator_delete(message: MessageView, close: Box<dyn Fn()>) {
+    crate::terms::demand_terms(move || moderator_delete_confirmed(message, close));
+}
+
+/// The removal itself, once the guidelines gate has let it through. Split so
+/// the prompt still opens inside the moderator's own click (see the same split
+/// on `ban_member`).
+fn moderator_delete_confirmed(message: MessageView, close: Box<dyn Fn()>) {
     let reason = match window().map(|w| w.prompt_with_message("Reason for removal (optional):")) {
         Some(Ok(None)) => {
             close();
