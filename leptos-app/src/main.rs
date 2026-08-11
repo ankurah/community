@@ -21,6 +21,7 @@ use web_sys::window;
 
 mod auth;
 mod ban_lock;
+mod blocklist;
 mod chat_hooks;
 mod editable_text_field;
 mod header;

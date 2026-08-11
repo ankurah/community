@@ -113,6 +113,7 @@ pub fn ProfilePopover(
         if n.trim().is_empty() { "Unknown".to_string() } else { n }
     };
     let name_for_initials = name.clone();
+    let name_for_block = name.clone();
     let aria_label = format!("Profile: {}", name());
 
     // Role badges from the server-written `userroles` cache, scoped to this
@@ -191,6 +192,15 @@ pub fn ProfilePopover(
                         }
                     })
             }}
+            // Blocking from the card the reader opened off the message that
+            // prompted it — the shortest path there is between "I do not want
+            // to read this person" and it being so. Same control as the member
+            // sidebar's, in its compact form.
+            <crate::blocklist::BlockControl
+                user_id=user.id()
+                name=Signal::derive(name_for_block)
+                compact=true
+            />
         </div>
     }
 }

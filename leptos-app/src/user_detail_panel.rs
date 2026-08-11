@@ -284,6 +284,12 @@ pub fn UserDetailPanel(
                     }
                 }
 
+                // Blocking, which is every reader's affordance over their own
+                // screen rather than a moderator's over the community — so it
+                // sits above the moderation block and carries no role gate.
+                // The component withholds itself for the viewer's own row.
+                <crate::blocklist::BlockControl user_id name=Signal::derive(name.clone()) />
+
                 {show_mod_actions
                     .then(|| {
                         let user_id_b64 = user_id_b64.clone();
