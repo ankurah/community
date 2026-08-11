@@ -1,33 +1,69 @@
 # Build the iOS shell and upload it to TestFlight.
 #
-# Dispatch-only: releases are a deliberate act, and the signing material in
-# repo secrets must never be reachable from fork-triggered events. Promotion
-# from TestFlight to App Store review is a human action in App Store Connect.
+# Dispatch-only: a release is a deliberate act, and the signing material in repo
+# secrets must never be reachable from a fork-triggered event. Promotion from
+# TestFlight to App Store review stays a human action in App Store Connect.
 #
-# Needs (see ~/ak/community-artifacts/mobile-appstore-setup-for-daniel.md —
-# all created and entered by Daniel):
-#   secrets: ASC_API_KEY_P8, ASC_API_KEY_ID, ASC_API_ISSUER_ID,
-#            IOS_DIST_CERT_P12_BASE64, IOS_DIST_CERT_PASSWORD,
-#            IOS_PROVISIONING_PROFILE_BASE64
-#   variables: APPLE_TEAM_ID
+# SIGNING (adopted from synestheticsystems/anku's proven testflight.yml):
+# an App Manager ASC API key cannot mint a distribution cert headless, but it
+# CAN create/delete provisioning PROFILES. So the cert arrives as a secret
+# (ASC_DIST_P12) and the profile is get-or-created at build time from the App ID
+# (tools/ci/asc-profile.mjs). The archive is UNSIGNED; signing happens at
+# export. Because the profile is minted from the App ID's current capabilities,
+# it carries Push Notifications automatically — there is no hand-made profile to
+# create in the portal or to regenerate when it expires.
+#
+# Secrets (see ~/ak/community-artifacts/mobile-appstore-setup-for-daniel.md):
+#   ASC_KEY_ID             — App Store Connect API key id (App Manager role)
+#   ASC_ISSUER_ID          — ASC API issuer id
+#   ASC_KEY_P8             — base64 of the .p8 private key
+#   ASC_DIST_P12           — base64 of the "Apple Distribution: Synesthetic
+#                            Systems LLC" cert + private key (nothing else)
+#   ASC_DIST_P12_PASSWORD  — the p12 passphrase
+# The Team ID (N893VNX4ZP) is not secret and is inlined below.
 name: iOS Release
 
 on:
   workflow_dispatch:
 
-# Nothing here writes to the repository: the job builds, signs and hands the
+# Nothing here writes to the repository: the job builds, signs, and hands the
 # archive to App Store Connect, which it authenticates to with its own API key.
-# Stated rather than inherited, because the default for a workflow that names no
-# permissions is whatever the repository's default is — and a token wider than
-# the job needs is a token every action in the job could use.
 permissions:
   contents: read
 
+# Never let two archive/upload runs race on a TestFlight build number.
+concurrency:
+  group: community-ios-release
+  cancel-in-progress: false
+
 jobs:
   testflight:
+    name: Archive & upload to TestFlight
     runs-on: macos-26
+    timeout-minutes: 60
+    env:
+      DEVELOPMENT_TEAM: N893VNX4ZP
+      BUNDLE_ID: org.ankurah.community
+      PROFILE_NAME: community-appstore
     steps:
       - uses: actions/checkout@v4
+
+      - name: Compute build number
+        env:
+          RUN_NUMBER: ${{ github.run_number }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          # +100 keeps CI build numbers clear of any hand-uploaded shakedown
+          # builds; the run_attempt suffix keeps a re-run from colliding at ASC,
+          # which rejects a duplicate (marketing-version, build) pair.
+          if [ "${RUN_ATTEMPT}" = "1" ]; then
+            BUILD_NUMBER="$((RUN_NUMBER + 100))"
+          else
+            BUILD_NUMBER="$((RUN_NUMBER + 100)).${RUN_ATTEMPT}"
+          fi
+          echo "BUILD_NUMBER=${BUILD_NUMBER}" >> "$GITHUB_ENV"
+          echo "Build number: ${BUILD_NUMBER}"
 
       - name: Rust toolchain (wasm)
         run: rustup target add wasm32-unknown-unknown
@@ -55,79 +91,132 @@ jobs:
           rm -rf www && cp -R ../leptos-app/dist www
           npx cap sync ios
 
-      - name: Import signing material
-        # A throwaway keychain holds the distribution certificate for this
-        # job only; the provisioning profile goes where xcodebuild looks.
+      - name: Reconstruct the App Store Connect API key
         env:
-          P12_BASE64: ${{ secrets.IOS_DIST_CERT_P12_BASE64 }}
-          P12_PASSWORD: ${{ secrets.IOS_DIST_CERT_PASSWORD }}
-          PROFILE_BASE64: ${{ secrets.IOS_PROVISIONING_PROFILE_BASE64 }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
         run: |
-          KEYCHAIN=$RUNNER_TEMP/build.keychain-db
-          KEYCHAIN_PASSWORD=$(uuidgen)
-          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
-          security set-keychain-settings -lut 21600 "$KEYCHAIN"
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
-          echo "$P12_BASE64" | base64 --decode > $RUNNER_TEMP/dist.p12
-          # -A trusts every application on this runner with the key, which
-          # is what a throwaway keychain in a single-job VM can afford. -T
-          # names codesign explicitly alongside it: the partition list set
-          # below is what actually decides, and an entry for the one tool that
-          # must reach the key is what keeps this working if -A is ever
-          # narrowed.
-          security import $RUNNER_TEMP/dist.p12 -k "$KEYCHAIN" \
-            -P "$P12_PASSWORD" -A -T /usr/bin/codesign -t cert -f pkcs12
-          security set-key-partition-list -S apple-tool:,apple: \
-            -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" > /dev/null
-          security list-keychains -d user -s "$KEYCHAIN" login.keychain-db
-          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
-          echo "$PROFILE_BASE64" | base64 --decode \
-            > "$HOME/Library/MobileDevice/Provisioning Profiles/community.mobileprovision"
+          set -euo pipefail
+          umask 077
+          KEYDIR="$HOME/.appstoreconnect/private_keys"
+          mkdir -p "$KEYDIR"
+          KEYFILE="$KEYDIR/AuthKey_${ASC_KEY_ID}.p8"
+          # Decode straight to the 0600 file; the key never lands in an env echo.
+          printf '%s' "$ASC_KEY_P8" | base64 --decode > "$KEYFILE"
+          chmod 600 "$KEYFILE"
+          test -s "$KEYFILE" || { echo "::error::Decoded ASC key is empty — check ASC_KEY_P8."; exit 1; }
+          echo "ASC_KEY_FILE=$KEYFILE" >> "$GITHUB_ENV"
 
-      - name: Archive
+      - name: Import the distribution cert into a temp keychain
         env:
-          TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+          ASC_DIST_P12: ${{ secrets.ASC_DIST_P12 }}
+          ASC_DIST_P12_PASSWORD: ${{ secrets.ASC_DIST_P12_PASSWORD }}
         run: |
+          set -euo pipefail
+          test -n "$ASC_DIST_P12" || { echo "::error::ASC_DIST_P12 is unset — export the p12 per the setup doc."; exit 1; }
+          KEYCHAIN="$RUNNER_TEMP/build.keychain-db"
+          KPW="$(openssl rand -base64 24)"
+          security create-keychain -p "$KPW" "$KEYCHAIN"
+          security set-keychain-settings -lut 3600 "$KEYCHAIN"
+          security unlock-keychain -p "$KPW" "$KEYCHAIN"
+          printf '%s' "$ASC_DIST_P12" | base64 --decode > "$RUNNER_TEMP/dist.p12"
+          security import "$RUNNER_TEMP/dist.p12" -k "$KEYCHAIN" -P "$ASC_DIST_P12_PASSWORD" \
+            -T /usr/bin/codesign -T /usr/bin/xcodebuild
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KPW" "$KEYCHAIN" >/dev/null
+          security list-keychains -d user -s "$KEYCHAIN" login.keychain-db
+          rm -f "$RUNNER_TEMP/dist.p12"
+          # Fail here, not at export, if the identity did not import.
+          security find-identity -v -p codesigning "$KEYCHAIN" | grep -q "Apple Distribution" \
+            || { echo "::error::Imported p12 does not yield an Apple Distribution identity."; exit 1; }
+
+      - name: Ensure the App Store provisioning profile (ASC API)
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          # Get-or-create the profile from the App ID, carrying the newest dist
+          # cert, then install it where xcodebuild resolves profiles by UUID.
+          node "$GITHUB_WORKSPACE/tools/ci/asc-profile.mjs" "$RUNNER_TEMP/community.mobileprovision" "$PROFILE_NAME"
+          UUID=$(security cms -D -i "$RUNNER_TEMP/community.mobileprovision" | plutil -extract UUID raw -o - -)
+          PROFDIR="$HOME/Library/MobileDevice/Provisioning Profiles"
+          mkdir -p "$PROFDIR"
+          cp "$RUNNER_TEMP/community.mobileprovision" "$PROFDIR/$UUID.mobileprovision"
+          echo "Installed profile $UUID"
+
+      - name: Write exportOptions.plist (manual signing)
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/exportOptions.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key><string>app-store-connect</string>
+            <key>destination</key><string>upload</string>
+            <key>teamID</key><string>${DEVELOPMENT_TEAM}</string>
+            <key>signingStyle</key><string>manual</string>
+            <key>signingCertificate</key><string>Apple Distribution</string>
+            <key>provisioningProfiles</key>
+            <dict><key>${BUNDLE_ID}</key><string>${PROFILE_NAME}</string></dict>
+            <key>uploadSymbols</key><true/>
+            <key>manageAppVersionAndBuildNumber</key><false/>
+          </dict>
+          </plist>
+          PLIST
+          echo "Wrote $RUNNER_TEMP/exportOptions.plist"
+
+      - name: Archive (Release, device — unsigned; signing happens at export)
+        run: |
+          set -euo pipefail
+          # Unsigned archive: no cert or profile is needed until the export step
+          # re-signs. Entitlements (aps-environment) are applied at that signing,
+          # against the API-minted profile that carries the Push capability.
           xcodebuild archive \
             -project mobile/ios/App/App.xcodeproj \
             -scheme App -configuration Release \
-            -destination generic/platform=iOS \
-            -archivePath $RUNNER_TEMP/App.xcarchive \
-            CODE_SIGN_STYLE=Manual \
-            DEVELOPMENT_TEAM="$TEAM_ID" \
-            CODE_SIGN_IDENTITY="Apple Distribution" \
-            PROVISIONING_PROFILE_SPECIFIER="Ankurah Community App Store" \
-            CURRENT_PROJECT_VERSION=${{ github.run_number }}
+            -destination 'generic/platform=iOS' \
+            -archivePath "$RUNNER_TEMP/App.xcarchive" \
+            DEVELOPMENT_TEAM="$DEVELOPMENT_TEAM" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CURRENT_PROJECT_VERSION="$BUILD_NUMBER" \
+            | tee "$RUNNER_TEMP/xcodebuild-archive.log"
 
-      - name: Upload to TestFlight
-        # xcodebuild uploads the archive itself when the export options say
-        # destination=upload, authenticating with the App Store Connect API
-        # key — no third-party upload tooling involved.
+      - name: Export and upload to TestFlight (manual signing)
         env:
-          ASC_KEY_P8: ${{ secrets.ASC_API_KEY_P8 }}
-          ASC_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
-          ASC_ISSUER_ID: ${{ secrets.ASC_API_ISSUER_ID }}
-          TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
         run: |
-          mkdir -p ~/.appstoreconnect/private_keys
-          echo "$ASC_KEY_P8" > ~/.appstoreconnect/private_keys/AuthKey_$ASC_KEY_ID.p8
-          cat > $RUNNER_TEMP/export.plist <<EOF
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0"><dict>
-            <key>method</key><string>app-store-connect</string>
-            <key>destination</key><string>upload</string>
-            <key>signingStyle</key><string>manual</string>
-            <key>teamID</key><string>${TEAM_ID}</string>
-            <key>provisioningProfiles</key>
-            <dict><key>org.ankurah.community</key>
-                  <string>Ankurah Community App Store</string></dict>
-          </dict></plist>
-          EOF
+          set -euo pipefail
+          # destination=upload makes -exportArchive export AND push to TestFlight
+          # in one step; the API key authenticates only that upload leg. Signing
+          # is fully local (imported cert + installed profile).
           xcodebuild -exportArchive \
-            -archivePath $RUNNER_TEMP/App.xcarchive \
-            -exportOptionsPlist $RUNNER_TEMP/export.plist \
-            -exportPath $RUNNER_TEMP/export \
-            -authenticationKeyPath ~/.appstoreconnect/private_keys/AuthKey_$ASC_KEY_ID.p8 \
+            -archivePath "$RUNNER_TEMP/App.xcarchive" \
+            -exportPath "$RUNNER_TEMP/export" \
+            -exportOptionsPlist "$RUNNER_TEMP/exportOptions.plist" \
+            -authenticationKeyPath "$ASC_KEY_FILE" \
             -authenticationKeyID "$ASC_KEY_ID" \
-            -authenticationKeyIssuerID "$ASC_ISSUER_ID"
+            -authenticationKeyIssuerID "$ASC_ISSUER_ID" \
+            | tee "$RUNNER_TEMP/xcodebuild-export.log"
+
+      - name: Upload xcodebuild logs (failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: community-ios-xcodebuild-logs-${{ github.run_number }}
+          path: |
+            ${{ runner.temp }}/xcodebuild-archive.log
+            ${{ runner.temp }}/xcodebuild-export.log
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Cleanup key material
+        if: always()
+        run: |
+          # Runner VMs are ephemeral, but leave nothing behind regardless.
+          rm -f "$HOME/.appstoreconnect/private_keys"/AuthKey_*.p8 2>/dev/null || true
+          security delete-keychain "$RUNNER_TEMP/build.keychain-db" 2>/dev/null || true
+          rm -rf "$HOME/Library/MobileDevice/Provisioning Profiles" 2>/dev/null || true
+          echo "Removed ASC key, build keychain, and provisioning profile."
