@@ -71,10 +71,13 @@ pub const MAX_BODY_BYTES: usize = 2048;
 ///
 /// Apple's own guidance is not to hard-code the length — it has changed once
 /// and may again — so these are a floor and a ceiling around today's 32-byte
-/// (64 hex character) token rather than an equality check. What is exact is the
+/// (64 hex character) token rather than an equality check. The floor sits at
+/// HALF today's length and the ceiling at four times it: a bound that admitted
+/// only today's number would be the equality check this is meant not to be, and
+/// one set at today's number is a floor in name only. What is exact is the
 /// alphabet: APNs device tokens are hexadecimal, and anything else is a caller
 /// sending something that is not a device token.
-const MIN_TOKEN_CHARS: usize = 64;
+const MIN_TOKEN_CHARS: usize = 32;
 const MAX_TOKEN_CHARS: usize = 256;
 
 /// Everything the route needs, and nothing else: the verifying key and the

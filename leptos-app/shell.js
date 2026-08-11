@@ -15,6 +15,17 @@
 // is the only route a plugin EVENT reaches the page by, and the push plugin
 // reports its device token and every tapped alert as events.
 //
+// BOTH ARE THE BRIDGE'S INTERNALS, not a published API, and this file is
+// coupled to them by name. @capacitor/ios builds `nativePromise` and
+// `addListener` onto `window.Capacitor` in its own `initEvents`, and neither
+// appears in Capacitor's documented JavaScript surface — the documented route
+// is a generated plugin proxy, which a wasm client has no way to import. So a
+// Capacitor upgrade that renames or reshapes either one takes every native call
+// below with it, and the failure is silent: `capacitor.nativePromise` becomes
+// undefined, the calls throw where the client can only log, and the app runs on
+// as if the shell offered nothing. WHOEVER BUMPS @capacitor/ios READS THIS
+// PARAGRAPH FIRST and checks that both names still exist and still mean this.
+//
 // Defined ONLY inside the app. `window.Capacitor` exists only where the native
 // runtime injected it, so in a browser this file leaves no global behind and
 // the client's shell detection — which is the presence of that global —

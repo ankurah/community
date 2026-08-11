@@ -153,12 +153,25 @@ impl SignInFlow {
     /// authorization page, over the app.
     ///
     /// Every ending is spoken for. A sheet that came back with a session boots
-    /// the app as that member, the same reload the ceremony takes. A refusal
-    /// from idp.to — including the one the unregistered native redirect URI
-    /// earns today — and a sheet that could not run both land on the card's
-    /// error text. So does a dismissal, because the alternative is a control
-    /// the member pressed and nothing at all happening afterwards.
+    /// the app as that member. A sheet that could not run at all lands on the
+    /// card's error text, and so does a dismissal, because the alternative is a
+    /// control the member pressed and nothing at all happening afterwards.
+    ///
+    /// A REFUSAL FROM IDP.TO NEVER REACHES THIS MATCH, and the unregistered
+    /// native redirect URI is the case that matters today. OAuth forbids
+    /// redirecting to a `redirect_uri` the client did not register, so idp.to
+    /// draws its refusal on its own page INSIDE the sheet: nothing is sent to
+    /// the app's scheme, the sheet stays open on that page, and the member
+    /// closes it — which arrives here as `Cancelled`. So until the URI is
+    /// registered, "Sign-in was cancelled." is what a refused attempt says, and
+    /// the true reason is on the page the member just read (docs/auth.md, the
+    /// native sign-in section).
     fn open_the_sheet(&self) {
+        // Raised before the sheet opens and lowered on the two endings that
+        // come back to this card. NOT on `Signed`: that path reloads the
+        // document, so this signal — and everything else this flow holds — goes
+        // away with it, and lowering it first would show the card unblocked for
+        // the moment before the reload lands.
         self.sheet_open.set(true);
         let flow = *self;
         spawn_local(async move {

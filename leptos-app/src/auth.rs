@@ -113,8 +113,13 @@ const CALLBACK_PATH: &str = "/auth/callback";
 /// byte-identical to the redirect URI registered on the idp Application.
 ///
 /// THAT REGISTRATION IS NOT IN PLACE YET (Daniel's to file). Until it is, the
-/// authorize endpoint refuses the request and the sheet comes back carrying
-/// that refusal, which the sign-in card shows.
+/// authorize endpoint refuses the request — and the refusal is drawn on idp.to's
+/// own page INSIDE the sheet rather than sent back to us, because OAuth forbids
+/// redirecting to a `redirect_uri` the client did not register. So nothing
+/// reaches the app's scheme, the sheet waits on that page, and the member closes
+/// it: the app sees a dismissal, and the sign-in card says the attempt was
+/// cancelled. The reason is on the page they just read (docs/auth.md, the native
+/// sign-in section).
 const NATIVE_REDIRECT_URI: &str = "org.ankurah.community:/oauth2/callback";
 
 /// The scheme half of [`NATIVE_REDIRECT_URI`], which is what the sheet

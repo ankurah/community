@@ -86,11 +86,16 @@ getrandom_03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] 
 # wasm: `community-model`'s wasm feature carries `ankurah-chat-model` and its
 # wasm_bindgen macros, which exhaust the recursion limit on a host target. So
 # the pure parts that want tests (push route parsing today) are marked with
-# `#[wasm_bindgen_test]` and run with
+# `#[wasm_bindgen_test]` and run FROM THIS DIRECTORY with
 #
-#     cargo test -p leptos-app --target wasm32-unknown-unknown
+#     cd leptos-app && cargo test --target wasm32-unknown-unknown
 #
-# whose runner is set in .cargo/config.toml. Pinned to the release paired with
+# The working directory is load-bearing: the runner comes from
+# `leptos-app/.cargo/config.toml`, and cargo reads a `.cargo/config.toml` from
+# the directory it was INVOKED in and its ancestors — not from the package's own
+# directory. Run from the workspace root and cargo builds the test module, finds
+# no runner for wasm32-unknown-unknown, and tries to execute the `.wasm` file
+# directly. Pinned to the release paired with
 # the wasm-bindgen above: the two are versioned in lockstep, and the runner
 # refuses a module built against a different schema.
 [dev-dependencies]
