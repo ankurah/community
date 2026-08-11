@@ -82,13 +82,14 @@ pub fn terms_accepted() -> bool {
 /// already have on this device, otherwise after they press Accept in the modal.
 /// A reader who presses Not now never runs it.
 ///
-/// This is the seam every community-owned write entry point goes through, and
-/// the one the chat crate's composer wiring will call in the integration pass —
-/// see [`demand_terms_boxed`] for the form a hook takes.
+/// This is the seam every community-owned write entry point goes through; the
+/// chat crate's composer reaches the same gate through [`demand_terms_boxed`].
 pub fn demand_terms(then: impl FnOnce() + 'static) { demand_terms_boxed(Box::new(then)) }
 
 /// [`demand_terms`] in the shape a `Box<dyn Fn(...)>` hook can hold, so the
-/// chat components can be handed it without naming a generic.
+/// chat components can be handed it without naming a generic. `chat_hooks`
+/// installs this as the components' `gate_write`, which is what puts the
+/// guidelines in front of a member's send and their edit-saves alike.
 ///
 /// Only one demand is pending at a time: the modal is one surface, and a second
 /// action raised while it is up replaces the first rather than queueing behind

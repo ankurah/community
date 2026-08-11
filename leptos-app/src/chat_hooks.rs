@@ -7,6 +7,7 @@
 //!
 //! - under a bubble, the unfurl card for the first link that unfurled;
 //! - inside a tombstone, who removed the message;
+//! - in front of the composer's send, the guidelines gate;
 //! - behind the actions menu's moderator Delete, the removal itself, with its
 //!   optional public reason and the log row that records it;
 //! - at the foot of that menu, x-ray's Inspect entry — which is how the
@@ -51,7 +52,15 @@ pub fn chat_hooks(previews: Memo<HashMap<String, LinkPreviewView>>, profile: Pro
             view! { <LinkPreviewCard message=message previews=previews /> }.into_any()
         })),
         tombstone_body: Some(Box::new(|message: MessageView| view! { <TombstoneNotice message=message /> }.into_any())),
+        // The components ask about every row and community has nothing to say
+        // about most of them yet; the block list answers this next.
+        message_veil: None,
         moderator_delete: Some(Box::new(moderator_delete)),
+        // The guidelines, in front of the composer's send exactly as they stand
+        // in front of every other write leptos-app owns. `demand_terms_boxed`
+        // runs an accepted reader's send inside the same click, which is what
+        // the components ask of a gate.
+        gate_write: Some(Box::new(crate::terms::demand_terms_boxed)),
         member_preview: signed_in
             .then(|| Box::new(move |user: EntityId, x: i32, y: i32| profile.set(Some((user, x, y)))) as Box<dyn Fn(EntityId, i32, i32)>),
         member_detail: signed_in.then(|| Box::new(|user: EntityId| panels().open(Surface::UserDetail(user))) as Box<dyn Fn(EntityId)>),
