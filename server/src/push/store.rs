@@ -18,6 +18,23 @@
 use anyhow::Result;
 use futures_util::future::BoxFuture;
 
+/// How many devices one member's rows may fill, newest kept.
+///
+/// FOR: a registration costs the member nothing and costs this server a row and
+/// a request per notification forever. Nothing upstream bounds how many a
+/// single account can accumulate — iOS reissues a device token without warning
+/// and the app files whatever it is given, so even an ordinary member's rows
+/// grow by reinstall and restore, and a caller sending fabricated tokens under
+/// one session would grow them without limit. Ten is well above what anyone
+/// carries and low enough that the send loop stays a handful of requests.
+///
+/// EVICTION IS BY `last_registered_at`, OLDEST FIRST, which is the only ordering
+/// that means anything here: a token is refreshed every time its app launches,
+/// so the oldest row is the device that has gone longest without being claimed.
+/// The device registering right now is stamped with the current time, so it can
+/// never be the row its own registration evicts.
+pub const MAX_DEVICES_PER_USER: usize = 10;
+
 /// Which push service reaches a device. An enum rather than a string so that
 /// adding Google Play (a later phase) is a compile error at every place that
 /// has to learn about it, rather than a string comparison nobody updated.
@@ -72,6 +89,11 @@ pub trait DeviceTokens: Send + Sync + 'static {
     /// there. The member's entity id (base64) is the key alongside the token,
     /// so the same device registering twice updates one row rather than
     /// accumulating them.
+    ///
+    /// Also enforces [`MAX_DEVICES_PER_USER`]: whatever this call leaves behind
+    /// beyond that many rows for this member is dropped, oldest
+    /// `last_registered_at` first. Enforced HERE rather than by a sweep, because
+    /// this is the one call that can add a row.
     fn register<'a>(&'a self, user: &'a str, token: &'a str, platform: Platform, at_ms: i64) -> BoxFuture<'a, Result<()>>;
 
     /// Every device this member has registered.
@@ -103,7 +125,7 @@ mod postgres {
     //! The Postgres shape: one table, on the pool the ankurah node already
     //! holds.
 
-    use super::{DeviceToken, DeviceTokens, Platform};
+    use super::{DeviceToken, DeviceTokens, Platform, MAX_DEVICES_PER_USER};
     use anyhow::{anyhow, Context as _, Result};
     use bb8_postgres::{tokio_postgres::NoTls, PostgresConnectionManager};
     use futures_util::future::BoxFuture;
@@ -170,6 +192,29 @@ mod postgres {
                     )
                     .await
                     .context("register a device token")?;
+                // The cap, applied to this member's rows and nobody else's.
+                // Keep the newest by `last_registered_at`, break a tie by the
+                // token so two rows stamped in the same millisecond evict
+                // deterministically, and delete the rest. Run unconditionally
+                // rather than after a count: the count would be a second round
+                // trip to learn what this statement can decide on its own, and
+                // it deletes nothing in the ordinary case.
+                client
+                    .execute(
+                        &format!(
+                            "DELETE FROM {TABLE}
+                              WHERE user_id = $1
+                                AND device_token NOT IN (
+                                    SELECT device_token FROM {TABLE}
+                                     WHERE user_id = $1
+                                     ORDER BY last_registered_at DESC, device_token DESC
+                                     LIMIT {MAX_DEVICES_PER_USER}
+                                )"
+                        ),
+                        &[&user],
+                    )
+                    .await
+                    .context("drop a member's oldest device tokens past the cap")?;
                 Ok(())
             }
             .boxed()
@@ -220,7 +265,7 @@ mod sled {
     //! The sled shape: one tree on the database the ankurah node already
     //! opened.
 
-    use super::{DeviceToken, DeviceTokens, Platform};
+    use super::{DeviceToken, DeviceTokens, Platform, MAX_DEVICES_PER_USER};
     use anyhow::{Context as _, Result};
     use ankurah_storage_sled::SledStorageEngine;
     use futures_util::future::BoxFuture;
@@ -289,6 +334,27 @@ mod sled {
                 // token) pair, so a device re-registering refreshes one row.
                 let row = serde_json::to_vec(&Row { platform: platform.as_str().to_string(), last_registered_at: at_ms })?;
                 self.tree.insert(key(user, token), row).context("register a device token")?;
+
+                // The cap. The prefix scan is over this member's rows alone,
+                // and a row whose value will not parse is counted as the
+                // oldest thing there — it can never be addressed, so if
+                // anything is to be dropped it should go first.
+                let prefix = prefix(user);
+                let mut rows: Vec<(Vec<u8>, i64)> = Vec::new();
+                for entry in self.tree.scan_prefix(&prefix) {
+                    let (key, value) = entry.context("read a member's device tokens for the cap")?;
+                    let stamped = serde_json::from_slice::<Row>(&value).map(|row| row.last_registered_at).unwrap_or(i64::MIN);
+                    rows.push((key.to_vec(), stamped));
+                }
+                if rows.len() > MAX_DEVICES_PER_USER {
+                    // Newest first, ties broken by the key so two rows stamped
+                    // in the same millisecond evict deterministically — the
+                    // same ordering the Postgres statement spells.
+                    rows.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| b.0.cmp(&a.0)));
+                    for (key, _) in &rows[MAX_DEVICES_PER_USER..] {
+                        self.tree.remove(key).context("drop a member's oldest device tokens past the cap")?;
+                    }
+                }
                 Ok(())
             }
             .boxed()
@@ -362,6 +428,44 @@ mod sled {
             // racing the same dead token both arrive here.
             store.forget(alice, "aa11").await.unwrap();
         }
+
+        /// The cap, and which row goes when it bites. Registering is the only
+        /// call that can add a row, so it is the only place the count can be
+        /// held down — and the row that leaves is the one longest unclaimed,
+        /// never the one just registered.
+        #[tokio::test]
+        async fn a_member_keeps_their_ten_newest_devices_and_no_more() {
+            let store = store();
+            let alice = "AZk3jW0RvkW8pTGnQxYzRR";
+            let bob = "BZk3jW0RvkW8pTGnQxYzRR";
+
+            // Eleven devices, each claimed later than the last.
+            for n in 0..=MAX_DEVICES_PER_USER as i64 {
+                store.register(alice, &format!("dev{n:02}"), Platform::Ios, 1000 + n).await.unwrap();
+            }
+            let mut alices = store.for_user(alice).await.unwrap();
+            alices.sort_by_key(|d| d.last_registered_at);
+            assert_eq!(alices.len(), MAX_DEVICES_PER_USER, "the cap holds");
+            assert_eq!(alices[0].token, "dev01", "the oldest registration is the one that left");
+            assert_eq!(alices.last().unwrap().token, format!("dev{MAX_DEVICES_PER_USER:02}"), "and the newest is kept");
+
+            // A device that re-registers is claimed again, which takes it off
+            // the bottom of the list: the row that leaves next is whichever is
+            // now oldest, not whichever was registered first.
+            store.register(alice, "dev01", Platform::Ios, 9_000).await.unwrap();
+            store.register(alice, "dev99", Platform::Ios, 9_001).await.unwrap();
+            let held: Vec<String> = store.for_user(alice).await.unwrap().into_iter().map(|d| d.token).collect();
+            assert_eq!(held.len(), MAX_DEVICES_PER_USER);
+            assert!(held.contains(&"dev01".to_string()), "a refreshed device is not the oldest any more");
+            assert!(held.contains(&"dev99".to_string()), "and the new one is in");
+            assert!(!held.contains(&"dev02".to_string()), "the row longest unclaimed is the one that went");
+
+            // The cap is per member. Alice filling hers does not touch Bob's,
+            // and Bob registering does not evict anything of hers.
+            store.register(bob, "bobs-phone", Platform::Ios, 1).await.unwrap();
+            assert_eq!(store.for_user(bob).await.unwrap().len(), 1);
+            assert_eq!(store.for_user(alice).await.unwrap().len(), MAX_DEVICES_PER_USER);
+        }
     }
 }
 
@@ -369,7 +473,7 @@ mod sled {
 /// storage engine under them.
 #[cfg(test)]
 pub mod memory {
-    use super::{DeviceToken, DeviceTokens, Platform};
+    use super::{DeviceToken, DeviceTokens, Platform, MAX_DEVICES_PER_USER};
     use anyhow::Result;
     use futures_util::future::BoxFuture;
     use futures_util::FutureExt;
@@ -395,10 +499,25 @@ pub mod memory {
     impl DeviceTokens for MemoryDeviceTokens {
         fn register<'a>(&'a self, user: &'a str, token: &'a str, platform: Platform, at_ms: i64) -> BoxFuture<'a, Result<()>> {
             async move {
-                self.rows.lock().unwrap().insert(
+                let mut rows = self.rows.lock().unwrap();
+                rows.insert(
                     (user.to_string(), token.to_string()),
                     DeviceToken { token: token.to_string(), platform, last_registered_at: at_ms },
                 );
+                // The same cap the real backends keep, on the same ordering:
+                // a double that let a member's rows grow without bound would
+                // hide the one behaviour the route tests are standing on.
+                let mut mine: Vec<(String, i64)> = rows
+                    .iter()
+                    .filter(|((owner, _), _)| owner == user)
+                    .map(|((_, token), device)| (token.clone(), device.last_registered_at))
+                    .collect();
+                if mine.len() > MAX_DEVICES_PER_USER {
+                    mine.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| b.0.cmp(&a.0)));
+                    for (token, _) in &mine[MAX_DEVICES_PER_USER..] {
+                        rows.remove(&(user.to_string(), token.clone()));
+                    }
+                }
                 Ok(())
             }
             .boxed()
