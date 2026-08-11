@@ -83,7 +83,9 @@ impl PushRegistry {
 /// What a caller sends.
 #[derive(Deserialize)]
 pub struct RegisterRequest {
-    /// The device token as APNs issued it: lowercase hexadecimal, no spaces.
+    /// The device token as APNs issued it: hexadecimal, no spaces. Case is
+    /// the sender's (the iOS plugin formats upper-case) and is preserved —
+    /// re-casing here would file one phone under two rows.
     token: String,
     /// Which push service reaches this device. `ios` today; Google Play is a
     /// later phase and anything else is refused rather than guessed at.
