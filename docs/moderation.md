@@ -92,6 +92,174 @@ quoted underneath.
 Every signed-in member sees the ban/unban entries in the moderation log —
 that is the point of lights-on moderation. A guest sees no log at all.
 
+## Reports — the queue members write into and only moderators read
+
+A `Report` row is one member's complaint about one message: who filed it, the
+message, the room it was said in, an optional reason, when, and whether a
+moderator has closed it. It is the only path from "a member saw something
+wrong" to "a moderator knows about it" — moderators read no direct messages and
+browse nobody's history, so most of what gets said here is watched only by the
+people in the room.
+
+```json
+"report": {
+  "read": "moderate",
+  "write": "post",
+  "scope": [
+    { "filter": "created_at < 0", "applies_to": "read", "unless_privilege": "moderate" },
+    { "filter": "reporter = $jwt.sub", "applies_to": "write", "unless_privilege": "moderate" },
+    { "filter": "resolved = false", "applies_to": "write", "unless_privilege": "moderate" },
+    { "filter": "created_at >= 0", "applies_to": "write", "unless_privilege": "moderate" }
+  ]
+}
+```
+
+- **Moderators read it and nobody else does — not even the reporter.** Why a
+  read rule at all, when `read` is already `moderate`: a member holds `post`,
+  which is this collection's WRITE privilege, and both the collection gate and
+  the scan check pass on read *or* write privilege. So a member does reach the
+  collection, and the read rule is the only thing that makes their query answer
+  empty and their by-id read refuse. Set `read` alone and every member would
+  list the whole queue. A reporter who could watch their own filing would also
+  learn when a moderator looked at it, so the shutout is total in v1 rather
+  than scoped to `reporter = $jwt.sub`.
+- **Why that rule is an impossible comparison and not the literal `false`, and
+  why it is ONE comparison.** AnkQL does parse `false`, and it is what this rule
+  wants to say. Both shorter spellings were tried against a real node and both
+  are broken here.
+  - `false` parses to `Predicate::False`, and the read scope is ANDed into
+    every scan a non-moderator runs — including a SUBSCRIPTION, which the
+    reactor registers by walking the predicate. That walk (ankurah-core 0.9.2,
+    `reactor/watcherset.rs`) has no arm for `Predicate::False`: it is
+    `unimplemented!`, so a member subscribing to `report` panics the reactor
+    worker instead of receiving nothing.
+  - `resolved = false AND resolved = true` registers and delivers nothing, then
+    leaks on the other path: sled's fetch planner, given two constraints on one
+    property, answered the whole collection. **A scope rule in this repo must
+    not constrain the same property twice** — that is a general lesson, not a
+    report-specific one.
+
+  What is left is one comparison a row cannot satisfy. `created_at` is
+  milliseconds since the epoch, so nothing is ever negative; the property is
+  required at creation, so the denial is a clean `false` rather than an
+  absent-property error. Pinned by
+  `policy_scope_tests.rs::the_report_read_rule_is_one_unsatisfiable_comparison`;
+  it becomes `"false"` the day ankurah implements that arm, and not before.
+- **And the fourth rule is what makes "nothing is ever negative" true.** The
+  client stamps `created_at` from its own clock, so that sentence described the
+  code we ship rather than what the server accepts: a member filing a report
+  dated `-1` would have satisfied the read rule's comparison and could then read
+  that row back. `created_at >= 0` on the write path refuses the filing. It is
+  the exact complement of the read rule and sits on the opposite access path,
+  which is what keeps it clear of the "never constrain one property twice" lesson
+  above — reads compose rule zero, writes compose the other three, and neither
+  composition names `created_at` more than once.
+- **A report can only be filed in your own name.** The `reporter` rule pins the
+  row to the caller, the same binding `DmMessage.user` gets from the DM sender
+  rule. Moderators bypass it, which is what lets them write to a row they did
+  not file.
+- **A report can only be closed by a moderator, and once closed it is frozen.**
+  Scope rules AND together, so a non-moderator write must leave
+  `resolved = false` as well as name them as the reporter — otherwise the person
+  who filed a report could close it, and a queue the filer can empty is not a
+  queue a moderator can trust. Resolving IS the moderator bypass of that rule.
+  The freeze comes free with it: `JwtAgent::check_event` runs the write scope
+  over the PRIOR state as well as the new one whenever the write is an update, so
+  a resolved row fails `resolved = false` before the edit is even considered —
+  its filer can neither reopen it nor rewrite what it says.
+- **An OPEN report stays writable by the member who filed it, and that is a
+  residual we cannot close today.** Every write rule holds for an open row both
+  before and after, so its filer may change which message and which room it
+  names right up until a moderator closes it. Nothing in ankurah-jwt-auth 0.9.2
+  can express the rule that would stop it: a scope filter names row properties
+  and `$jwt.*` claims (`variables::resolve_variable`) and has no variable for the
+  prior state and no way to tell an update from an insert — and any predicate a
+  filing satisfies is satisfied again by that same row as the before-state of its
+  first edit, so no predicate admits the one and refuses the other.
+
+  **So the queue reads a report as the filer's claim.** `message` is a claim
+  about what is at issue and `room` about where. What bounds the cost is that a
+  moderator judges the MESSAGE, printed from the row the queue resolves rather
+  than described by the report — and the room line is printed off that same
+  resolved message rather than off the report's own copy, so the place named is
+  the place the words are actually in. What is left is that a report can end up
+  pointing at a message its filer did not first complain about.
+  `report_policy_live_tests.rs::a_reporter_may_retarget_an_open_report_but_never_reopen_a_closed_one`
+  pins the behaviour so that the day the policy language can bind prior state,
+  closing this is a deliberate change and that test is what says so.
+- **A guest reaches none of it**: no read, no write, and no `retrieve` tier, so
+  the collection gate refuses before any row is considered.
+- Pinned by `server/tests/policy_scope_tests.rs` (the six report tests) and by
+  `server/tests/report_policy_live_tests.rs`, which runs the same claims through
+  a real node — including "a member reads zero rows, their own filing included",
+  on fetch, through a live subscription, and by entity id.
+
+**Where moderators read it:** the moderation panel's second tab, present only
+for a moderator (`leptos-app/src/reports.rs`). Open reports first, newest first
+within each half; each row names the room, the reporter, the reason and the
+time, and carries Resolve while it is open. The room is named off the resolved
+message, not off the report row — see the residual above; the report's own copy
+shows only while that read is in flight, and stays only if it never lands.
+
+**Where members file from:** "Report message" in the chat crate's message
+actions menu, which `leptos-app/src/chat_hooks.rs` puts there. It is offered on
+everybody's message but your own — reporting yourself gives a moderator nothing
+to act on — and a guest pressing it meets the sign-in ceremony first, which is
+how that menu already treats everything that writes.
+
+**The reported message is printed in the row.** This retracts the queue's
+earlier restraint, which was borrowed from the log above; the log keeps its own,
+and for a reason that does not carry over — **readership**. Every signed-in
+member reads the log, so a message named there is named to the whole community,
+while `report`'s read scope is a comparison no row satisfies for anybody but a
+moderator. Nothing about the message read scope changes: a ref the moderator's
+own session will not resolve renders as unreadable rather than as content, and a
+message removed between the filing and the reading says so rather than showing
+an empty line. There is still no deep link and no id on screen — what a moderator
+needs is the words, and the room to go to is already named on the row.
+
+**Resolving writes no `ModAction` row**, deliberately and against the
+surrounding idiom — ban, unban and message removal each write one. Two reasons.
+Nothing happened to a message or to a member: the acts a moderator takes
+*because* of a report are the removal or the ban, and those write their own
+rows through their own paths, so the public log stays complete without this
+one. And `modaction` is readable by every signed-in member, so a row here would
+announce to the community that somebody was reported — the single fact the
+report policy withholds from them.
+
+## Blocking — the reader's own screen, and not moderation at all
+
+Blocking is a `localStorage` list of `User` entity ids on the reader's device
+(`leptos-app/src/blocklist.rs`), offered on every member but yourself from the
+member sidebar, the profile card, and "Block author" in the message actions
+menu. No collection, no server involvement, no policy: blocked members' rows
+still sync, and hiding is the renderer's job through the exported
+`is_blocked(user_id)`.
+
+**A guest pressing "Block author" meets sign-in instead**, and that is the one
+place the menu departs from "a reader with no account at all is still a reader":
+the way back out of a block is the member sidebar and the profile card, and
+community withholds both from a guest, so a guest who blocked from the menu
+would be veiled into a room with no handle to undo it.
+
+**What a blocked member's row looks like.** The chat components ask community
+per row (their `message_veil` hook) and put community's answer where the message
+body would have gone: "Blocked member", and a Show that prints the stored text
+once — mentions read as names, no markdown, and none of the chrome. A veiled row
+has no actions menu at all, by not being built with one: no press-and-hold, no
+"⋯", no right-click, and no reaction chips under it. Unblocking lives on the
+member panels, where the copy can say what it means, and it brings every veiled
+row back the moment it happens.
+
+Per device is the v1 ruling, not an oversight — a synced list would be a
+collection naming who avoids whom, and however its policy were written it would
+be one rule away from being readable by the person blocked. The control says so
+in as many words: "Blocked on this device — their messages are hidden here."
+
+Blocking a member is invisible to them, tells no moderator anything, and is not
+a report. A member who wants moderation reports; a member who wants quiet
+blocks; they are different acts and neither substitutes for the other.
+
 ---
 
 # Direct messages (#30) — what moderation can and cannot do
@@ -116,12 +284,13 @@ member who receives an abusive DM reports the message; the report carries the
 message ref, and the moderator acts on what the report contains. There is no
 "open this member's conversations" affordance anywhere in the product, and
 building one would mean changing the policy above, in public, on purpose.
-(The report flow itself is roadmap item 2.10; until it lands, a recipient's
-route is to tell a moderator directly, and the moderator's tools are the ones
-that already exist — `Ban`, and the DM rate limiter below.)
+(All of it exists now — see "Reports" below: the row, the policy, the entry a
+member presses in the message actions menu, and the queue a moderator reads it
+in.)
 
 The one thing moderators DO see is the public `ModAction` log, including the
-automatic `dm-rate-limit` rows described next.
+automatic `dm-rate-limit` rows described next — and, now, the report queue
+below.
 
 ## The DM rate limiter — post-hoc, and honest about it
 

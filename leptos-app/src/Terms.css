@@ -1,0 +1,121 @@
+/* Community guidelines gate. Above every other surface on purpose: two of the
+   write entry points that raise it (report, ban) live inside a panel, and a
+   question the app asks must not be answered by whatever is underneath it. */
+
+.termsOverlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  display: grid;
+  place-items: center;
+  padding: var(--sp-4);
+  background-color: rgb(10 20 17 / 55%);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  animation: termsIn 140ms var(--ease) both;
+}
+
+@keyframes termsIn {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
+.termsCard {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  width: min(520px, 100%);
+  max-height: 86vh;
+  overflow-y: auto;
+  padding: var(--sp-5);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-3);
+}
+
+.termsTitle {
+  margin: 0;
+  font-size: var(--fs-lg);
+  font-weight: 750;
+  letter-spacing: -0.01em;
+  color: var(--text);
+}
+
+.termsLede {
+  margin: 0;
+  font-size: var(--fs-md);
+  line-height: 1.5;
+  color: var(--text-2);
+}
+
+.termsList {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  margin: 0;
+  padding-left: var(--sp-4);
+  font-size: var(--fs-md);
+  line-height: 1.55;
+  color: var(--text);
+}
+
+.termsContact {
+  margin: 0;
+  font-size: var(--fs-sm);
+  color: var(--text-3);
+}
+
+.termsContact a {
+  color: var(--link);
+}
+
+.termsActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--sp-2);
+  padding-top: var(--sp-2);
+}
+
+.termsAccept,
+.termsDecline {
+  padding: 9px var(--sp-4);
+  font-size: var(--fs-base);
+  font-weight: 600;
+  border-radius: var(--r-md);
+  border: 1px solid var(--border);
+  transition:
+    background-color var(--t-fast) var(--ease),
+    color var(--t-fast) var(--ease);
+}
+
+.termsDecline {
+  color: var(--text-2);
+  background: var(--surface-2);
+}
+
+.termsDecline:hover {
+  background: var(--surface-3);
+}
+
+.termsAccept {
+  color: var(--on-accent);
+  background: var(--accent);
+  border-color: transparent;
+}
+
+.termsAccept:hover {
+  background: var(--accent-hover);
+}
+
+.termsNote {
+  margin: 0;
+  font-size: var(--fs-xs);
+  line-height: 1.5;
+  color: var(--text-faint);
+}

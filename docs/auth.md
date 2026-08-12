@@ -346,3 +346,49 @@ generation) and rides its own pin bump.
   `{type: "idp-embed-size", height}` on layout changes; the ceremony applies
   it (bounded) to the frame's seat, so the card hugs the form. A frame that
   never loads never reports, and keeps the fixed fallback shape.
+
+## Status — the native sign-in front door (2026-08-10, mobile lane)
+
+The mobile shell (mobile/, a Capacitor project bundling the trunk-built
+client) is the third way in, and it takes the top-level flow this document
+always said a native app would — through the system's sign-in sheet rather
+than this document's own navigation:
+
+- **Detection is one global.** `leptos-app/shell.js` defines
+  `window.__ankurahShell` only where Capacitor's injected runtime says the
+  page is the app; `shell.rs` memoizes its presence once. In a browser the
+  global never exists and every shell branch is dormant for the life of the
+  document.
+- **The ceremony never opens in the shell.** The shell's web view is served
+  from the app bundle, so it shares no credential store with the browser — a
+  framed ceremony there would offer a passkey nothing on the device can
+  answer. `SignInFlow` routes both raisers (the card's button, the anonymous
+  reader's demand) to `auth::start_native_sign_in`, which opens
+  `ASWebAuthenticationSession` on the same top-level authorize URL,
+  sharing Safari's credential surface — the member's passkeys and any
+  standing idp.to session.
+- **One redirect difference, and it is declared.** The native attempt's
+  `redirect_uri` is `NATIVE_REDIRECT_URI`
+  (`org.ankurah.community:/oauth2/callback`, the app's own claimed scheme);
+  the sheet catches that redirect and hands the whole URL back, and the
+  code/state take the existing `complete_sign_in` exchange. Because the
+  token exchange must repeat the authorize leg's `redirect_uri`, that value
+  is now threaded through `stash_new_pending` → attempt → `complete_sign_in`
+  for all three flows; the web flows still pass `origin + /auth/callback`,
+  byte-identical to before. UNTIL THE URI IS REGISTERED on the idp
+  Application (pending, Daniel-gated, with idp verifying their three
+  redirect-validation layers accept a custom scheme), the authorize endpoint
+  refuses the request on its own page inside the sheet — by OAuth's rules an
+  unrecognized redirect_uri must not be redirected to, so that refusal
+  cannot reach the card; a dismissal lands there instead.
+- **The pages that belong to idp.to open in the system browser.** Sign-out
+  hands the end-session URL to `SFSafariViewController` (same cookie jar as
+  the sheet, so the idp.to session actually ends) without a
+  `post_logout_redirect_uri` — every registered one is a web address — and
+  the local clear has already happened, so a member who never returns is
+  still signed out here. The account gear opens the account center the same
+  way. The QR code is absent in the shell: "open this on your phone" is
+  where the reader already is.
+- **Storage is asked to persist.** Inside the app the IndexedDB store is the
+  member's own history, so boot calls `navigator.storage.persist()` —
+  best-effort, unawaited.

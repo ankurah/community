@@ -1,0 +1,57 @@
+/* The moderator report queue, inside the moderation panel. Reuses the mod
+   log's row anatomy (.modLogRow/.modLogBody/...) so the two tabs read as one
+   surface; only the Resolve control and the closed-row treatment are its own. */
+
+.reportRow {
+  align-items: center;
+}
+
+.reportRowResolved {
+  opacity: 0.62;
+}
+
+.reportResolveBtn {
+  flex-shrink: 0;
+  align-self: center;
+  padding: 6px var(--sp-3);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  transition: background-color var(--t-fast) var(--ease);
+}
+
+.reportResolveBtn:hover {
+  background: var(--surface-3);
+}
+
+.reportResolvedBy {
+  font-size: var(--fs-xs);
+  color: var(--ok);
+}
+
+/* The reported message, printed under the line that says who reported it.
+   Quoted rather than styled as a bubble: the moderator is reading a record of
+   what was said, not the room. Sits above the reporter's own words so the two
+   read in the order they happened. */
+
+.reportMessage {
+  padding: var(--sp-1) 0 var(--sp-1) var(--sp-3);
+  margin: var(--sp-1) 0;
+  border-left: 2px solid var(--border-strong);
+}
+
+.reportMessageText {
+  font-size: var(--fs-md);
+  color: var(--text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.reportMessageGone {
+  font-size: var(--fs-md);
+  font-style: italic;
+  color: var(--text-3);
+}

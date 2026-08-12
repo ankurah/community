@@ -7,6 +7,13 @@
   height: 100%;
   background-color: var(--bg);
   overflow: hidden;
+  /* Keeps the composer clear of the home indicator when edge-to-edge (the
+     mobile shell); zero in an ordinary browser tab. The `, 0px` is the
+     fallback for a browser that does not know the variable at all: without it
+     the whole declaration is invalid and dropped, which on a page whose
+     padding is otherwise unset happens to look right — and would not, the day
+     a rule above this one sets one. */
+  padding-bottom: env(safe-area-inset-bottom, 0px);
 }
 
 .mainContent {

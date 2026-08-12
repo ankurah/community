@@ -7,7 +7,13 @@
   justify-content: space-between;
   gap: var(--sp-4);
   min-height: 56px;
-  padding: 0 var(--sp-4);
+  /* The top inset clears the status bar / notch when the page runs
+     edge-to-edge (the mobile shell); zero in an ordinary browser tab. The
+     header's own background is what shows beneath the status bar then. The
+     `, 0px` fallback matters more here than a bare inset would: a browser that
+     does not know the variable drops the whole shorthand, taking the
+     horizontal and bottom padding with it. */
+  padding: env(safe-area-inset-top, 0px) var(--sp-4) 0;
   background-color: var(--chrome-bg);
   color: var(--chrome-text);
   border-bottom: 1px solid var(--chrome-border);
@@ -260,7 +266,9 @@
 @media (max-width: 768px) {
   .header {
     min-height: 52px;
-    padding: 0 10px;
+    /* Keep the base rule's status-bar inset — this shorthand replaces it,
+       fallback and all. */
+    padding: env(safe-area-inset-top, 0px) 10px 0;
     gap: var(--sp-2);
   }
 

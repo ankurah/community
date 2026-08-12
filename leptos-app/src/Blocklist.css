@@ -1,0 +1,49 @@
+/* The veil over a blocked member's row, rendered inside the chat components'
+   bubble (they carry `.veiled` on it and hold back everything else the row
+   would have shown). Quiet on purpose: a reader who blocked somebody asked for
+   less of them, and a loud placeholder is still them on the screen. */
+
+.blockedVeil {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.blockedVeilLine {
+  display: flex;
+  gap: var(--sp-2);
+  align-items: baseline;
+}
+
+.blockedVeilLabel {
+  font-size: var(--fs-md);
+  font-style: italic;
+  color: var(--text-3);
+}
+
+.blockedVeilToggle {
+  padding: 0;
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--text-2);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  background: none;
+  border: none;
+}
+
+.blockedVeilToggle:hover {
+  color: var(--text);
+}
+
+/* The one look: plain text, wrapped like the message body it stands for, and
+   visibly a quotation of it rather than the message given back. */
+
+.blockedVeilText {
+  padding-left: var(--sp-3);
+  font-size: var(--fs-base);
+  color: var(--text-2);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  border-left: 2px solid var(--border-strong);
+}

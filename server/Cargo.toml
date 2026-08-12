@@ -52,15 +52,43 @@ tracing-subscriber = "0.3"
 # to choose since v10) keeps the build pure-Rust: aws_lc_rs would add a second,
 # native crypto stack beside ring.
 jsonwebtoken = { version = "11", features = ["rust_crypto"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# `http2` is reqwest's own default feature, switched off here by
+# `default-features = false` and switched back on for APNs: Apple's provider API
+# speaks HTTP/2 only, with no HTTP/1.1 fallback to negotiate down to. It brings
+# `h2` into the build and nothing else of consequence; the alternative was a
+# dedicated APNs crate carrying a second HTTP stack (see push/apns.rs).
+reqwest = { version = "0.12", default-features = false, features = ["http2", "json", "rustls-tls"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 url = "2"
+
+# The device-token registry's Postgres half (server/src/push/store.rs). Device
+# tokens are NOT an ankurah collection, so the table is reached through the
+# connection pool directly; both crates are already in the build under this
+# feature (ankurah-storage-postgres owns them), and `main::make_storage` builds
+# the one pool that the storage engine and the registry then share.
+bb8 = { version = "0.9", optional = true }
+bb8-postgres = { version = "0.9", optional = true }
+# And the registry's sled half, for the same reason: it holds a `sled::Tree`
+# opened on the database the node already has open (sled locks its directory, so
+# there can only be the one). Already in the build under this feature —
+# ankurah-storage-sled owns it — and pinned to the version that engine uses.
+sled = { version = "0.34", optional = true }
+
+[dev-dependencies]
+# The APNs tests sign with a P-256 key they generate at run time, because no key
+# material may exist in this repository — not even a throwaway one. Both crates
+# are already in the build (jsonwebtoken's `rust_crypto` backend owns `p256`,
+# and `rand_core` rides in with it), so this adds features rather than a tree.
+p256 = { version = "0.13", features = ["ecdsa", "pem", "std"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
 
 [features]
 # Storage engine for the durable (server) node. `cargo generate` sets `default`
 # to your choice (Sled or Postgres); dev.sh reads it back to decide whether to
 # bring up a Postgres container. Change the default here to switch engines.
 default = ["postgres"]
-sled = ["dep:ankurah-storage-sled"]
-postgres = ["dep:ankurah-storage-postgres"]
+sled = ["dep:ankurah-storage-sled", "dep:sled"]
+# `bb8`/`bb8-postgres` ride along because the device-token registry reads and
+# writes its own table on this engine's connection pool (see push/store.rs).
+postgres = ["dep:ankurah-storage-postgres", "dep:bb8", "dep:bb8-postgres"]

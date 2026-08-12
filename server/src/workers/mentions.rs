@@ -30,8 +30,10 @@ use tracing::{debug, info, warn};
 use super::{now_ms, remember, signature};
 
 /// The only notification kind this worker emits today. Stored verbatim in
-/// `Notification.kind`; the client inbox matches on it.
-const MENTION_KIND: &str = "mention";
+/// `Notification.kind`; the client inbox matches on it, and so does the push
+/// sender (`super::push::kind_verb`) when it words the alert — which is why
+/// this is shared rather than spelled twice.
+pub(super) const MENTION_KIND: &str = "mention";
 
 /// Consumer loop: one message at a time, errors contained per message. The
 /// receiver is borrowed from the supervisor (`workers::supervise`), which

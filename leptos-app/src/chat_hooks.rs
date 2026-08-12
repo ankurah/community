@@ -7,17 +7,22 @@
 //!
 //! - under a bubble, the unfurl card for the first link that unfurled;
 //! - inside a tombstone, who removed the message;
+//! - in place of a blocked member's message, the veil that says so and offers
+//!   the reader one look;
+//! - in front of the composer's send and of creating a room, the guidelines
+//!   gate;
 //! - behind the actions menu's moderator Delete, the removal itself, with its
 //!   optional public reason and the log row that records it;
-//! - at the foot of that menu, x-ray's Inspect entry — which is how the
-//!   inspector stays reachable from the keyboard, since a bubble is not a tab
-//!   stop and the delegated click handler in `xray::inspect` only answers a
-//!   mouse.
+//! - at the foot of that menu, three entries: Report message, Block author, and
+//!   x-ray's Inspect — the last of which is how the inspector stays reachable
+//!   from the keyboard, since a bubble is not a tab stop and the delegated
+//!   click handler in `xray::inspect` only answers a mouse.
 //!
 //! Two more are plain routing: clicking an author opens the profile popover,
 //! clicking an `@mention` opens the member detail panel.
 
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use leptos::prelude::*;
 use web_sys::window;
@@ -28,6 +33,7 @@ use ankurah_chat_leptos::ChatHooks;
 use ankurah_signals::Get as AnkurahGet;
 use community_model::{LinkPreviewView, MessageView, ModAction, ModActionView};
 
+use crate::blocklist::BlockedVeil;
 use crate::link_preview::LinkPreviewCard;
 use crate::panels::{panels, Surface};
 
@@ -44,19 +50,142 @@ pub type ProfileAnchor = RwSignal<Option<(EntityId, i32, i32)>>;
 /// withheld from a guest: passing `None` for those hooks makes the crate
 /// render the avatar and `@mention` as inert text rather than a button that
 /// opens an empty surface — a button only where it leads somewhere.
+/// BUILT FROM `Default` AND ASSIGNED INTO, not written as a literal. `ChatHooks`
+/// is `#[non_exhaustive]`, so the crate can add a door without breaking every
+/// embedder that had named all of today's — and Rust admits no struct expression
+/// for such a type from another crate, functional update syntax included. A hook
+/// this app leaves unset is a door it does not open, and the crate renders the
+/// affordance away rather than leaving a control that does nothing.
 pub fn chat_hooks(previews: Memo<HashMap<String, LinkPreviewView>>, profile: ProfileAnchor, viewer: Option<EntityId>) -> ChatHooks {
     let signed_in = viewer.is_some();
-    ChatHooks {
-        message_extras: Some(Box::new(move |message: MessageView| {
-            view! { <LinkPreviewCard message=message previews=previews /> }.into_any()
-        })),
-        tombstone_body: Some(Box::new(|message: MessageView| view! { <TombstoneNotice message=message /> }.into_any())),
-        moderator_delete: Some(Box::new(moderator_delete)),
-        member_preview: signed_in
-            .then(|| Box::new(move |user: EntityId, x: i32, y: i32| profile.set(Some((user, x, y)))) as Box<dyn Fn(EntityId, i32, i32)>),
-        member_detail: signed_in.then(|| Box::new(|user: EntityId| panels().open(Surface::UserDetail(user))) as Box<dyn Fn(EntityId)>),
-        menu_actions: Some(Box::new(inspect_entry)),
+    let mut hooks = ChatHooks::default();
+    hooks.message_extras = Some(Box::new(move |message: MessageView| {
+        view! { <LinkPreviewCard message=message previews=previews /> }.into_any()
+    }));
+    hooks.tombstone_body = Some(Box::new(|message: MessageView| view! { <TombstoneNotice message=message /> }.into_any()));
+    hooks.message_veil = Some(Box::new(blocked_veil));
+    hooks.moderator_delete = Some(Box::new(moderator_delete));
+    // The guidelines, in front of every write the crate gates — the composer's
+    // send and creating a room — exactly as they stand in front of every other
+    // write leptos-app owns. `demand_terms_boxed` runs an accepted reader's
+    // continuation inside the same click, which is what the components ask of a
+    // gate.
+    hooks.gate_write = Some(Box::new(crate::terms::demand_terms_boxed));
+    hooks.member_preview = signed_in
+        .then(|| Box::new(move |user: EntityId, x: i32, y: i32| profile.set(Some((user, x, y)))) as Box<dyn Fn(EntityId, i32, i32)>);
+    hooks.member_detail = signed_in.then(|| Box::new(|user: EntityId| panels().open(Surface::UserDetail(user))) as Box<dyn Fn(EntityId)>);
+    hooks.menu_actions = Some(Box::new(menu_entries));
+    hooks
+}
+
+/// A blocked member's row, veiled.
+///
+/// Reads [`crate::blocklist::is_blocked`] and nothing else, which is what makes
+/// the row follow the list: the components ask this inside a reactive pass, so
+/// blocking somebody veils their rows and unblocking brings them straight back.
+/// A message whose author cannot be resolved is left alone — a row nobody can
+/// name is a row no block list can match.
+fn blocked_veil(message: MessageView) -> Option<AnyView> {
+    let author = message.user().ok()?.id();
+    crate::blocklist::is_blocked(author).then(|| view! { <BlockedVeil message=message /> }.into_any())
+}
+
+/// What community puts at the foot of a message's actions menu.
+///
+/// Three entries. Two are the member-safety pair — hand this to a moderator,
+/// or take this person off your own screen — and the third is the inspector.
+/// The order is what a reader might actually need first, developer tool last.
+///
+/// NEITHER OF THE PAIR APPEARS ON YOUR OWN MESSAGE. Reporting yourself gives a
+/// moderator nothing to act on, and blocking yourself would veil your own half
+/// of the room — the same rule `BlockControl` already keeps in the member
+/// sidebar. A guest owns no message, so a guest is offered both, and meets the
+/// sign-in demand on pressing either (each entry says why).
+fn menu_entries(message: MessageView, close: Box<dyn Fn()>) -> AnyView {
+    // One `close` arrives and three entries want it. Each of them closes the
+    // menu on every path out of itself, including the paths that do nothing.
+    let close: Rc<dyn Fn()> = Rc::from(close);
+    let mine = crate::viewer().is_some() && crate::viewer() == message.user().ok().map(|r| r.id());
+    view! {
+        {(!mine).then(|| report_entry(message.clone(), close.clone()))}
+        {(!mine).then(|| block_entry(message.clone(), close.clone()))}
+        {inspect_entry(message, close)}
     }
+    .into_any()
+}
+
+/// Hand this message to the moderators.
+///
+/// A GUEST IS OFFERED IT AND MEETS SIGN-IN, which is how the actions menu
+/// already treats what writes: a reaction is offered to a reader with no viewer
+/// and raises the components' auth demand when they press it, and this does the
+/// same. Hiding the entry instead would teach a guest that reporting is not on
+/// offer here.
+fn report_entry(message: MessageView, close: Rc<dyn Fn()>) -> AnyView {
+    // Taken in the body, where the reactive owner is, and cloned into the
+    // handler — the crate's own rule for anything that may defer.
+    let chat = ankurah_chat_leptos::chat();
+    view! {
+        <button
+            class="contextMenuItem"
+            role="menuitem"
+            on:click=move |_| {
+                if crate::viewer().is_none() {
+                    // Closed first: the ceremony is a card over the app, and a
+                    // menu left open would stand in front of it.
+                    close();
+                    chat.demand_auth();
+                    return;
+                }
+                let close = close.clone();
+                crate::reports::report_message(message.clone(), Box::new(move || close()));
+            }
+        >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M4 21V4h11l1 2h4v10h-6l-1-2H4" />
+            </svg>
+            "Report message"
+        </button>
+    }
+    .into_any()
+}
+
+/// Take this author off this device's screen.
+///
+/// No guidelines gate: nothing is written and nobody is told, so a modal in
+/// front of it would be a gate over nothing — the reading that already leaves
+/// the inbox's own seen flip ungated. A GUEST MEETS SIGN-IN even so, and that
+/// is the one place this departs from `blocklist`'s "a reader with no account
+/// at all is still a reader": the way back out of a block is the member sidebar
+/// and the profile card, and community withholds both from a guest, so a guest
+/// who blocked from here would be veiled into a room with no handle to undo it.
+fn block_entry(message: MessageView, close: Rc<dyn Fn()>) -> AnyView {
+    let chat = ankurah_chat_leptos::chat();
+    view! {
+        <button
+            class="contextMenuItem"
+            role="menuitem"
+            on:click=move |_| {
+                close();
+                if crate::viewer().is_none() {
+                    chat.demand_auth();
+                    return;
+                }
+                if let Ok(author) = message.user() {
+                    crate::blocklist::block(author.id());
+                }
+            }
+        >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <circle cx="12" cy="12" r="9" />
+                <path d="m5.6 5.6 12.8 12.8" />
+            </svg>
+            "Block author"
+        </button>
+    }
+    .into_any()
 }
 
 /// X-ray's "Inspect" entry, offered only while the mode is on.
@@ -67,7 +196,7 @@ pub fn chat_hooks(previews: Memo<HashMap<String, LinkPreviewView>>, profile: Pro
 /// nothing to tab to. The actions menu is, so the same target is reachable
 /// here. The menu mounts fresh on every open, so a non-reactive read of the
 /// mode is correct.
-fn inspect_entry(message: MessageView, close: Box<dyn Fn()>) -> AnyView {
+fn inspect_entry(message: MessageView, close: Rc<dyn Fn()>) -> AnyView {
     if !crate::xray::state().enabled.get_untracked() {
         return ().into_any();
     }
@@ -132,6 +261,13 @@ fn TombstoneNotice(message: MessageView) -> impl IntoView {
 /// public `ModAction` is what makes the tombstone read "by a moderator", so a
 /// removal that landed without one would attribute itself to the author.
 fn moderator_delete(message: MessageView, close: Box<dyn Fn()>) {
+    crate::terms::demand_terms(move || moderator_delete_confirmed(message, close));
+}
+
+/// The removal itself, once the guidelines gate has let it through. Split so
+/// the prompt still opens inside the moderator's own click (see the same split
+/// on `ban_member`).
+fn moderator_delete_confirmed(message: MessageView, close: Box<dyn Fn()>) {
     let reason = match window().map(|w| w.prompt_with_message("Reason for removal (optional):")) {
         Some(Ok(None)) => {
             close();

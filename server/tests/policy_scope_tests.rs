@@ -296,7 +296,7 @@ fn modaction_is_signed_in_readable_and_moderator_writable() {
 /// keyed by those strings. A silent mismatch would leave a collection with no
 /// rules (deny-all) — catch it here.
 ///
-/// All fourteen collections community serves are listed, and that completeness
+/// All fifteen collections community serves are listed, and that completeness
 /// now spans two repositories: eight of these structs are declared in
 /// ankurah-chat-model, where nothing can see policy.json. A rename there would
 /// arrive as a collection this policy has no entry for, which is why the list
@@ -312,6 +312,7 @@ fn model_collection_names_match_policy_keys() {
         community_model::Reaction::collection(),
         community_model::ReadState::collection(),
         community_model::ModAction::collection(),
+        community_model::Report::collection(),
         community_model::Ban::collection(),
         community_model::Notification::collection(),
         community_model::LinkPreview::collection(),
@@ -430,6 +431,239 @@ fn notificationpref_rows_are_private_to_their_owner_on_reads_and_writes() {
     assert!(
         rule.applies_to.applies_to_reads() && rule.applies_to.applies_to_writes(),
         "notificationpref scope must constrain both reads and writes"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Reports: the queue members write into and only moderators read
+// ---------------------------------------------------------------------------
+
+/// A report row as the scope evaluator sees it. All three fields are required
+/// at creation, so — unlike `collaborative` — there is no absent-property path
+/// to model: `reporter` names the filer, `resolved` is born `false`, and
+/// `created_at` is stamped from a clock.
+struct FakeReport {
+    reporter: EntityId,
+    resolved: bool,
+    created_at: i64,
+}
+
+impl Filterable for FakeReport {
+    fn collection(&self) -> &str {
+        "report"
+    }
+    fn value(&self, name: &str) -> Option<Value> {
+        match name {
+            "reporter" => Some(Value::EntityId(self.reporter)),
+            "resolved" => Some(Value::Bool(self.resolved)),
+            "created_at" => Some(Value::I64(self.created_at)),
+            _ => None,
+        }
+    }
+}
+
+/// Build one of report's scope predicates from the shipped rule, the way the
+/// agent does. Only the reporter rule names `$jwt.sub`; the other two name no
+/// variable, so they are populated with nothing.
+fn report_scope_predicate(rule_index: usize, caller: EntityId) -> ankurah::ankql::ast::Predicate {
+    let config = policy();
+    let rule = &config.collections["report"].scope[rule_index];
+    let query = rule.filter.replace("$jwt.sub", "?");
+    let placeholders = rule.filter.matches("$jwt.sub").count();
+    parse_selection(&query)
+        .expect("report scope filter parses")
+        .predicate
+        .populate((0..placeholders).map(|_| Expr::from(&caller)))
+        .expect("one value per placeholder")
+}
+
+/// No report row is visible to a caller the read rule applies to — whoever
+/// filed it, resolved or open. Total rather than scoped to `reporter =
+/// $jwt.sub` because a reporter who could watch their own filing would learn
+/// when a moderator looked at it, and because a queue exactly one audience
+/// reads is a queue nothing else has to reason about.
+#[test]
+fn no_report_row_passes_the_read_scope_for_a_non_moderator() {
+    let me = EntityId::new();
+    let predicate = report_scope_predicate(0, me);
+    let mine = FakeReport { reporter: me, resolved: false, created_at: 1 };
+    assert_eq!(evaluate_predicate(&mine, &predicate), Ok(false), "not even my own filing");
+    let old = FakeReport { reporter: EntityId::new(), resolved: true, created_at: 0 };
+    assert_eq!(evaluate_predicate(&old, &predicate), Ok(false), "and not the oldest timestamp a clock can produce either");
+}
+
+/// WHY THAT RULE IS A COMPARISON NOTHING SATISFIES RATHER THAN THE LITERAL
+/// `false`, which is what anybody reading it will want to simplify it to, and
+/// why it is ONE comparison rather than a contradiction between two.
+///
+/// Both alternatives were tried against a real node and both are broken here.
+///
+/// `false` parses to `Predicate::False`, and `filter_predicate` ANDs the read
+/// scope into every scan a non-moderator runs — including a SUBSCRIPTION, which
+/// the reactor registers by walking the predicate. That walk (ankurah-core
+/// 0.9.2, `reactor/watcherset.rs`) has no arm for `Predicate::False`: it is
+/// `unimplemented!`, so a member subscribing to `report` panics the reactor
+/// worker instead of receiving nothing.
+///
+/// `resolved = false AND resolved = true` registers and delivers nothing, and
+/// then leaks on the OTHER path: sled's fetch planner, given two constraints on
+/// one property, answered the whole collection. So a scope rule must not
+/// constrain the same property twice, and this one constrains exactly one
+/// property once.
+///
+/// What is left is a single comparison a row cannot satisfy. `created_at` is
+/// milliseconds since the epoch, so nothing is ever negative; the property is
+/// required at creation, so the denial is a clean `false` rather than an
+/// absent-property error; and one indexed comparison is what both the reactor
+/// and the planner handle plainly. The rule becomes `"false"` the day ankurah
+/// implements that arm, and not before.
+///
+/// THAT NOTHING IS EVER NEGATIVE IS NOW A RULE, NOT AN OBSERVATION. The client
+/// stamps `created_at` from its own clock, so "every row is stamped from a
+/// clock" was a statement about the code we ship rather than about what the
+/// server accepts — a filing dated `-1` would have satisfied the very
+/// comparison this rule relies on being unsatisfiable, and its filer could
+/// then read it back. The fourth scope rule (`created_at >= 0`, writes only)
+/// refuses that filing, so the premise is enforced where the row is written.
+/// `report_policy_live_tests` witnesses the refusal against a real node.
+#[test]
+fn the_report_read_rule_is_one_unsatisfiable_comparison() {
+    use ankurah::ankql::ast::Predicate;
+    let config = policy();
+    let filter = &config.collections["report"].scope[0].filter;
+    let predicate = parse_selection(filter).expect("report read filter parses").predicate;
+    assert_ne!(predicate, Predicate::False, "the reactor's subscription walk has no arm for the false literal — see this test's doc");
+    assert!(
+        matches!(predicate, Predicate::Comparison { .. }),
+        "the read rule must be exactly one comparison — see this test's doc for what each of the alternatives broke, got: {predicate:?}"
+    );
+    // And it must compare a property every report row carries, or the denial
+    // arrives as an evaluator error instead of a clean `false`.
+    assert!(filter.starts_with("created_at"), "the read rule must compare a required property, got: {filter}");
+}
+
+/// The reporter binding, which is what stops a report being filed in someone
+/// else's name: the after-state must name the caller, so the only report a
+/// member can write is their own. Same shape as `dmmessage`'s sender rule.
+#[test]
+fn a_report_must_name_its_filer_as_the_reporter() {
+    let me = EntityId::new();
+    let them = EntityId::new();
+    let predicate = report_scope_predicate(1, me);
+    assert_eq!(evaluate_predicate(&FakeReport { reporter: me, resolved: false, created_at: 1 }, &predicate), Ok(true));
+    assert_eq!(
+        evaluate_predicate(&FakeReport { reporter: them, resolved: false, created_at: 1 }, &predicate),
+        Ok(false),
+        "a report naming another member as the reporter must be refused"
+    );
+}
+
+/// The second write rule, and the reason it exists: scope rules AND together,
+/// so a non-moderator write must leave the row OPEN as well as its own. Without
+/// it a member could close their own filing, and a queue the filer can empty is
+/// not a queue a moderator can trust. Moderators bypass it — that bypass is
+/// precisely what "resolve" is.
+#[test]
+fn a_non_moderator_write_must_leave_the_report_unresolved() {
+    let me = EntityId::new();
+    let predicate = report_scope_predicate(2, me);
+    assert_eq!(evaluate_predicate(&FakeReport { reporter: me, resolved: false, created_at: 1 }, &predicate), Ok(true));
+    assert_eq!(evaluate_predicate(&FakeReport { reporter: me, resolved: true, created_at: 1 }, &predicate), Ok(false));
+}
+
+/// The write rule that keeps the read shutout unsatisfiable. `created_at` is
+/// the property rule zero compares, and it is the client that stamps it — so
+/// without this, a member could file a report dated before the epoch and read
+/// it back through the very comparison meant to hide every row. Moderators
+/// bypass it like the others: their reads do not go through rule zero at all.
+#[test]
+fn a_report_must_be_stamped_at_or_after_the_epoch() {
+    let me = EntityId::new();
+    let predicate = report_scope_predicate(3, me);
+    assert_eq!(evaluate_predicate(&FakeReport { reporter: me, resolved: false, created_at: 0 }, &predicate), Ok(true), "the epoch itself");
+    assert_eq!(evaluate_predicate(&FakeReport { reporter: me, resolved: false, created_at: 1 }, &predicate), Ok(true));
+    assert_eq!(
+        evaluate_predicate(&FakeReport { reporter: me, resolved: false, created_at: -1 }, &predicate),
+        Ok(false),
+        "a stamp before the epoch is exactly what rule zero's comparison would admit, so this rule refuses the write"
+    );
+}
+
+/// The shipped rule shapes, pinned. Every one of the four carries the moderator
+/// bypass, and each is deliberately one-sided: the read rule filters visibility
+/// without constraining writes (members must still be able to file), and the
+/// three write rules gate writes without hiding rows (hiding is rule zero's
+/// job, and a second read rule would just AND into the same `false`).
+///
+/// The write rules are three separate entries rather than one conjunction
+/// because `enforce_write_scope` evaluates each on its own — so a row missing
+/// one property is refused on that rule alone, and nothing here constrains one
+/// property twice within a single access path (the fetch-planner hazard rule
+/// zero's doc records). `created_at` is named by two rules, and they are on
+/// opposite paths: reads compose rule zero, writes compose the other three.
+#[test]
+fn report_rule_shapes_unchanged() {
+    let config = policy();
+    let rules = &config.collections["report"];
+    assert_eq!(rules.read.as_deref(), Some("moderate"), "the queue is moderator reading");
+    assert_eq!(rules.write.as_deref(), Some("post"), "every signed-in member files reports; the row scope does the real filtering");
+    assert_eq!(rules.scope.len(), 4, "the read shutout, the reporter binding, the open-row rule, and the epoch floor");
+
+    let read_rule = &rules.scope[0];
+    assert_eq!(read_rule.filter, "created_at < 0");
+    assert_eq!(read_rule.unless_privilege.as_deref(), Some("moderate"));
+    assert!(read_rule.applies_to.applies_to_reads() && !read_rule.applies_to.applies_to_writes());
+
+    let reporter_rule = &rules.scope[1];
+    assert_eq!(reporter_rule.filter, "reporter = $jwt.sub");
+    assert_eq!(reporter_rule.unless_privilege.as_deref(), Some("moderate"), "moderators resolve reports they did not file");
+    assert!(
+        reporter_rule.applies_to.applies_to_writes() && !reporter_rule.applies_to.applies_to_reads(),
+        "the reporter binding is a WRITE rule; as a read rule it would hand members their own filings back"
+    );
+
+    let open_rule = &rules.scope[2];
+    assert_eq!(open_rule.filter, "resolved = false");
+    assert_eq!(open_rule.unless_privilege.as_deref(), Some("moderate"), "resolving IS the moderator bypass of this rule");
+    assert!(open_rule.applies_to.applies_to_writes() && !open_rule.applies_to.applies_to_reads());
+
+    let epoch_rule = &rules.scope[3];
+    assert_eq!(epoch_rule.filter, "created_at >= 0");
+    assert_eq!(epoch_rule.unless_privilege.as_deref(), Some("moderate"));
+    assert!(
+        epoch_rule.applies_to.applies_to_writes() && !epoch_rule.applies_to.applies_to_reads(),
+        "the epoch floor is a WRITE rule; as a read rule it would AND against rule zero on the same property, \
+         which is the two-terms-one-property shape rule zero's doc records the fetch planner mishandling"
+    );
+    assert_eq!(read_rule.filter, "created_at < 0", "and it is the exact complement of the comparison it protects");
+}
+
+/// The privilege split behind those rules. A member passes the collection write
+/// gate — `can_write_collection` is checked BEFORE any scope runs (the
+/// `notification` precedent), so anything narrower would block filing outright
+/// — and holds no `moderate`, which is what makes both the read shutout and the
+/// two write rules apply to them. A guest reaches the collection at all only
+/// through a read, write or retrieve privilege, and holds none of the three.
+#[test]
+fn members_file_reports_and_only_moderators_hold_the_bypass() {
+    let config = policy();
+    assert!(
+        config.can_write_collection(&["member".to_string()], &"report".into()),
+        "the member role must pass the report collection write gate, or nobody can report anything"
+    );
+    assert!(
+        !config.roles_have_privilege(&["member".to_string()], "moderate"),
+        "the member role must not hold `moderate`, or every report rule's bypass is meaningless"
+    );
+    for role in ["moderator", "admin"] {
+        assert!(
+            config.roles_have_privilege(&[role.to_string()], "moderate"),
+            "role '{role}' must hold `moderate` — it is what opens the queue and what resolves a row"
+        );
+    }
+    assert!(
+        !config.can_access_collection(&["guest".to_string()], &"report".into()),
+        "a guest must not reach the report collection at all: no read, no write, and no retrieve tier"
     );
 }
 

@@ -21,6 +21,7 @@ use web_sys::window;
 
 mod auth;
 mod ban_lock;
+mod blocklist;
 mod chat_hooks;
 mod editable_text_field;
 mod header;
@@ -31,10 +32,14 @@ mod notification_inbox;
 mod notification_manager;
 mod panels;
 mod profile_popover;
+mod push;
 mod qr_code_modal;
+mod reports;
 mod room_topic;
+mod shell;
 mod sidebar;
 mod sign_in_ceremony;
+mod terms;
 mod user_detail_panel;
 mod xray;
 
@@ -176,6 +181,13 @@ fn main() {
 }
 
 async fn initialize() {
+    // Inside the app, the IndexedDB store is the member's own history rather
+    // than a cache of a site they visited, so ask the browser to stop treating
+    // it as disposable. Best-effort and unawaited — see `shell.rs`.
+    if shell::is_shell() {
+        shell::request_persistent_storage();
+    }
+
     // Resolve the session token: either finish an OIDC callback, or restore one.
     if auth::is_callback() {
         // TRANSITION SHIM (see auth::relay_callback_to_parent): a frame put
@@ -238,6 +250,24 @@ async fn initialize() {
         match connect_node().await {
             Ok(()) => SESSION_LIVE.store(true, Ordering::Relaxed),
             Err(reason) => *AUTH_ERROR.write().unwrap() = Some(reason.to_string()),
+        }
+    }
+
+    // The notification legs, both of them the app's alone: `is_shell()` is
+    // false in a browser for the life of the document, so a web visitor runs
+    // neither and nothing below is reachable from a tab.
+    if shell::is_shell() {
+        // Subscribe before the mount that will follow a tap. A tap is often
+        // what LAUNCHED this app, and the native side holds that one until
+        // something listens for it — see `push::install_navigator` for what
+        // happens to a route that arrives before there is a UI to take it.
+        push::watch_taps();
+        // And ask about notifications only now: on a boot that landed a member
+        // session, so the one system prompt iOS ever shows falls after the
+        // person chose to sign in. A guest boot asks nothing and sends
+        // nothing.
+        if SESSION_LIVE.load(Ordering::Relaxed) && viewer().is_some() {
+            spawn_local(push::register_this_device());
         }
     }
 
@@ -476,6 +506,14 @@ pub fn SignIn() -> impl IntoView {
                     </svg>
                 </button>
                 <p class="signInFootnote">"Authentication by idp.to — local-first chat, built in Rust + wasm."</p>
+                // Where to reach a human. This card is the app's only surface
+                // that is not a chat surface, so it is where the contact line
+                // lives until there is an about page to put it on; the terms
+                // modal renders the same address from the same constant.
+                <p class="signInFootnote">
+                    "Questions or problems: "
+                    <a href=format!("mailto:{}", crate::terms::SUPPORT_CONTACT)>{crate::terms::SUPPORT_CONTACT}</a>
+                </p>
             </div>
             {flow.view()}
         </div>
@@ -571,6 +609,34 @@ pub fn ChatApp() -> impl IntoView {
         .on_auth_demand(move || sign_in.begin())
         .hooks(chat_hooks::chat_hooks(previews_by_url, profile, viewer))
         .provide();
+
+    // Where a tapped push alert lands (the app only — `is_shell()` is false in
+    // a browser, and nothing installed here can be reached without it).
+    //
+    // Both destinations are the ones the inbox row already deep-links to from
+    // the same ids, taken through the same two seams: a room is a selection,
+    // and a direct message is the find-or-create that opening a conversation
+    // has always been. Installed in the component body rather than an effect,
+    // because a route drained at mount has to be in `selected_room` before the
+    // sidebar's default choice looks at it.
+    //
+    // WHAT A GUEST'S TAP DOES, since the alert was addressed to a member and
+    // this device may have been signed out since: a room opens read-only, as
+    // any room does for a guest. A conversation cannot open at all — a thread
+    // has two named participants and there is nobody to name — so
+    // `open_thread_with` raises the components' auth demand instead, which is
+    // the sign-in ceremony. Asking somebody who tapped a direct message to
+    // sign in is the honest answer; it is the same demand the composer raises.
+    if shell::is_shell() {
+        let chat = chat.clone();
+        push::install_navigator(move |route| match route {
+            push::Route::Room(room) => {
+                selected_room.set(Some(room));
+                selected_dm.set(None);
+            }
+            push::Route::Conversation(partner) => dm::open_thread_with(&chat, partner, selected_dm),
+        });
+    }
 
     // Notification sounds, which want a per-room message window. The rooms
     // come from the chat handshake, which owns that query for the session — a
@@ -700,6 +766,11 @@ pub fn ChatApp() -> impl IntoView {
                 }
             }
         </div>
+        // The guidelines gate, mounted once and last: every community-owned
+        // write entry point raises it through `terms::demand_terms`, and it has
+        // to be able to cover an open panel, since two of those entry points
+        // (report, ban) are inside one.
+        <terms::TermsGate />
     }
 }
 

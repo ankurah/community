@@ -10,6 +10,40 @@
   gap: var(--sp-1);
 }
 
+/* Tab strip: the public log, and — for moderators only — the report queue.
+   Present only when the panel offers a second list, so a plain member's log
+   looks exactly as it did. */
+
+.modLogTabs {
+  display: flex;
+  gap: var(--sp-1);
+  padding-bottom: var(--sp-2);
+  border-bottom: 1px solid var(--border);
+}
+
+.modLogTab {
+  padding: 6px var(--sp-3);
+  font-size: var(--fs-md);
+  font-weight: 600;
+  color: var(--text-3);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--r-md);
+  transition:
+    background-color var(--t-fast) var(--ease),
+    color var(--t-fast) var(--ease);
+}
+
+.modLogTab:hover {
+  background: var(--surface-2);
+}
+
+.modLogTabActive {
+  color: var(--text);
+  background: var(--surface-3);
+  border-color: var(--border);
+}
+
 .modLogRow {
   display: flex;
   align-items: flex-start;

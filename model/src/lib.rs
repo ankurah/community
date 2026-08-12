@@ -10,9 +10,9 @@
 //! server writes them with, and neither side can drift from the other.
 //!
 //! The community half is defined below: `UserRoles`, `Ban`, `ModAction`,
-//! `Notification`, `LinkPreview`, `NotificationPref` — moderation, the
-//! notification inbox, the link-preview cache. These reference the shared
-//! types freely.
+//! `Report`, `Notification`, `LinkPreview`, `NotificationPref` — moderation,
+//! the report queue, the notification inbox, the link-preview cache. These
+//! reference the shared types freely.
 //!
 //! The re-export is a glob on purpose. ankurah's derive emits a family of
 //! types per collection (`MessageView`, `MessageMut`, `MessageResultSet`,
@@ -107,6 +107,97 @@ pub struct ModAction {
     /// Optional human-readable justification, shown in the public log.
     pub reason: Option<String>,
     pub created_at: i64,
+}
+
+/// A member's complaint about one message, filed for a moderator to judge.
+///
+/// FOR: the only route by which something a moderator never saw becomes
+/// something they can act on. Moderators do not browse direct messages at all
+/// (the dm read scopes have no `moderate` bypass — docs/moderation.md), and
+/// nothing in the product opens another member's history, so without this row
+/// a moderator learns about abuse only by happening to read it.
+///
+/// Who sees it: moderators and admins, and nobody else — not even the person
+/// who filed it. The `report` read scope in policy.json is a comparison no row
+/// can satisfy, applied to every caller without `moderate`, so a member's query
+/// answers empty and a by-id read is refused. That is deliberate for v1: a
+/// queue only moderators read is a queue nothing else has to reason about, and
+/// a reporter who could watch their own filing would learn when a moderator
+/// looked at it.
+///
+/// Who writes it: any signed-in member, for themselves. The write scope pins
+/// `reporter` to the caller, pins `resolved` to false, and pins `created_at` at
+/// or after the epoch — so a report can be filed in nobody else's name, closed
+/// by nobody who filed it, and dated into no corner of the read scope the
+/// shutout leaves unguarded. Moderators bypass all three, which is what lets
+/// them resolve.
+///
+/// WHAT A FILER MAY STILL CHANGE, and why that makes this row a CLAIM. jwt-auth
+/// evaluates the write scope against the prior state as well as the new one on
+/// an update, so a resolved report is frozen: its filer can neither reopen it
+/// nor rewrite what it says. An OPEN one is not. Every write rule holds both
+/// before and after, so until a moderator closes it, the member who filed a
+/// report may change which message and which room it names.
+///
+/// Nothing in the policy language can bind that. A scope filter names row
+/// properties and `$jwt.*` claims and nothing else — there is no prior-state
+/// variable and no way to tell an update from an insert — and any predicate a
+/// filing satisfies is satisfied again by that same row as the before-state of
+/// its first edit, so no predicate admits the one and refuses the other. The
+/// consequence for whoever reads this row: `message` is the filer's claim about
+/// what is at issue, and `room` is a claim about where. The moderator queue
+/// renders the room from the message it resolves rather than from this row for
+/// exactly that reason (`leptos-app/src/reports.rs`), and
+/// `report_policy_live_tests` pins the residual so the day ankurah can express
+/// the rule, closing it is a deliberate act.
+#[derive(Model, Debug, Serialize, Deserialize)]
+pub struct Report {
+    /// Who filed it. Pinned to the caller by the write scope, so this is the
+    /// one attribution a client cannot claim falsely — the same guarantee
+    /// `DmMessage.user` gets from the sender-binding rule.
+    #[active_type(LWW)]
+    pub reporter: Ref<User>,
+    /// The message complained about. Required at creation and never `Option`:
+    /// a report about nothing is not a report, and a required field has no
+    /// absent-property path for a scope or a query to trip over.
+    #[active_type(LWW)]
+    pub message: Ref<Message>,
+    /// Where it was said, as the FILER named it — a claim, not a fact. It is
+    /// copied off the message at filing time so a queue can name a place
+    /// without resolving every reported message first, and it duplicates
+    /// `Message.room` on purpose: a message never moves between rooms, so a
+    /// truthful copy cannot go stale. What can change is this copy, for as
+    /// long as the report is open (see the struct doc). So the moderator queue
+    /// prints the room off the message it resolves and falls back to this only
+    /// when that message will not read.
+    #[active_type(LWW)]
+    pub room: Ref<Room>,
+    /// The reporter's own words, optional — "no reason given" is a real
+    /// answer and must not be a blocked filing. `Option<String>` reads an
+    /// absent property as `None` rather than `PropertyError::Missing`, the
+    /// `ModAction.reason` idiom.
+    pub reason: Option<String>,
+    /// ms since epoch (same unit as `Message.timestamp`), and never before it:
+    /// the write scope refuses a negative stamp, because the read scope hides
+    /// every row by comparing this property against zero and a row dated below
+    /// that would be one its filer could read back.
+    pub created_at: i64,
+    /// The lifecycle, and the thing the queue sorts on. Born `false` on every
+    /// row so no report lacks the property — the write scope compares against
+    /// it, and an absent property there would be an evaluator error rather
+    /// than a clean answer. Rows are never deleted (entity deletion does not
+    /// exist in ankurah 0.9.0), so a handled report stays as the record.
+    #[active_type(LWW)]
+    pub resolved: bool,
+    /// The moderator who closed it, `None` while open — `ModAction.actor`'s
+    /// stamping idiom, including its rule: keep comparisons on this field
+    /// equality-only, since a `None` and an absent property are one value to
+    /// a reader and two to an index.
+    #[active_type(LWW)]
+    pub resolved_by: Option<Ref<User>>,
+    /// When it was closed (ms since epoch), `None` while open. `Option<i64>`
+    /// for the same absent-property reason as `Message.edited_at`.
+    pub resolved_at: Option<i64>,
 }
 
 /// One inbox row per (recipient, cause). Created exclusively by the server's

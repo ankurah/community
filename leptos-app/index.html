@@ -2,7 +2,11 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- viewport-fit=cover lets the page extend under the notch and home
+         indicator inside the mobile shell (and standalone mobile Safari);
+         the chrome that must clear them pads by env(safe-area-inset-*),
+         which is zero in an ordinary browser tab. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <title>Ankurah Community</title>
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🌱</text></svg>" />
 
@@ -15,6 +19,7 @@
          where community hands that stylesheet this palette. -->
     <link data-trunk rel="css" href="src/ChatTheme.css" />
     <link data-trunk rel="css" href="src/BanLock.css" />
+    <link data-trunk rel="css" href="src/Blocklist.css" />
     <link data-trunk rel="css" href="src/Sidebar.css" />
     <link data-trunk rel="css" href="src/EditableTextField.css" />
     <link data-trunk rel="css" href="src/Header.css" />
@@ -24,13 +29,21 @@
     <link data-trunk rel="css" href="src/NotificationInbox.css" />
     <link data-trunk rel="css" href="src/ProfilePopover.css" />
     <link data-trunk rel="css" href="src/QRCodeModal.css" />
+    <link data-trunk rel="css" href="src/Reports.css" />
     <link data-trunk rel="css" href="src/RoomTopic.css" />
     <link data-trunk rel="css" href="src/SignInCeremony.css" />
+    <link data-trunk rel="css" href="src/Terms.css" />
     <link data-trunk rel="css" href="src/UserDetailPanel.css" />
     <link data-trunk rel="css" href="src/XRay.css" />
 
     <!-- Static assets served at /sounds/... (notification sound) -->
     <link data-trunk rel="copy-dir" href="sounds" />
+
+    <!-- The mobile shell's page glue. A classic script in the head runs before
+         the deferred wasm module, so the global it defines (or, in a browser,
+         does not) is settled by the time the client looks for it. -->
+    <link data-trunk rel="copy-file" href="shell.js" />
+    <script src="/shell.js"></script>
   </head>
   <body></body>
 </html>
