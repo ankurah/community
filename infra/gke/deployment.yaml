@@ -53,6 +53,13 @@ spec:
               value: "8080"
             - name: RUST_LOG
               value: info
+            # The private provider key and its identifier arrive through the
+            # runtime Secret. These two values identify the Apple team and the
+            # one app topic the production-only APNs key is allowed to reach.
+            - name: APNS_TEAM_ID
+              value: N893VNX4ZP
+            - name: APNS_TOPIC
+              value: org.ankurah.community
           startupProbe:
             httpGet:
               path: /health

@@ -19,10 +19,11 @@ kubectl apply -f infra/gke/deploy-rbac.yaml
 ```
 
 Runtime secrets remain in Google Secret Manager in `synesthetic-1`. GKE Secret
-Sync copies only the Community database URL, JWT signing key, and CI hook key
-into the namespace-local `community-runtime-secrets` Kubernetes Secret. The
-application runtime identity has Cloud SQL client access but no general Secret
-Manager access.
+Sync copies only the Community database URL, JWT signing key, CI hook key, and
+APNs provider key + key identifier into the namespace-local
+`community-runtime-secrets` Kubernetes Secret. The APNs team and app topic are
+non-secret Deployment values. The application runtime identity has Cloud SQL
+client access but no general Secret Manager access.
 
 The Service creates standalone zonal NEGs named `community-web-gke-neg`. The
 pod is pinned to `us-west1-b`; only that zone's non-empty NEG is attached to
