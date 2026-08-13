@@ -10,9 +10,10 @@
 //! server writes them with, and neither side can drift from the other.
 //!
 //! The community half is defined below: `UserRoles`, `Ban`, `ModAction`,
-//! `Report`, `Notification`, `LinkPreview`, `NotificationPref` — moderation,
-//! the report queue, the notification inbox, the link-preview cache. These
-//! reference the shared types freely.
+//! `Report`, `Notification`, `LinkPreview`, `NotificationPref`, `PushDevice` —
+//! moderation, the report queue, the notification inbox, the link-preview
+//! cache, and the self-scoped mobile delivery registry. These reference the
+//! shared types freely.
 //!
 //! The re-export is a glob on purpose. ankurah's derive emits a family of
 //! types per collection (`MessageView`, `MessageMut`, `MessageResultSet`,
@@ -297,4 +298,41 @@ pub struct NotificationPref {
     /// mirrors the `UserRoles.roles` Json-array idiom. Mentions in a muted
     /// room produce no notification.
     pub muted_rooms: Json,
+}
+
+/// One APNs address registered by one member's app installation.
+///
+/// This is an Ankurah collection deliberately, not a side table or an HTTP
+/// registration RPC. The app writes it through its ephemeral node, and the
+/// policy agent is the confidentiality boundary: `policy.json` scopes reads
+/// and writes to `user = $jwt.sub`. A member can see and update every device
+/// registered to their own account and nobody else's; the durable node's Root
+/// context reads active rows for delivery.
+///
+/// Rows are deactivated instead of deleted because Ankurah entities have no
+/// delete lifecycle. Re-registering the same `(user, token)` reactivates and
+/// refreshes its existing row; APNs invalidation and sign-out flip `active`
+/// false. Historical events remain visible only to the owning member and Root.
+pub const MAX_PUSH_DEVICES_PER_USER: usize = 10;
+
+#[derive(Model, Debug, Serialize, Deserialize)]
+pub struct PushDevice {
+    #[active_type(LWW)]
+    pub user: Ref<User>,
+    /// APNs device token, hexadecimal as issued by Apple. This is a delivery
+    /// credential and must never be readable by another member or appear in a
+    /// whole-token log line.
+    #[active_type(LWW)]
+    pub token: String,
+    /// Delivery service discriminator. `ios` today; stored as an atom so a
+    /// later Android transport has to be recognized explicitly by the sender.
+    #[active_type(LWW)]
+    pub platform: String,
+    /// Milliseconds since epoch when this installation most recently claimed
+    /// the token. The per-member cap retains the ten newest active rows.
+    #[active_type(LWW)]
+    pub last_registered_at: i64,
+    /// False after sign-out, APNs invalidation, or cap eviction.
+    #[active_type(LWW)]
+    pub active: bool,
 }

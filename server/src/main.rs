@@ -42,46 +42,16 @@ type Storage = SledStorageEngine;
 #[cfg(feature = "postgres")]
 type Storage = Postgres;
 
-/// Open the durable node's storage AND the server-owned device-token registry,
-/// which is why one function returns both.
-///
-/// They come out together because they share one handle to one backend, and
-/// that sharing is not a convenience. Sled takes a file lock on its directory,
-/// so a second open of the same path fails outright; Postgres would otherwise
-/// carry a second connection pool against the same database. The registry is
-/// not an ankurah collection — see `push::store` for why a device token must
-/// not be one — so it needs the backend directly rather than through the node.
 #[cfg(all(feature = "sled", not(feature = "postgres")))]
-async fn make_storage() -> Result<(Storage, Arc<dyn push::DeviceTokens>)> {
-    let engine = SledStorageEngine::with_homedir_folder(".community")?;
-    let device_tokens = push::store::open_sled(&engine)?;
-    Ok((engine, device_tokens))
-}
+async fn make_storage() -> Result<Storage> { SledStorageEngine::with_homedir_folder(".community") }
 
 #[cfg(feature = "postgres")]
-async fn make_storage() -> Result<(Storage, Arc<dyn push::DeviceTokens>)> {
-    use ankurah_storage_postgres::{DEFAULT_CONNECTION_TIMEOUT_SECS, DEFAULT_POOL_SIZE};
-    use bb8_postgres::{tokio_postgres::NoTls, PostgresConnectionManager};
-
+async fn make_storage() -> Result<Storage> {
     // DATABASE_URL is provided by dev.sh (dev: randomized-port container) or by
     // Cloud Run (prod: Cloud SQL socket). The fallback is only for direct runs.
     let uri = std::env::var("DATABASE_URL")
         .unwrap_or_else(|_| "postgres://postgres:ankurah@localhost:5432/community".to_string());
-
-    // The pool is built here rather than by `Postgres::open` so that both
-    // readers of this database share it. `Postgres::new` is the storage
-    // engine's own sanctioned entry point for exactly this — its `open` is the
-    // convenience wrapper around these three lines — and the sizes come from
-    // the engine's constants so the two cannot drift.
-    let manager = PostgresConnectionManager::new_from_stringlike(uri.as_str(), NoTls)?;
-    let pool = bb8::Pool::builder()
-        .max_size(DEFAULT_POOL_SIZE)
-        .connection_timeout(std::time::Duration::from_secs(DEFAULT_CONNECTION_TIMEOUT_SECS))
-        .build(manager)
-        .await?;
-
-    let device_tokens = push::store::open_postgres(pool.clone()).await?;
-    Ok((Postgres::new(pool)?, device_tokens))
+    Postgres::open(&uri).await
 }
 
 /// Ankurah access-token lifetime. Long-ish because there is no refresh flow yet:
@@ -104,8 +74,6 @@ struct AppState {
     ci: ci_hook::CiHook,
     /// Signing key + mint budgets for `POST /auth/guest` (#79).
     guest: guest::GuestMint,
-    /// Verifying key + device-token store for `POST /push/register`.
-    push: push::PushRegistry,
 }
 
 /// The CI webhook handler asks for its own state, not the whole `AppState` —
@@ -121,20 +89,12 @@ impl axum::extract::FromRef<AppState> for guest::GuestMint {
     fn from_ref(state: &AppState) -> Self { state.guest.clone() }
 }
 
-/// And for the device-token registry: it wants the verifying key and the token
-/// store, and has no business with the node — which is what lets the route be
-/// tested without one.
-impl axum::extract::FromRef<AppState> for push::PushRegistry {
-    fn from_ref(state: &AppState) -> Self { state.push.clone() }
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt().with_max_level(Level::INFO).init();
 
-    // Initialize storage engine (Sled or Postgres — see this crate's features),
-    // and the device-token registry that shares its handle.
-    let (storage, device_tokens) = make_storage().await?;
+    // Initialize the Ankurah storage engine (Sled or Postgres — see features).
+    let storage = make_storage().await?;
 
     // RS256 signing key: env PEM in prod (Secret Manager), generated dev key otherwise.
     let signing_keys = load_signing_keys()?;
@@ -158,6 +118,11 @@ async fn main() -> Result<()> {
     // Privileged context that bypasses RBAC — used for seeding + upserts.
     let system_ctx = node.context_async(JwtContext::system()).await;
 
+    // Push registrations are self-scoped PushDevice entities written by the
+    // app's ephemeral node. Delivery reads them through Root like every other
+    // server worker; no backend-specific table or registration RPC exists.
+    let device_tokens = push::store::open(system_ctx.clone());
+
     // Seed the default community rooms (idempotent).
     ensure_default_rooms(&system_ctx).await?;
 
@@ -174,7 +139,7 @@ async fn main() -> Result<()> {
     // The push sender is the one worker a deployment can be without: with no
     // APNs credentials in the environment it is never started, and the line
     // saying so is written by `delivery_from_env` here rather than at the first
-    // send. The registry keeps filing device tokens either way.
+    // send. Self-scoped PushDevice writes remain available either way.
     let push_delivery = workers::push::delivery_from_env(device_tokens.clone());
     workers::start(system_ctx.clone(), push_delivery);
 
@@ -186,7 +151,6 @@ async fn main() -> Result<()> {
         static_dir: PathBuf::from(static_dir),
         system_ctx,
         guest: guest::GuestMint::new(signing_keys.clone()),
-        push: push::PushRegistry::new(signing_keys.clone(), device_tokens),
         signing_keys,
         oidc: Arc::new(OidcVerifier::from_env()),
         ci,
@@ -214,16 +178,6 @@ async fn main() -> Result<()> {
         // default, times this service's concurrency of 40. Refusing at the
         // layer means the bytes are never collected in the first place.
         .route("/hooks/ci", post(ci_hook::handle).layer(DefaultBodyLimit::max(ci_hook::MAX_BODY_BYTES)))
-        // Device-token registry for mobile push. Unlike the two auth routes it
-        // CONSUMES a session token rather than minting one — the first route
-        // here to do so — and it accepts only a member's: a guest has no
-        // account to file a device under. The body limit is the CI webhook's
-        // reasoning at a registration's size: the handler reads bytes, so the
-        // request is buffered before it can check who is calling.
-        .route(
-            "/push/register",
-            post(push::registry::handle).layer(DefaultBodyLimit::max(push::registry::MAX_BODY_BYTES)),
-        )
         .fallback(spa_fallback)
         .with_state(state)
         // Permissive CORS so cross-origin callers (e.g. a native/RN client on a

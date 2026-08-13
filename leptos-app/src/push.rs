@@ -4,11 +4,11 @@
 //! FOR: the in-app inbox reaches a member only while they are looking at the
 //! app. The server already sends an alert per notification-worthy event
 //! (`server/src/workers/push.rs`), but it can only send to a device it has
-//! been told about — so the app hands over the device token APNs minted for
-//! this install, and the alert that comes back has to land somewhere useful
-//! when it is tapped. Both legs live here; the JavaScript they go through
-//! (`shell.js`) and the typed native calls above it (`shell.rs`) hold no part
-//! of the decision.
+//! been told about — so the app writes the device token APNs minted for this
+//! install as its own self-scoped `PushDevice` entity, and the alert that comes
+//! back has to land somewhere useful when it is tapped. Both legs live here;
+//! the JavaScript they go through (`shell.js`) and the typed native calls above
+//! it (`shell.rs`) hold no part of the decision.
 //!
 //! WHEN THE MEMBER IS ASKED, and why it is not earlier. iOS shows its
 //! notification prompt once per install, so where that prompt falls is the
@@ -16,8 +16,8 @@
 //! MEMBER session: somebody who has signed in, whose account is what a
 //! notification would be addressed to. A guest boot asks nothing and calls
 //! nothing — a guest names no `User` row, has nothing addressed to them, and
-//! the registry refuses them by design (`server/src/push/registry.rs`) — and
-//! an install that has never been signed into never sees the prompt at all.
+//! cannot write the `pushdevice` collection under `policy.json` — and an
+//! install that has never been signed into never sees the prompt at all.
 //!
 //! A REFUSAL IS FINAL AND SILENT. Denied stays denied: nothing here asks
 //! again, and nothing tells the member what they are missing. iOS would not
@@ -26,10 +26,10 @@
 //!
 //! EVERY MEMBER BOOT RE-REGISTERS. iOS reissues a device token without warning
 //! — a restore, an app reinstall, an OS update — and the app is the only party
-//! that ever learns the new one. The registry upserts per (member, device), so
-//! a re-registration refreshes one row rather than adding one, which makes
-//! "send it every launch" the cheap and correct answer instead of tracking
-//! what we last sent.
+//! that ever learns the new one. The client upserts its own (member, device)
+//! entity through Ankurah, so a re-registration refreshes one row rather than
+//! adding one, which makes "send it every launch" the cheap and correct answer
+//! instead of tracking what we last sent.
 //!
 //! NO BANNER OVER AN OPEN APP. `mobile/capacitor.config.json` sets the push
 //! plugin's `presentationOptions` to the empty list, so an alert arriving while
@@ -47,11 +47,11 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
+use ankurah::ankql::{ast::Expr, parser::parse_selection};
 use ankurah::EntityId;
+use community_model::{PushDevice, PushDeviceView, MAX_PUSH_DEVICES_PER_USER};
 use serde_json::Value;
-use wasm_bindgen::{JsCast, JsValue};
-use wasm_bindgen_futures::JsFuture;
-use web_sys::{window, Headers, Request, RequestInit, Response};
+use web_sys::window;
 
 use crate::shell::{self, PushPermission};
 
@@ -65,13 +65,9 @@ const TARGET_KEY: &str = "community";
 /// (`notification_inbox.rs`).
 const DM_KIND: &str = "dm";
 
-/// Which push service reaches this device — the one word the registry accepts
-/// today (`server/src/push/store.rs`).
+/// Which push service reaches this device — shared with the server sender's
+/// parser (`server/src/push/store.rs`).
 const PLATFORM: &str = "ios";
-
-/// The registry's door (`server/src/push/registry.rs`). Both directions go
-/// through it: the body says which.
-const REGISTER_PATH: &str = "/push/register";
 
 /// localStorage key for the device token this install last filed with the
 /// server.
@@ -143,18 +139,6 @@ fn named_entity(target: &Value, name: &str) -> Option<EntityId> {
             None
         }
     }
-}
-
-/// What this device sends to `POST /push/register` to be reachable.
-pub fn registration_body(device_token: &str) -> String {
-    serde_json::json!({ "token": device_token, "platform": PLATFORM }).to_string()
-}
-
-/// And what it sends to the same door to stop being reachable. The platform
-/// rides along because the route validates the whole body before it looks at
-/// the flag — one shape in, one set of refusals.
-pub fn withdrawal_body(device_token: &str) -> String {
-    serde_json::json!({ "token": device_token, "platform": PLATFORM, "unregister": true }).to_string()
 }
 
 /// The part of a device token that may be written down.
@@ -242,113 +226,129 @@ pub async fn register_this_device() {
         }
     };
 
-    let Some(base) = crate::auth::server_http_base() else {
-        tracing::warn!("push: no server address to register this device with");
-        return;
-    };
-    // The same session token every other request to our own server presents.
-    // Its subject is what the registry files the device under, so a device is
-    // only ever filed under the member who is signed in right now.
-    let Some(session) = crate::AUTH_TOKEN.read().ok().and_then(|guard| guard.clone()) else {
-        tracing::warn!("push: no session to register this device with");
+    let Some(member) = crate::viewer() else {
+        tracing::warn!("push: no member session to own this device registration");
         return;
     };
 
     let device = token_prefix(&device_token);
-    match post_to_registry(&format!("{base}{REGISTER_PATH}"), &session, &registration_body(&device_token)).await {
-        Ok(204) => {
-            // Remembered only once the server has it, so the slot never names a
-            // row that was never filed — a withdrawal for one would be a
-            // request that changes nothing.
+    match upsert_device(member, &device_token).await {
+        Ok(()) => {
+            // Remembered only once the entity commit succeeds, so the slot
+            // never names a row this node did not file.
             if let Some(ls) = local_storage() {
                 let _ = ls.set_item(LS_DEVICE_TOKEN, &device_token);
             }
             tracing::info!("push: registered this device ({device}…) for notifications");
         }
-        // The registry answers every refusal with a status and a sentence, and
-        // the sentence is for a developer rather than for the log — so the
-        // status is what is written down. 401 is a session it would not verify,
-        // 403 a guest (which this path does not reach), 400 a body it did not
-        // recognize as a registration.
-        Ok(status) => tracing::warn!("push: the server refused this device ({device}…) with HTTP {status}"),
-        Err(reason) => tracing::warn!("push: could not reach the server to register this device: {reason}"),
+        Err(reason) => tracing::warn!("push: could not commit this device ({device}…) through Ankurah: {reason}"),
     }
 }
 
-/// Tell the server to stop reaching this phone for the member signing out.
-///
-/// Called from `auth::sign_out` BEFORE it clears anything, because the request
-/// needs the session it is ending: the registry files a device under the
-/// subject of the token presented, and withdraws under the same.
-///
-/// FIRE AND FORGET, on `shell::open_external`'s rule and for the same reason.
-/// Nothing downstream waits: the sign-out reloads the document a moment later
-/// and may well cut this request off mid-flight. That is accepted rather than
-/// hidden — the local sign-out happens either way, and the honest description
-/// of this call is "the usual case stops the alerts, and the rest is what the
-/// APNs feedback path is for" (`server/src/push/registry.rs`).
+/// Deactivate this phone's self-owned registration when signing out.
 ///
 /// The slot is cleared FIRST, and not on success: this device is signing out
 /// whatever the server says, and a stale token left behind would be sent again
 /// by the next sign-out under whichever account signs in next — a request
 /// naming a row that member never filed.
-pub fn withdraw_this_device() {
+pub async fn withdraw_this_device() {
     // The presence of the slot is the shell test: only a shell boot registers,
     // so only a shell boot ever wrote one.
     let Some(ls) = local_storage() else { return };
     let Some(device_token) = ls.get_item(LS_DEVICE_TOKEN).ok().flatten().filter(|token| !token.is_empty()) else { return };
     let _ = ls.remove_item(LS_DEVICE_TOKEN);
 
-    let Some(base) = crate::auth::server_http_base() else {
-        tracing::warn!("push: no server address to withdraw this device from");
-        return;
-    };
-    // The session being ended, read from memory rather than from storage: the
-    // caller is about to clear the stored one, and this is the token whose
-    // subject owns the row.
-    let Some(session) = crate::AUTH_TOKEN.read().ok().and_then(|guard| guard.clone()) else {
-        tracing::warn!("push: no session to withdraw this device with; the registration is left for the APNs feedback path");
+    let Some(member) = crate::viewer() else {
+        tracing::warn!("push: no member session to deactivate this device with; the registration is left for APNs feedback");
         return;
     };
 
     let device = token_prefix(&device_token);
-    let url = format!("{base}{REGISTER_PATH}");
-    let body = withdrawal_body(&device_token);
-    wasm_bindgen_futures::spawn_local(async move {
-        match post_to_registry(&url, &session, &body).await {
-            Ok(204) => tracing::info!("push: withdrew this device ({device}…) from notifications"),
-            Ok(status) => tracing::warn!("push: the server refused to withdraw this device ({device}…) with HTTP {status}"),
-            Err(reason) => tracing::warn!("push: could not reach the server to withdraw this device: {reason}"),
-        }
-    });
+    match deactivate_device(member, &device_token).await {
+        Ok(()) => tracing::info!("push: withdrew this device ({device}…) from notifications"),
+        Err(reason) => tracing::warn!("push: could not deactivate this device ({device}…) through Ankurah: {reason}"),
+    }
 }
 
 /// This document's localStorage, when there is one.
 fn local_storage() -> Option<web_sys::Storage> { window()?.local_storage().ok().flatten() }
 
-/// POST to the registry, answering with the status the server gave. Serves both
-/// directions — the body is what says which.
-///
-/// `Err` is reserved for never having been answered at all — offline, name
-/// resolution, TLS, a blocked request. The response body is deliberately never
-/// read: the caller logs, and a body in a log is what `auth::GuestMintFailure`
-/// exists to keep out of one.
-async fn post_to_registry(url: &str, session_token: &str, body: &str) -> Result<u16, String> {
-    let describe = |e: JsValue| e.as_string().unwrap_or_else(|| format!("{e:?}"));
-    let window = window().ok_or("no window")?;
+type PushResult<T> = Result<T, Box<dyn std::error::Error>>;
 
-    let opts = RequestInit::new();
-    opts.set_method("POST");
-    opts.set_body(&JsValue::from_str(body));
-    let headers = Headers::new().map_err(describe)?;
-    headers.set("Content-Type", "application/json").map_err(describe)?;
-    headers.set("Authorization", &format!("Bearer {session_token}")).map_err(describe)?;
-    opts.set_headers(headers.as_ref());
+fn device_predicate(member: EntityId) -> PushResult<ankurah::ankql::ast::Predicate> {
+    Ok(parse_selection("user = ?")?.predicate.populate([Expr::from(&member)])?)
+}
 
-    let request = Request::new_with_str_and_init(url, &opts).map_err(describe)?;
-    let answer = JsFuture::from(window.fetch_with_request(&request)).await.map_err(describe)?;
-    let response: Response = answer.dyn_into().map_err(|_| "fetch did not return a Response".to_string())?;
-    Ok(response.status())
+async fn device_rows(member: EntityId) -> PushResult<Vec<PushDeviceView>> {
+    Ok(crate::ctx().fetch::<PushDeviceView>(device_predicate(member)?).await?)
+}
+
+/// Upsert this installation and deactivate honest-client overflow. The server
+/// independently sends only to the newest ten rows, so a custom client cannot
+/// turn one notification into unbounded APNs traffic by omitting this cleanup.
+async fn upsert_device(member: EntityId, device_token: &str) -> PushResult<()> {
+    let rows = device_rows(member).await?;
+    let mut matching: Vec<PushDeviceView> = rows
+        .iter()
+        .filter(|row| row.token().map(|stored| stored == device_token).unwrap_or(false))
+        .cloned()
+        .collect();
+    matching.sort_by_key(|row| row.id().to_base64());
+
+    let now = js_sys::Date::now() as i64;
+    let trx = crate::ctx().begin();
+    if let Some(keeper) = matching.first() {
+        let editable = keeper.edit(&trx)?;
+        editable.platform().set(&PLATFORM.to_string())?;
+        editable.last_registered_at().set(&now)?;
+        editable.active().set(&true)?;
+        for duplicate in matching.iter().skip(1) {
+            duplicate.edit(&trx)?.active().set(&false)?;
+        }
+    } else {
+        trx.create(&PushDevice {
+            user: member.into(),
+            token: device_token.to_string(),
+            platform: PLATFORM.to_string(),
+            last_registered_at: now,
+            active: true,
+        })
+        .await?;
+    }
+    trx.commit().await?;
+
+    let mut active = Vec::new();
+    for row in device_rows(member).await? {
+        if row.active()? {
+            active.push((row.last_registered_at()?, row.token()?, row.id().to_base64(), row));
+        }
+    }
+    active.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)).then_with(|| b.2.cmp(&a.2)));
+    if active.len() > MAX_PUSH_DEVICES_PER_USER {
+        let trx = crate::ctx().begin();
+        for (_, _, _, row) in active.into_iter().skip(MAX_PUSH_DEVICES_PER_USER) {
+            row.edit(&trx)?.active().set(&false)?;
+        }
+        trx.commit().await?;
+    }
+    Ok(())
+}
+
+async fn deactivate_device(member: EntityId, device_token: &str) -> PushResult<()> {
+    let matching: Vec<PushDeviceView> = device_rows(member)
+        .await?
+        .into_iter()
+        .filter(|row| row.token().map(|stored| stored == device_token).unwrap_or(false))
+        .collect();
+    if matching.is_empty() {
+        return Ok(());
+    }
+    let trx = crate::ctx().begin();
+    for row in matching {
+        row.edit(&trx)?.active().set(&false)?;
+    }
+    trx.commit().await?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -431,29 +431,6 @@ mod tests {
         let general = Some(Route::Room(EntityId::from_base64(GENERAL).unwrap()));
         assert_eq!(route_for_tap(&tap(json!({ "room": GENERAL }))), general);
         assert_eq!(route_for_tap(&tap(json!({ "kind": 7, "room": GENERAL, "actor": BOB }))), general);
-    }
-
-    #[wasm_bindgen_test]
-    fn a_registration_says_the_token_and_the_service_and_nothing_else() {
-        // The token goes over verbatim: iOS writes it in upper-case hex, and
-        // the registry checks the alphabet case-insensitively — so re-casing it
-        // here would only risk filing one phone under two rows.
-        let token = "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF";
-        let body: Value = serde_json::from_str(&registration_body(token)).unwrap();
-        assert_eq!(body, json!({ "token": token, "platform": "ios" }));
-    }
-
-    #[wasm_bindgen_test]
-    fn a_withdrawal_is_the_same_body_with_one_word_added() {
-        // Same token, same service, same shape — the route validates all of it
-        // before it reads the flag, so a withdrawal is refused everywhere a
-        // registration is. The flag is absent from a registration rather than
-        // written false, which is what lets a server that predates it read what
-        // the app sends.
-        let token = "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF";
-        let body: Value = serde_json::from_str(&withdrawal_body(token)).unwrap();
-        assert_eq!(body, json!({ "token": token, "platform": "ios", "unregister": true }));
-        assert!(serde_json::from_str::<Value>(&registration_body(token)).unwrap().get("unregister").is_none());
     }
 
     #[wasm_bindgen_test]

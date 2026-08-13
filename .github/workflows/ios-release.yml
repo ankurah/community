@@ -7,7 +7,7 @@
 # SIGNING (adopted from synestheticsystems/anku's proven testflight.yml):
 # an App Manager ASC API key cannot mint a distribution cert headless, but it
 # CAN create/delete provisioning PROFILES. So the cert arrives as a secret
-# (ASC_DIST_P12) and the profile is get-or-created at build time from the App ID
+# (ASC_DIST_P12) and the profile is re-minted at build time from the App ID
 # (tools/ci/asc-profile.mjs). The archive is UNSIGNED; signing happens at
 # export. Because the profile is minted from the App ID's current capabilities,
 # it carries Push Notifications automatically — there is no hand-made profile to
@@ -155,14 +155,21 @@ jobs:
           ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
         run: |
           set -euo pipefail
-          # Get-or-create the profile from the App ID, carrying the newest dist
-          # cert, then install it where xcodebuild resolves profiles by UUID.
+          # Re-mint the profile from the App ID on every release. Profiles are
+          # capability snapshots, so reusing one can omit a capability enabled
+          # after it was created (as happened with Push Notifications).
           node "$GITHUB_WORKSPACE/tools/ci/asc-profile.mjs" "$RUNNER_TEMP/community.mobileprovision" "$PROFILE_NAME"
-          UUID=$(security cms -D -i "$RUNNER_TEMP/community.mobileprovision" | plutil -extract UUID raw -o - -)
+          security cms -D -i "$RUNNER_TEMP/community.mobileprovision" > "$RUNNER_TEMP/community-profile.plist"
+          UUID=$(plutil -extract UUID raw -o - "$RUNNER_TEMP/community-profile.plist")
+          APS_ENV=$(plutil -extract Entitlements.aps-environment raw -o - "$RUNNER_TEMP/community-profile.plist" 2>/dev/null || true)
+          if [ "$APS_ENV" != "production" ]; then
+            echo "::error::Provisioning profile has aps-environment='$APS_ENV'; expected 'production'. Enable Push Notifications on $BUNDLE_ID and re-run."
+            exit 1
+          fi
           PROFDIR="$HOME/Library/MobileDevice/Provisioning Profiles"
           mkdir -p "$PROFDIR"
           cp "$RUNNER_TEMP/community.mobileprovision" "$PROFDIR/$UUID.mobileprovision"
-          echo "Installed profile $UUID"
+          echo "Installed profile $UUID with production APNs entitlement"
 
       - name: Write exportOptions.plist (manual signing)
         run: |

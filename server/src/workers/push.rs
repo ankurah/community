@@ -3,8 +3,8 @@
 //! FOR: the mention and DM fan-outs write a `Notification` row and stop there,
 //! which reaches a member only while they have the app open. This worker is the
 //! rest of the trip — it watches those rows and, for each newly minted one,
-//! sends one alert to every device the recipient has registered
-//! (`push::registry`), through Apple (`push::apns`).
+//! sends one alert to every device in the recipient's self-scoped
+//! `PushDevice` collection, through Apple (`push::apns`).
 //!
 //! Consumes `NotificationView`s from the standing notification LiveQuery (see
 //! `workers::watch_notifications`), on the same shape as the two message
@@ -79,7 +79,7 @@ pub fn delivery_from_env(tokens: Arc<dyn DeviceTokens>) -> Option<Delivery> {
                 }
                 // A key that will not parse is a configured deployment that
                 // cannot send. Loud, and still not fatal: chat runs, and the
-                // registry keeps the tokens for whenever the key is fixed.
+                // registration collection keeps the tokens for whenever the key is fixed.
                 Err(e) => {
                     error!("push sender: the APNs credentials are set but unusable, so no alerts are sent: {e:#}");
                     None
@@ -88,7 +88,7 @@ pub fn delivery_from_env(tokens: Arc<dyn DeviceTokens>) -> Option<Delivery> {
         }
         FromEnv::Absent => {
             info!(
-                "push sender: {}, {}, {} and {} are unset, so the sender is dormant and no alerts are sent; POST /push/register keeps accepting device tokens",
+                "push sender: {}, {}, {} and {} are unset, so the sender is dormant and no alerts are sent; self-scoped PushDevice registration remains available",
                 apns::KEY_P8_VAR, apns::KEY_ID_VAR, apns::TEAM_ID_VAR, apns::TOPIC_VAR
             );
             None
@@ -127,8 +127,8 @@ pub struct Named {
 /// reading; everything below it is a pure function of this struct.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Announcement {
-    /// The recipient's `User` entity id, base64 — the key the device-token
-    /// registry files under.
+    /// The recipient's `User` entity id, base64 — the owner each PushDevice row
+    /// names.
     pub recipient: String,
     /// The `Notification` entity id, base64.
     pub notification: String,
@@ -173,8 +173,8 @@ const MAX_COLLAPSE_ID_BYTES: usize = 64;
 /// this line.
 ///
 /// Keyed on (recipient, conversation). The recipient is in the key because one
-/// phone can hold two members' registrations — the registry files per (member,
-/// device) — and one member's alerts must not replace the other's.
+/// phone can hold two members' registrations — PushDevice rows belong to a
+/// member — and one member's alerts must not replace the other's.
 fn collapse_id(announcement: &Announcement) -> String {
     let conversation = match (&announcement.room, &announcement.actor) {
         // A room is the conversation.
@@ -242,8 +242,8 @@ pub fn alert_for(announcement: &Announcement) -> Alert {
 /// function free of the node: everything below needs only the token store and
 /// the way to Apple.
 ///
-/// `Err` is reserved for not being able to read the registry at all. A refusal
-/// from Apple concerns one device and is logged there.
+/// `Err` is reserved for not being able to read the registration collection at
+/// all. A refusal from Apple concerns one device and is logged there.
 pub async fn deliver(delivery: &Delivery, announcement: &Announcement) -> Result<()> {
     let devices = delivery.tokens.for_user(&announcement.recipient).await.context("read the recipient's device tokens")?;
     if devices.is_empty() {
@@ -264,7 +264,7 @@ pub async fn deliver(delivery: &Delivery, announcement: &Announcement) -> Result
             Ok(Outcome::TokenGone { reason, invalidated_at }) => {
                 // Apple's report is the one word about a device that arrives
                 // without the device's cooperation — the backstop behind the
-                // withdrawal a sign-out sends (see `push::registry`).
+                // self-scoped deactivation a sign-out commits (`push.rs`).
                 //
                 // BUT IT DESCRIBES A MOMENT, NOT THE PRESENT. Apple says when
                 // the token stopped being valid, and a phone that deleted the

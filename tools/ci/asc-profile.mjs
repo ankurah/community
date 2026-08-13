@@ -1,9 +1,10 @@
 // Ensure an IOS_APP_STORE provisioning profile exists for org.ankurah.community
 // that includes the NEWEST Apple Distribution cert, and write its
-// .mobileprovision. Get-or-create: reuses the named profile when it is ACTIVE
-// and already carries the newest cert; otherwise deletes and re-mints it
-// (profiles are cheap, re-mintable API objects — the cert's private key is the
-// only real secret).
+// .mobileprovision. Always deletes and re-mints the named profile: profile
+// metadata does not reveal whether a capability enabled on the App ID after
+// the profile was created (notably Push Notifications) is present. Profiles
+// are cheap, re-mintable API objects — the cert's private key is the only real
+// secret.
 //
 // Runs with the App Manager ASC key: that role can create/delete PROFILES via
 // the API — it is cert MINTING it cannot do (that needs a portal CSR; see
@@ -18,7 +19,7 @@
 // Usage:
 //   ASC_KEY_ID=.. ASC_ISSUER_ID=.. node tools/ci/asc-profile.mjs <out.mobileprovision> [name]
 // Reads the .p8 from ~/.appstoreconnect/private_keys/AuthKey_$ASC_KEY_ID.p8.
-// Prints "PROFILE_OK <uuid> <name> <reused|minted>" on success.
+// Prints "PROFILE_OK <uuid> <name> minted" on success.
 import { readFileSync, writeFileSync } from 'node:fs';
 import { sign as cryptoSign } from 'node:crypto';
 
@@ -57,17 +58,13 @@ const cert = certs.data
 if (!cert) { console.error('NO_DIST_CERT — mint one via CSR in the portal first'); process.exit(3); }
 console.error(`cert: ${cert.id} exp=${cert.attributes.expirationDate}`);
 
-// Reuse the named profile only if ACTIVE and already carrying that cert.
+// A profile is a snapshot of the App ID's capabilities. Re-mint it even when
+// it is active and carries the current certificate, so an App ID capability
+// change cannot silently produce another signed build without that entitlement.
 const existing = await api(`/v1/profiles?filter[name]=${encodeURIComponent(profName)}&include=certificates`);
 const prior = existing.data?.[0];
 if (prior) {
-  const certIds = (prior.relationships?.certificates?.data || []).map(c => c.id);
-  if (prior.attributes.profileState === 'ACTIVE' && certIds.includes(cert.id)) {
-    writeFileSync(outPath, Buffer.from(prior.attributes.profileContent, 'base64'));
-    console.log('PROFILE_OK', prior.attributes.uuid, prior.attributes.name, 'reused');
-    process.exit(0);
-  }
-  console.error(`stale profile ${prior.id} (state=${prior.attributes.profileState}) — deleting`);
+  console.error(`re-minting profile ${prior.id} (state=${prior.attributes.profileState}) from current App ID capabilities`);
   await api(`/v1/profiles/${prior.id}`, { method: 'DELETE' });
 }
 

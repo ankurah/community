@@ -86,6 +86,13 @@
         { "filter": "user = $jwt.sub" }
       ]
     },
+    "pushdevice": {
+      "read": "signed_in",
+      "write": "post",
+      "scope": [
+        { "filter": "user = $jwt.sub" }
+      ]
+    },
     "dmthread": {
       "read": "view",
       "write": "post",
