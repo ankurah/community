@@ -541,7 +541,7 @@ mod tests {
     fn an_environment_that_names_no_apns_credentials_leaves_push_unconfigured() {
         // The case every deployment without Apple credentials is in, and the
         // one that has to be quiet rather than an error: the caller logs one
-        // line and the sender stays dormant while the registry keeps filing
+        // line and the sender stays dormant while the registration collection keeps
         // tokens.
         assert!(matches!(read_from(&vars(&[])), FromEnv::Absent));
         // Set-but-empty is unset. Deployment tooling writes empty strings for

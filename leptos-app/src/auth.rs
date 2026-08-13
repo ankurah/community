@@ -132,7 +132,7 @@ const NATIVE_CALLBACK_SCHEME: &str = "org.ankurah.community";
 const GUEST_MINT_PATH: &str = "/auth/guest";
 
 /// The server's HTTP origin, for our own endpoints (`/auth/guest`,
-/// `/auth/session`, `/push/register`).
+/// `/auth/session`).
 ///
 /// FOR the mobile shell: there the app is served out of the app bundle, so
 /// the page origin (`capacitor://localhost`) names no server at all. The
@@ -807,16 +807,6 @@ pub fn stored_token() -> Option<String> {
 /// the member closes it — which costs them nothing, because the local clear
 /// already happened and the app underneath is already signed out.
 pub fn sign_out() {
-    // FIRST, AND BEFORE ANYTHING IS CLEARED: tell the server to stop ringing
-    // this phone for the account that is leaving it. The request presents the
-    // session being ended, because that subject is what the device is filed
-    // under — so it has to go out while the session is still in hand. Nothing
-    // waits on it and nothing below depends on it: the local sign-out happens
-    // whatever the answer, and a request the reload cuts off leaves a row for
-    // the APNs feedback path to reap (`server/src/push/registry.rs`). Inert on
-    // the web, where no device was ever registered.
-    crate::push::withdraw_this_device();
-
     // The session being ended is this tab's in-memory one — deliberately NOT
     // whatever `LS_TOKEN` holds: that slot is shared across tabs and
     // last-writer-wins, the same clobber the ownership check guards against.
@@ -830,6 +820,11 @@ pub fn sign_out() {
     };
 
     spawn_local(async move {
+        // The local session has already been cleared, but this mounted node's
+        // context still carries the member claims until reload. Commit the
+        // self-scoped PushDevice deactivation before navigating away; a
+        // fire-and-forget write would be cut off by the reload it triggers.
+        crate::push::withdraw_this_device().await;
         let end_session = discovery_end_session_endpoint().await;
         let Some(w) = web_sys::window() else { return };
         let target = match (end_session, id_token) {
@@ -1058,4 +1053,3 @@ struct DiscoveryDoc {
 
 #[cfg(test)]
 mod tests;
-

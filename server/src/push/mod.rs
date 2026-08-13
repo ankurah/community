@@ -14,12 +14,9 @@
 //!
 //! THE PIECES, and the order events move through them:
 //!
-//! - [`registry`] is the door: a member's app posts its device token to
-//!   `POST /push/register`, authenticated with the session token
-//!   `/auth/session` minted.
-//! - [`store`] keeps those tokens in a plain server-side table — NOT an ankurah
-//!   collection, because a device token is a credential and a collection would
-//!   mean a policy entry to get right forever.
+//! - [`store`] reads the self-scoped `PushDevice` entities a member's app
+//!   writes through its ephemeral Ankurah node. Policy limits every client to
+//!   its own account's rows; the server reads them under Root.
 //! - [`apns`] is the far end: a provider token, an HTTP/2 request to Apple, and
 //!   what Apple's answer means for the device it was addressed to.
 //! - `workers::push` is what joins them. It watches the `notification` rows the
@@ -28,8 +25,4 @@
 //!   that is what it is — a standing LiveQuery feeding a supervised consumer.
 
 pub mod apns;
-pub mod registry;
 pub mod store;
-
-pub use registry::PushRegistry;
-pub use store::DeviceTokens;

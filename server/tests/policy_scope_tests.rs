@@ -296,7 +296,7 @@ fn modaction_is_signed_in_readable_and_moderator_writable() {
 /// keyed by those strings. A silent mismatch would leave a collection with no
 /// rules (deny-all) — catch it here.
 ///
-/// All fifteen collections community serves are listed, and that completeness
+/// All sixteen collections community serves are listed, and that completeness
 /// now spans two repositories: eight of these structs are declared in
 /// ankurah-chat-model, where nothing can see policy.json. A rename there would
 /// arrive as a collection this policy has no entry for, which is why the list
@@ -317,11 +317,37 @@ fn model_collection_names_match_policy_keys() {
         community_model::Notification::collection(),
         community_model::LinkPreview::collection(),
         community_model::NotificationPref::collection(),
+        community_model::PushDevice::collection(),
         community_model::DmThread::collection(),
         community_model::DmMessage::collection(),
         community_model::DmReadState::collection(),
     ] {
         assert!(config.collections.contains_key(collection.as_str()), "policy.json has no entry for collection '{}'", collection.as_str());
+    }
+}
+
+#[test]
+fn push_devices_are_private_to_their_owner() {
+    let config = policy();
+    assert_eq!(
+        community_model::PushDevice::collection().as_str(),
+        "pushdevice",
+        "the Ankurah collection must stay deconflicted from the legacy raw `push_device_tokens` table"
+    );
+    let rules = &config.collections["pushdevice"];
+    assert_eq!(rules.read.as_deref(), Some("signed_in"));
+    assert_eq!(rules.write.as_deref(), Some("post"));
+    assert_eq!(rules.scope.len(), 1);
+    assert_eq!(rules.scope[0].filter, "user = $jwt.sub");
+    assert!(rules.scope[0].applies_to.applies_to_reads() && rules.scope[0].applies_to.applies_to_writes());
+
+    let guest = ["guest".to_string()];
+    assert!(!config.can_access_collection(&guest, &"pushdevice".into()));
+    assert!(!config.can_write_collection(&guest, &"pushdevice".into()));
+    for role in ["member", "moderator", "admin"] {
+        let roles = [role.to_string()];
+        assert!(config.can_access_collection(&roles, &"pushdevice".into()), "{role} reaches their own rows through the scope");
+        assert!(config.can_write_collection(&roles, &"pushdevice".into()), "{role} can register their own device through Ankurah");
     }
 }
 

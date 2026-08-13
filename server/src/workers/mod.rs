@@ -1304,7 +1304,7 @@ mod tests {
     /// the state a restarted process is in.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_mention_rings_the_registered_phone_once_and_a_restart_does_not_ring_it_again() {
-        use crate::push::store::{memory::MemoryDeviceTokens, DeviceTokens, Platform};
+        use crate::push::store::{memory::MemoryDeviceTokens, Platform};
         use push::{stub::RecordingApns, Delivery};
 
         const PHONE: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -1317,7 +1317,7 @@ mod tests {
         let room = trx.create(&Room { name: "general".into(), created_by: None, topic: None }).await.unwrap().id();
         trx.commit().await.unwrap();
 
-        // Alice registered her phone, as `POST /push/register` would have.
+        // Alice registered her phone through her self-scoped PushDevice row.
         let tokens = MemoryDeviceTokens::new();
         tokens.register(&recipient.to_base64(), PHONE, Platform::Ios, now_ms()).await.unwrap();
 
