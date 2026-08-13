@@ -87,6 +87,15 @@ const PLATFORM: &str = "ios";
 /// see [`token_prefix`].
 const LS_DEVICE_TOKEN: &str = "community_push_device_token";
 
+/// The last token-free milestone reached by this install's registration.
+///
+/// This is deliberately durable and deliberately boring. A TestFlight WebView
+/// does not expose its Rust console to the server, while iOS can fail between
+/// permission and APNs without putting anything in Ankurah. Keeping one fixed
+/// word in localStorage lets a paired-device diagnostic say which boundary was
+/// crossed without ever reading or recording the APNs token.
+const LS_REGISTRATION_STAGE: &str = "community_push_registration_stage";
+
 /// How much of a device token is safe to write down. The token is the
 /// credential for waking this phone, so a log line names a device by its first
 /// few characters and never by the whole of it — the same cut the server makes
@@ -207,26 +216,37 @@ pub fn watch_taps() {
 /// action. None of them is worth a word to the member: a phone that will not
 /// ring is a phone that does not ring, and the app is otherwise whole.
 pub async fn register_this_device() {
+    mark_registration_stage("checking_permission");
     let permission = match shell::push_permission().await {
         // Nobody has been asked. This is the one place the prompt appears, and
         // by now the member has signed in — see the module header.
-        Some(PushPermission::Undetermined) => shell::request_push_permission().await,
+        Some(PushPermission::Undetermined) => {
+            mark_registration_stage("requesting_permission");
+            shell::request_push_permission().await
+        }
         standing => standing,
     };
     if permission != Some(PushPermission::Granted) {
+        mark_registration_stage("permission_not_granted");
         tracing::info!("push: notifications are not permitted here, so this device is not registered");
         return;
     }
 
+    mark_registration_stage("requesting_apns_token");
     let device_token = match shell::register_for_push().await {
-        Ok(token) => token,
+        Ok(token) => {
+            mark_registration_stage("apns_token_received");
+            token
+        }
         Err(reason) => {
+            mark_registration_stage("apns_registration_failed");
             tracing::warn!("push: APNs issued no device token for this install: {reason}");
             return;
         }
     };
 
     let Some(member) = crate::viewer() else {
+        mark_registration_stage("member_missing");
         tracing::warn!("push: no member session to own this device registration");
         return;
     };
@@ -239,9 +259,15 @@ pub async fn register_this_device() {
             if let Some(ls) = local_storage() {
                 let _ = ls.set_item(LS_DEVICE_TOKEN, &device_token);
             }
+            mark_registration_stage("registered");
             tracing::info!("push: registered this device ({device}…) for notifications");
         }
-        Err(reason) => tracing::warn!("push: could not commit this device ({device}…) through Ankurah: {reason}"),
+        Err(reason) => {
+            // Leave the last in-flight milestone in place: unlike one generic
+            // failure word, `fetching_pushdevice`, `creating_pushdevice`, or
+            // `committing_pushdevice` says which Ankurah operation failed.
+            tracing::warn!("push: could not commit this device ({device}…) through Ankurah: {reason}");
+        }
     }
 }
 
@@ -273,6 +299,15 @@ pub async fn withdraw_this_device() {
 /// This document's localStorage, when there is one.
 fn local_storage() -> Option<web_sys::Storage> { window()?.local_storage().ok().flatten() }
 
+/// Persist one non-sensitive registration milestone for paired-device
+/// diagnostics. The vocabulary above is fixed; callers never put an error,
+/// member id, or device token here.
+fn mark_registration_stage(stage: &'static str) {
+    if let Some(ls) = local_storage() {
+        let _ = ls.set_item(LS_REGISTRATION_STAGE, stage);
+    }
+}
+
 type PushResult<T> = Result<T, Box<dyn std::error::Error>>;
 
 fn device_predicate(member: EntityId) -> PushResult<ankurah::ankql::ast::Predicate> {
@@ -287,7 +322,9 @@ async fn device_rows(member: EntityId) -> PushResult<Vec<PushDeviceView>> {
 /// independently sends only to the newest ten rows, so a custom client cannot
 /// turn one notification into unbounded APNs traffic by omitting this cleanup.
 async fn upsert_device(member: EntityId, device_token: &str) -> PushResult<()> {
+    mark_registration_stage("fetching_pushdevice");
     let rows = device_rows(member).await?;
+    mark_registration_stage("pushdevice_fetched");
     let mut matching: Vec<PushDeviceView> = rows
         .iter()
         .filter(|row| row.token().map(|stored| stored == device_token).unwrap_or(false))
@@ -298,6 +335,7 @@ async fn upsert_device(member: EntityId, device_token: &str) -> PushResult<()> {
     let now = js_sys::Date::now() as i64;
     let trx = crate::ctx().begin();
     if let Some(keeper) = matching.first() {
+        mark_registration_stage("updating_pushdevice");
         let editable = keeper.edit(&trx)?;
         editable.platform().set(&PLATFORM.to_string())?;
         editable.last_registered_at().set(&now)?;
@@ -306,6 +344,7 @@ async fn upsert_device(member: EntityId, device_token: &str) -> PushResult<()> {
             duplicate.edit(&trx)?.active().set(&false)?;
         }
     } else {
+        mark_registration_stage("creating_pushdevice");
         trx.create(&PushDevice {
             user: member.into(),
             token: device_token.to_string(),
@@ -315,6 +354,7 @@ async fn upsert_device(member: EntityId, device_token: &str) -> PushResult<()> {
         })
         .await?;
     }
+    mark_registration_stage("committing_pushdevice");
     trx.commit().await?;
 
     let mut active = Vec::new();
