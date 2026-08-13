@@ -42,6 +42,10 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     /// methods are the hand-off, and without them the page's `register()` call
     /// resolves and then nothing ever arrives.
     func application(_ application: UIApplication, didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
+        // The token itself must never reach a log. This line exists so a
+        // paired-device console can distinguish "APNs answered" from a WebView
+        // promise that is still waiting for the callback.
+        NSLog("Community push: APNs registration succeeded")
         NotificationCenter.default.post(name: .capacitorDidRegisterForRemoteNotifications, object: deviceToken)
     }
 
@@ -49,6 +53,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     /// declining. The page hears it as `registrationError` and stops there —
     /// there is no token to file and nothing to retry until the next launch.
     func application(_ application: UIApplication, didFailToRegisterForRemoteNotificationsWithError error: Error) {
+        NSLog("Community push: APNs registration failed: %@", error.localizedDescription)
         NotificationCenter.default.post(name: .capacitorDidFailToRegisterForRemoteNotifications, object: error)
     }
 

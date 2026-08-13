@@ -210,6 +210,38 @@ jobs:
             CURRENT_PROJECT_VERSION="$BUILD_NUMBER" \
             | tee "$RUNNER_TEMP/xcodebuild-archive.log"
 
+      - name: Export once and verify the signed app's APNs entitlement
+        run: |
+          set -euo pipefail
+          cp "$RUNNER_TEMP/exportOptions.plist" "$RUNNER_TEMP/verifyExportOptions.plist"
+          plutil -replace destination -string export "$RUNNER_TEMP/verifyExportOptions.plist"
+          xcodebuild -exportArchive \
+            -archivePath "$RUNNER_TEMP/App.xcarchive" \
+            -exportPath "$RUNNER_TEMP/verified-export" \
+            -exportOptionsPlist "$RUNNER_TEMP/verifyExportOptions.plist" \
+            | tee "$RUNNER_TEMP/xcodebuild-verify-export.log"
+
+          shopt -s nullglob
+          ipas=("$RUNNER_TEMP/verified-export"/*.ipa)
+          if [ "${#ipas[@]}" -ne 1 ]; then
+            echo "::error::Expected one exported IPA, found ${#ipas[@]}." >&2
+            exit 1
+          fi
+          mkdir "$RUNNER_TEMP/exported-app"
+          ditto -x -k "${ipas[0]}" "$RUNNER_TEMP/exported-app"
+          apps=("$RUNNER_TEMP/exported-app"/Payload/*.app)
+          if [ "${#apps[@]}" -ne 1 ]; then
+            echo "::error::Expected one signed app in the IPA, found ${#apps[@]}." >&2
+            exit 1
+          fi
+          codesign --display --entitlements :- "${apps[0]}" > "$RUNNER_TEMP/signed-entitlements.plist" 2>/dev/null
+          APS_ENV=$(plutil -extract aps-environment raw -o - "$RUNNER_TEMP/signed-entitlements.plist" 2>/dev/null || true)
+          if [ "$APS_ENV" != "production" ]; then
+            echo "::error::Exported app has aps-environment='$APS_ENV'; expected 'production'." >&2
+            exit 1
+          fi
+          echo "Exported signed app has production APNs entitlement"
+
       - name: Export and upload to TestFlight (manual signing)
         env:
           ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
@@ -235,6 +267,7 @@ jobs:
           name: community-ios-xcodebuild-logs-${{ github.run_number }}
           path: |
             ${{ runner.temp }}/xcodebuild-archive.log
+            ${{ runner.temp }}/xcodebuild-verify-export.log
             ${{ runner.temp }}/xcodebuild-export.log
           if-no-files-found: warn
           retention-days: 14
