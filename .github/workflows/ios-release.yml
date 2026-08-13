@@ -8,10 +8,12 @@
 # an App Manager ASC API key cannot mint a distribution cert headless, but it
 # CAN create/delete provisioning PROFILES. So the cert arrives as a secret
 # (ASC_DIST_P12) and the profile is re-minted at build time from the App ID
-# (tools/ci/asc-profile.mjs). The archive is UNSIGNED; signing happens at
-# export. Because the profile is minted from the App ID's current capabilities,
-# it carries Push Notifications automatically — there is no hand-made profile to
-# create in the portal or to regenerate when it expires.
+# (tools/ci/asc-profile.mjs). The archive is signed locally with that certificate
+# and profile before export; keeping the target's entitlements in the archive is
+# what lets the exported executable carry aps-environment. Because the profile
+# is minted from the App ID's current capabilities, it carries Push Notifications
+# automatically — there is no hand-made profile to create in the portal or to
+# regenerate when it expires.
 #
 # Secrets (see ~/ak/community-artifacts/mobile-appstore-setup-for-daniel.md):
 #   ASC_KEY_ID             — App Store Connect API key id (App Manager role)
@@ -193,20 +195,25 @@ jobs:
           PLIST
           echo "Wrote $RUNNER_TEMP/exportOptions.plist"
 
-      - name: Archive (Release, device — unsigned; signing happens at export)
+      - name: Archive (Release, device — distribution signed)
         run: |
           set -euo pipefail
-          # Unsigned archive: no cert or profile is needed until the export step
-          # re-signs. Entitlements (aps-environment) are applied at that signing,
-          # against the API-minted profile that carries the Push capability.
+          # The archive itself must be signed. An unsigned archive can be
+          # exported successfully, but Xcode does not reconstruct the target's
+          # aps-environment entitlement at export; build 107 proved that by
+          # producing an installable app whose profile allowed Push while its
+          # signed executable did not. Sign here with the freshly minted
+          # APNs-enabled distribution profile, then independently inspect the
+          # exported signature in the next step.
           xcodebuild archive \
             -project mobile/ios/App/App.xcodeproj \
             -scheme App -configuration Release \
             -destination 'generic/platform=iOS' \
             -archivePath "$RUNNER_TEMP/App.xcarchive" \
             DEVELOPMENT_TEAM="$DEVELOPMENT_TEAM" \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_STYLE=Manual \
+            CODE_SIGN_IDENTITY="Apple Distribution" \
+            PROVISIONING_PROFILE_SPECIFIER="$PROFILE_NAME" \
             CURRENT_PROJECT_VERSION="$BUILD_NUMBER" \
             | tee "$RUNNER_TEMP/xcodebuild-archive.log"
 
