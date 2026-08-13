@@ -2,7 +2,13 @@
   "appId": "org.ankurah.community",
   "appName": "Ankurah Community",
   "webDir": "www",
+  "ios": {
+    "scrollEnabled": false
+  },
   "plugins": {
+    "Keyboard": {
+      "resize": "native"
+    },
     "PushNotifications": {
       "presentationOptions": []
     }

@@ -138,11 +138,37 @@ jobs:
             --namespace=community \
             --timeout=2m
 
+          # `kubectl wait` can observe the previous Update=True condition while
+          # the controller is still reconciling a newly expanded SecretSync.
+          # Check only for key PRESENCE (never values) before a pod may consume
+          # the Secret. This also covers a first deployment into a new cluster.
+          runtime_secret_ready=false
+          for _ in {1..60}; do
+            if [ "$(kubectl get secret/community-runtime-secrets \
+              --namespace=community \
+              --output=go-template='{{if and (index .data "DATABASE_URL") (index .data "ANKURAH_JWT_SIGNING_KEY") (index .data "CI_HOOK_SECRET") (index .data "APNS_KEY_P8") (index .data "APNS_KEY_ID")}}ready{{end}}')" = ready ]; then
+              runtime_secret_ready=true
+              break
+            fi
+            sleep 2
+          done
+          test "${runtime_secret_ready}" = true
+          runtime_secret_version="$(kubectl get secret/community-runtime-secrets \
+            --namespace=community \
+            --output=jsonpath='{.metadata.resourceVersion}')"
+          test -n "${runtime_secret_version}"
+
           kubectl set image \
             --local \
             --filename=infra/gke/deployment.yaml \
             --output=yaml \
             community-web="${{ steps.image.outputs.name }}@${{ steps.published.outputs.digest }}" \
+            | kubectl patch \
+                --local \
+                --filename=- \
+                --output=yaml \
+                --type=merge \
+                --patch="{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"community.ankurah.org/runtime-secret-version\":\"${runtime_secret_version}\"}}}}}" \
             | kubectl apply -f -
 
           kubectl rollout status deployment/community-web \

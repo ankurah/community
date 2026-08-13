@@ -113,8 +113,8 @@
 
 /* iOS zooms a focused form control whose computed text is smaller than 16px.
  * The chat component's mobile rule uses 14px, so focusing the composer zoomed
- * and panned the whole WebView: the right-hand messages appeared clipped and
- * the app header moved above the visible viewport with the keyboard open.
+ * the page and clipped its right edge. The native shell separately resizes and
+ * pins its outer WebView for the keyboard; this rule only prevents that zoom.
  * The extra host class keeps this override ahead of the component stylesheet,
  * which is injected after this file. */
 @media (max-width: 768px) {
