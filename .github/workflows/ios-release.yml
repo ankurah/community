@@ -45,6 +45,10 @@ jobs:
       DEVELOPMENT_TEAM: N893VNX4ZP
       BUNDLE_ID: org.ankurah.community
       PROFILE_NAME: community-appstore
+      # wasm-bindgen 0.2.105 emits duplicate JavaScript declarations from the
+      # symbol names produced by Rust 1.97.1. Keep the compiler paired to the
+      # known-good version until the app can move the wasm-bindgen family.
+      RUSTUP_TOOLCHAIN: 1.95.0
     steps:
       - uses: actions/checkout@v4
 
@@ -66,7 +70,9 @@ jobs:
           echo "Build number: ${BUILD_NUMBER}"
 
       - name: Rust toolchain (wasm)
-        run: rustup target add wasm32-unknown-unknown
+        run: |
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --target wasm32-unknown-unknown
+          rustc --version
 
       - name: Install trunk
         uses: taiki-e/install-action@v2
@@ -83,6 +89,20 @@ jobs:
         run: |
           cd leptos-app
           BACKEND_WS_URL=wss://community.ankurah.org trunk build --release
+
+      - name: Verify generated JavaScript module syntax
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          modules=(leptos-app/dist/leptos-app-*.js)
+          if [ "${#modules[@]}" -ne 1 ]; then
+            echo "::error::Expected one generated app module, found ${#modules[@]}."
+            exit 1
+          fi
+          # Parse as an ES module, matching Trunk's <script type="module">.
+          # Plain `node --check file.js` parses CommonJS and permits duplicate
+          # function declarations that WebKit correctly rejects here.
+          node --input-type=module --check < "${modules[0]}"
 
       - name: Stage assets and sync the iOS project
         run: |
