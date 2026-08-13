@@ -126,6 +126,15 @@ jobs:
 
       - name: Apply runtime resources
         run: |
+          runtime_secret_generation_before="$(kubectl get \
+            secretsync.secret-sync.gke.io/community-runtime-secrets \
+            --namespace=community \
+            --output=jsonpath='{.metadata.generation}' 2>/dev/null || true)"
+          runtime_secret_sync_before="$(kubectl get \
+            secretsync.secret-sync.gke.io/community-runtime-secrets \
+            --namespace=community \
+            --output=jsonpath='{.status.lastSuccessfulSyncTime}' 2>/dev/null || true)"
+
           kubectl apply -f infra/gke/network-policy.yaml
           kubectl apply -f infra/gke/service-account.yaml
           kubectl apply -f infra/gke/secret-sync-service-account.yaml
@@ -138,25 +147,39 @@ jobs:
             --namespace=community \
             --timeout=2m
 
-          # `kubectl wait` can observe the previous Update=True condition while
-          # the controller is still reconciling a newly expanded SecretSync.
-          # Check only for key PRESENCE (never values) before a pod may consume
-          # the Secret. This also covers a first deployment into a new cluster.
-          runtime_secret_ready=false
-          for _ in {1..60}; do
-            if [ "$(kubectl get secret/community-runtime-secrets \
-              --namespace=community \
-              --output=go-template='{{if and (index .data "DATABASE_URL") (index .data "ANKURAH_JWT_SIGNING_KEY") (index .data "CI_HOOK_SECRET") (index .data "APNS_KEY_P8") (index .data "APNS_KEY_ID")}}ready{{end}}')" = ready ]; then
-              runtime_secret_ready=true
-              break
-            fi
-            sleep 2
-          done
-          test "${runtime_secret_ready}" = true
-          runtime_secret_version="$(kubectl get secret/community-runtime-secrets \
+          runtime_secret_generation="$(kubectl get \
+            secretsync.secret-sync.gke.io/community-runtime-secrets \
             --namespace=community \
-            --output=jsonpath='{.metadata.resourceVersion}')"
-          test -n "${runtime_secret_version}"
+            --output=jsonpath='{.metadata.generation}')"
+          test -n "${runtime_secret_generation}"
+
+          # `kubectl wait` can observe the previous Update=True condition while
+          # the controller is still reconciling a changed SecretSync. If this
+          # apply advanced the spec generation, also require a NEW successful
+          # sync before a pod may consume it. Status is deliberately used here:
+          # the deploy identity must not receive permission to read Secrets.
+          if [ "${runtime_secret_generation}" != "${runtime_secret_generation_before}" ]; then
+            runtime_secret_ready=false
+            for _ in {1..60}; do
+              runtime_secret_sync="$(kubectl get \
+                secretsync.secret-sync.gke.io/community-runtime-secrets \
+                --namespace=community \
+                --output=jsonpath='{.status.lastSuccessfulSyncTime}')"
+              if [ -n "${runtime_secret_sync}" ] && [ "${runtime_secret_sync}" != "${runtime_secret_sync_before}" ]; then
+                runtime_secret_ready=true
+                break
+              fi
+              sleep 2
+            done
+            test "${runtime_secret_ready}" = true
+          fi
+
+          runtime_secret_hash="$(kubectl get \
+            secretsync.secret-sync.gke.io/community-runtime-secrets \
+            --namespace=community \
+            --output=jsonpath='{.status.syncHash}')"
+          test -n "${runtime_secret_hash}"
+          runtime_secret_version="${runtime_secret_generation}-${runtime_secret_hash}"
 
           kubectl set image \
             --local \
