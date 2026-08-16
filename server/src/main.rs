@@ -43,7 +43,19 @@ type Storage = SledStorageEngine;
 type Storage = Postgres;
 
 #[cfg(all(feature = "sled", not(feature = "postgres")))]
-async fn make_storage() -> Result<Storage> { SledStorageEngine::with_homedir_folder(".community") }
+async fn make_storage() -> Result<Storage> {
+    // COMMUNITY_DATA_DIR points the sled node at an explicit directory. FOR:
+    // the e2e harness — its runs must neither read a developer's real
+    // `~/.community` (stale rows there make the link-unfurl worker fetch
+    // external URLs at boot, from the server, where no test routing can
+    // intercept) nor collide with a dev session's node (sled holds an
+    // exclusive lock per path, so one path means one process). Absent, the
+    // homedir folder stays the default for dev.sh and direct runs.
+    match std::env::var("COMMUNITY_DATA_DIR") {
+        Ok(dir) if !dir.is_empty() => SledStorageEngine::with_path(std::path::PathBuf::from(dir)),
+        _ => SledStorageEngine::with_homedir_folder(".community"),
+    }
+}
 
 #[cfg(feature = "postgres")]
 async fn make_storage() -> Result<Storage> {

@@ -17,10 +17,10 @@ leptos-app/dist/
 /.cargo/*
 !/.cargo/audit.toml
 
-# e2e (Playwright)
+# e2e (Playwright). The lockfile is COMMITTED on purpose: the e2e job gates
+# production deploys, so the browser tooling it runs must not float.
 e2e/node_modules/
 e2e/test-results/
-e2e/package-lock.json
 
 # Dev runner (local, per-checkout state)
 .dev-ports
@@ -53,3 +53,10 @@ yarn-error.log*
 *.p8
 signing-key*
 leptos-app/Trunk.dev.toml
+# The same rendered proxy table, written by e2e/playwright.config.ts for a test
+# run rather than by dev.sh for a dev session (port-named: concurrent runs must
+# not clobber each other's).
+leptos-app/Trunk.e2e.*.toml
+
+# The pre-rename generated file: briefly committed by accident, never generated again.
+leptos-app/Trunk.e2e.toml
